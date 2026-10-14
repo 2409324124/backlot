@@ -70,6 +70,26 @@ def _org_domain(info) -> str:
 # --- pagination -------------------------------------------------------------------
 
 
+def _reject_sort_with_order_by(sort, order_by) -> None:
+    """Linear refuses ``sort`` beside ``orderBy`` on ``issues`` and ``users``: a 200 with
+    ``data: null`` and ``Cannot use both sort and orderBy options`` (code ``INPUT_ERROR``),
+    measured on api.linear.app 2026-10-04. Sending the argument is what counts, so ``sort: []``
+    is refused and an explicit ``null`` is absent. The arguments are validated before the pair:
+    ``first`` with ``last`` and a malformed filter id each answered ``Argument Validation Error``
+    beside it, so ``_issue_page`` and ``resolve_users`` call this after ``_slice``, and
+    ``_issue_page`` after compiling the filter too."""
+    if sort is not None and order_by is not None:
+        raise GraphQLError(
+            "Cannot use both sort and orderBy options",
+            extensions={
+                "type": "invalid input",
+                "code": "INPUT_ERROR",
+                "statusCode": 400,
+                "userError": True,
+            },
+        )
+
+
 def _slice(first, after, last, before) -> tuple[int | None, int, int]:
     """Relay ``first``/``after`` (forward) or ``last``/``before`` (backward) ->
     ``(offset, limit, floor)``.
@@ -662,9 +682,9 @@ def resolve_team_issue_count(team, info) -> int:
 
 
 def _team(container: str, info) -> dict:
-    """A ``Team``. 43 of its fields are non-null in the SDK's fragment; the ones Backlot cannot
-    know take Linear's own product defaults (cycles off, 2-week duration, estimate scale
-    ``notUsed``) rather than zero values that would read as configured."""
+    """A ``Team``. 43 of its fields are non-null in the SDK's fragment, and so is ``__typename``;
+    the ones Backlot cannot know take Linear's own product defaults (cycles off, 2-week duration,
+    estimate scale ``notUsed``) rather than zero values that would read as configured."""
     key = _team_key(container, info)
     created = synth.rfc3339(synth.epoch("linear-team:" + container))
     return {
@@ -714,6 +734,13 @@ def _team(container: str, info) -> dict:
         "slackIssueStatuses": False,
         "scimManaged": False,
         "scimGroupName": None,
+        # A real team answers its own member `false` (measured 2026-10-08), and Backlot serves no
+        # team membership: `Team.members`, `membership`, `memberships` and `viewerMembership` are
+        # gaps. What a real team answers a non-member is unmeasured, as the workspace measured has
+        # one team with the key's user in it and a second would be a write; the field's own
+        # description says it "Runs the same checks `teamMembershipCreate` applies", and this server
+        # declares no `Mutation` type.
+        "viewerCanJoin": False,
         "icon": None,
         "color": None,
         "description": None,
@@ -947,6 +974,7 @@ def _issue_page(
     conn, visible = ctx["conn"], ctx["visible_ids"]
     offset, limit, floor = _slice(first, after, last, before)
     prefilter = compile_issue_filter(conn, _resolve_issue_ids(info, filter), _team_keys(info))
+    _reject_sort_with_order_by(sort, orderBy)
     if offset is None:
         # `last:` with no `before:` is the only shape that needs a total, so the COUNT is paid
         # here and not on every page.
@@ -1091,10 +1119,20 @@ def _sorted_users(users: list[dict], sort) -> list[dict]:
 
 
 def resolve_users(
-    _root, info, first=None, after=None, last=None, before=None, filter=None, sort=None, **_ignored
+    _root,
+    info,
+    first=None,
+    after=None,
+    last=None,
+    before=None,
+    filter=None,
+    orderBy=None,
+    sort=None,
+    **_ignored,
 ) -> dict:
     ctx = _ctx(info)
     offset, limit, floor = _slice(first, after, last, before)
+    _reject_sort_with_order_by(sort, orderBy)
     users = _sorted_users(
         [
             _user(r["email"], r["display_name"], info)

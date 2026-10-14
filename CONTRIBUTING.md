@@ -56,6 +56,7 @@ Two words, and they are not interchangeable:
 pytest                    # unit + HTTP endpoint tests; needs no data and no network
 pytest -rs                # the same, and it names every test that skipped, with the reason
 ruff check . && ruff format --check .    # both gate CI; ruff comes from the `dev` extra
+python scripts/prose_check.py   # issue numbers and re-dated measurements in new comments
 ```
 
 Everything that runs on a `dev` install must pass for every change, and it needs no data and no
@@ -74,7 +75,7 @@ file with them:
 | `.[mirage]` | the shim tests in `tests/test_integrations.py` |
 | `.[fsspec]` — `fsspec` and `gdrive-fsspec` | the Google Drive and GitHub filesystem tests in `tests/test_integrations.py` |
 | Docker, `npx`, `uvx` | one `tests/test_mcp.py` test each — the Atlassian, Notion and AWS MCP servers |
-| `git` | the tests in `tests/test_github.py` that build a real repo |
+| `git` | the tests in `tests/test_github.py` that build a real repo, and the one in `tests/test_prose_check.py` |
 
 Install with `uv sync --all-extras --locked` — the same command CI runs, and the one to use rather
 than pip, whose resolver cannot solve this dependency graph. It installs every extra above, so
@@ -90,7 +91,8 @@ uv pip install --no-deps "llama-index-readers-hubspot<0.6"
 (`.[all]` names the same set for anyone installing Backlot from PyPI rather than a checkout.)
 
 CI runs the suite, ruff, and the Linear example on every push to `main` and every pull request
-(see `.github/workflows/ci.yml`).
+(see `.github/workflows/ci.yml`). On a pull request it also runs `scripts/prose_check.py`, whose
+findings show as warnings on the lines they name and do not fail the run.
 
 ### Testing the agent skill
 
@@ -112,9 +114,23 @@ the marketplace when you are done — uninstalling leaves the cache directory be
 1. Fork and create a topic branch off `main`.
 2. Keep changes focused; one logical change per PR.
 3. Add or update tests — a bug fix should come with a test that fails without it.
-4. Make sure `pytest` passes locally before opening the PR.
-5. Fill in the pull request template: what changed, the measurement that says it is right, and
-   the test output — describing the finished state rather than the rounds of work behind it.
+4. Make sure `pytest` and `ruff check . && ruff format --check .` pass locally before opening the
+   PR, since CI's first run on your first pull request waits for a maintainer to approve it.
+5. Title the PR with one sentence saying what Backlot does once it is merged. A PR that closes a
+   `fidelity` issue starts with that issue's `<source>:` prefix, as in
+   `gmail: threads.get rejects a reply's message id instead of serving a one-message thread`. The
+   issue number goes in the description as `Closes #N`, and the title takes no `fix:`-style prefix.
+6. Fill in the pull request template: its three headings and three checkboxes, with what changed,
+   the measurement that says it is right, and the test output — describing the finished state rather
+   than the rounds of work behind it. `gh pr create --body` does not load the template, so start the
+   description from [`.github/pull_request_template.md`](.github/pull_request_template.md).
+7. Until one of your PRs here is merged, have one open at a time, a draft included; after that, up
+   to three. Each open PR takes the issue it closes and waits on the same reviewers as the others.
+   Open it ready for review: drafts are not reviewed, and a draft left for seven days is closed.
+
+A PR opened past the limit in 7 is closed, and so is one that closes an issue an open PR opened
+before it already closes. A title or description that does not follow 5 and 6 does not hold up the
+review: a maintainer points it out and may correct the title when merging.
 
 A Claude Code routine also opens pull requests here, for issues a maintainer labels `agent`. How to
 drive it, stop it and recreate it is in [`docs/loop.md`](docs/loop.md).

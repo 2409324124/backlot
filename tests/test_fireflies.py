@@ -255,6 +255,10 @@ def test_fireflies_date_selects_a_day_and_the_singular_email_filters_narrow(clie
     # 2026-04-10T16:00:00Z, the all-hands meeting: its own instant, and midnight that day
     assert titles("date: 1775836800000") == {"April all-hands"}
     assert titles("date: 1775779200000") == {"April all-hands"}
+    # the millisecond before that midnight is the day before, and the instant in seconds is read
+    # as milliseconds, a day in January 1970
+    assert titles("date: 1775779199999") == set()
+    assert titles("date: 1775836800") == set()
     # the discovery call is a different day, so it is not in either answer
     assert titles("date: 1775142000000") == {"Acme x Northwind — latency discovery"}
     # a day no meeting falls on
@@ -262,8 +266,14 @@ def test_fireflies_date_selects_a_day_and_the_singular_email_filters_narrow(clie
     # `date` narrows AGAINST a range rather than replacing it: a toDate before that day wins
     assert titles("date: 1775836800000, toDate: 1775142000000") == set()
 
+    assert titles('host_email: "ava@acme.com"') == {"Acme x Northwind — latency discovery"}
     assert titles('organizer_email: "ava@acme.com"') == {"Acme x Northwind — latency discovery"}
     assert titles('participant_email: "ava@acme.com"') == {"Acme x Northwind — latency discovery"}
+    # upper-cased, the host and organizer addresses find nothing while the participant address
+    # still matches, as measured above those two filters in `store._fireflies_where`
+    assert titles('host_email: "AVA@ACME.COM"') == set()
+    assert titles('organizer_email: "AVA@ACME.COM"') == set()
+    assert titles('participant_email: "AVA@ACME.COM"') == {"Acme x Northwind — latency discovery"}
     # `participants` is who the SENTENCES attribute, so a guest-list-only attendee is not one
     assert titles('participant_email: "dana@northwind.example"') == set()
     assert titles('participant_email: "nobody@acme.com"') == set()

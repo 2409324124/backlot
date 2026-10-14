@@ -64,11 +64,12 @@ sees least. Nothing about the request changes but the identity.
 
 | Service | Header |
 |---|---|
-| Slack, Gmail, Google Drive/Docs/Sheets/Slides, Notion, HubSpot, Fireflies | `Authorization: Bearer <token>` |
+| Slack, Notion, HubSpot, Fireflies | `Authorization: Bearer <token>` |
+| Gmail, Google Drive/Docs/Sheets/Slides | `Authorization: Bearer <token>`, or `OAuth <token>` |
 | GitHub | `Authorization: Bearer <token>`, or the legacy `token <token>` |
 | Jira, Confluence | HTTP Basic with the token as the **password**, or a plain `Bearer` |
 | Linear | A **bare** `Authorization: <token>`, or `Bearer` |
-| Amazon S3 | AWS SigV4, signed with the identity's key pair |
+| Amazon S3 | AWS SigV4, SigV4a or Signature Version 2, signed with the identity's key pair |
 | A Google client with a config | Exchange it at `POST /oauth2/token` — see the Google section |
 
 ### Slack — `Bearer`
@@ -114,7 +115,10 @@ curl -s "localhost:8000/drive/v3/files?fields=files(id,name)" \
   -H "Authorization: Bearer usr-29b84da5703116c2a832"
 ```
 
-`me` works as the mailbox id, resolving to whoever the token is.
+How the header is read, spelling by spelling, is in
+[supported-sources.md](supported-sources.md#google-drive-docs-sheets-slides--drivev3-docsv1-sheetsv4-slidesv1).
+`me` works as the mailbox id, in any case, resolving to whoever the token is; a user's token reads
+no other mailbox, and the admin token reads any.
 
 #### A client carrying a config, not a token — `POST /oauth2/token`
 
@@ -218,6 +222,11 @@ curl -s "localhost:8000/hubspot/crm/v3/objects/contacts" \
   -H "Authorization: Bearer usr-29b84da5703116c2a832"
 ```
 
+Spelt exactly that way. The real API reads the scheme case-sensitively and wants one space after
+it, so `bearer <token>`, `BEARER <token>`, `token <token>` and `Bearer  <token>` are refused with a
+`401` of category `INVALID_AUTHENTICATION`, there and here. Space or tab around the whole header
+value is ignored by both.
+
 ### Linear — bare, or `Bearer`
 
 Linear's personal API keys go in the header with **no scheme**, and Backlot accepts that spelling
@@ -242,8 +251,8 @@ curl -s localhost:8000/fireflies/graphql \
 ### Amazon S3 — SigV4
 
 S3 does not take a bearer token. Each identity carries an `s3_access_key_id` /
-`s3_secret_access_key` pair, derived from that identity's token — which is what Backlot's SigV4
-verifier resolves back to a user — so hand them to any AWS client:
+`s3_secret_access_key` pair, derived from that identity's token — which is what Backlot's verifier
+resolves back to a user — so hand them to any AWS client:
 
 ```python
 import boto3, httpx
@@ -257,11 +266,23 @@ s3 = boto3.client(
     endpoint_url="http://localhost:8000/s3",
     aws_access_key_id=ava["s3_access_key_id"],
     aws_secret_access_key=ava["s3_secret_access_key"],
-    region_name="us-east-1",                       # any region; it is read back out of the scope
+    region_name="us-east-1",                       # the region Backlot presents; others are refused
     config=Config(signature_version="s3v4", s3={"addressing_style": "path"}),
 )
 print([b["Name"] for b in s3.list_buckets()["Buckets"]])
 ```
+
+**An unsigned request is an anonymous caller's**, as on real S3, and reads nothing; what it and a
+refused credential get is in [supported-sources.md](supported-sources.md#amazon-s3--s3).
+
+**Signature Version 2 is verified too**, in the header and in the query, since real S3 still
+verifies it; botocore signs that way with `Config(signature_version="s3")`, though its signature for
+a bucket's own operations is the mismatch real answers it with. The two refuse differently and each
+refuses as real does.
+
+**So is SigV4a** (`AWS4-ECDSA-P256-SHA256`), in the header and in the query, with the key botocore's
+CRT signer derives from the same secret: install `awscrt` and pass
+`Config(signature_version="s3v4a")`. The region set it signs has to name `us-east-1`.
 
 **Path addressing is not optional.** Backlot serves `/s3/{bucket}/{key}`, so virtual-hosted
 addressing — which puts the bucket in the host, `acme-artifacts.localhost:8000` — reaches nothing.

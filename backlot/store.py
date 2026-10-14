@@ -330,8 +330,10 @@ CREATE INDEX IF NOT EXISTS idx_slack_channel_author ON slack_messages(channel, a
 -- 2**63, so a collision is vanishingly unlikely, and as the PRIMARY KEY one fails the import
 -- loudly rather than silently replacing the earlier message.
 --
--- `thread_id` is another message's `id` (the thread root's), not a dataset identifier: it is
--- resolved at import along with every other cross-row reference.
+-- `thread_id` is the thread's served id, not a dataset identifier: `synth.gmail_message_id` over
+-- the record's `thread`, else its doc_id, computed at import. It is the `id` of the message whose
+-- dataset id is that key (by default, the root); with no such message, it is an id no message
+-- holds.
 CREATE TABLE IF NOT EXISTS gmail_messages (
     id TEXT PRIMARY KEY, mailbox TEXT NOT NULL, author_email TEXT NOT NULL,
     title TEXT NOT NULL, content TEXT NOT NULL,
@@ -472,13 +474,15 @@ DROP INDEX IF EXISTS idx_github_served;
 -- `parent_id` holds the PARENT'S KEY, the same value this table is keyed on -- a subtask points at
 -- a served id, never at a dataset identifier. It keeps the generic name because
 -- :func:`children` reads it uniformly across jira, confluence and notion.
+-- numeric_id is assigned after keys settle at import: NULL only in that transaction.
+-- TEXT keeps leading zeroes distinct at lookup; UNIQUE prevents two issues sharing an id.
 CREATE TABLE IF NOT EXISTS jira_issues (
     key TEXT PRIMARY KEY, project TEXT NOT NULL, author_email TEXT NOT NULL,
     title TEXT NOT NULL, content TEXT NOT NULL,
     status TEXT, issuetype TEXT, priority TEXT, labels TEXT, components TEXT,
     issuelinks TEXT, parent_id TEXT, changelog TEXT, created_ts INTEGER NOT NULL, updated_ts INTEGER,
     assignee_email TEXT, reporter_email TEXT, resolution TEXT, resolution_ts INTEGER,
-    duedate TEXT, fix_versions TEXT, owner_display TEXT
+    duedate TEXT, fix_versions TEXT, owner_display TEXT, numeric_id TEXT UNIQUE
 );
 CREATE INDEX IF NOT EXISTS idx_jira_project ON jira_issues(project);
 CREATE INDEX IF NOT EXISTS idx_jira_parent ON jira_issues(parent_id);
@@ -1146,10 +1150,13 @@ def list_documents(
     state=None,
     not_author_email=None,
     exclude_trashed=False,
+    title=None,
+    subtype=None,
 ) -> list[sqlite3.Row]:
     # state: only valid for source_type="github" — it's the only items table with a `state`
     # column; passing it for any other source_type raises sqlite3.OperationalError. Likewise
-    # exclude_trashed, which only gdrive_files has a column for.
+    # exclude_trashed, which only gdrive_files has a column for. title matches the whole title,
+    # ignoring ASCII case. subtype is Confluence's content type, where a row with none is a page.
     tbl = table(source_type)
     sql = f"SELECT * FROM {tbl} WHERE 1=1"
     params: list = []
@@ -1159,6 +1166,12 @@ def list_documents(
         params.append(state)
     if exclude_trashed:
         sql += " AND COALESCE(trashed, 0) = 0"
+    if title is not None:
+        sql += " AND title = ? COLLATE NOCASE"
+        params.append(title)
+    if subtype is not None:
+        sql += " AND COALESCE(subtype, 'page') = ?"
+        params.append(subtype)
     clause, cparams = _acl_clause(source_type, visible_ids=visible_ids)
     sql += clause + f" ORDER BY {_order_by(source_type)} LIMIT ? OFFSET ?"
     params += cparams + [limit, offset]
@@ -1322,12 +1335,12 @@ def list_hubspot_objects(
 # GraphQL `orderBy` value -> the column it sorts on.
 #
 # Linear's pagination docs state "By default results are ordered by createdAt field", and its
-# `PaginationOrderBy` enum carries a FIELD ONLY — no direction — so the server fixes the
-# direction and a client that wants the other one uses the richer `sort:` input instead.
-# The direction is not documented; ASCENDING is the choice here because it is the only one that
-# makes an `after` cursor stable: with newest-first, creating an issue shifts every existing
-# offset by one and a mid-crawl cursor silently re-reads a row. `id` breaks ties into a
-# total order either way, which offset paging requires.
+# `PaginationOrderBy` enum carries a FIELD ONLY — no direction — so the server fixes the direction
+# and a client that wants the other one uses the richer `sort:` input instead. The direction is
+# newest first, measured against api.linear.app on 2026-10-05 over eight issues whose `updatedAt`
+# order differs from their `createdAt` order: `issues` and `Team.issues` with no `orderBy` and with
+# `orderBy: createdAt` came in descending `createdAt`, and with `orderBy: updatedAt` in descending
+# `updatedAt`. `id` breaks ties into a total order, which offset paging requires.
 LINEAR_DEFAULT_ORDER_BY = "createdAt"
 
 # `Issue.updatedAt` is non-null in Linear; an issue with no recorded edit reports its creation
@@ -1356,10 +1369,12 @@ LINEAR_SORT_COLUMNS = {
 }
 
 
-def _linear_order(order_by: str | None, descending: bool, sort=None) -> str:
+def _linear_order(order_by: str | None, sort=None) -> str:
     """The ORDER BY, always TOTAL (sort keys + ``id``) — an offset page over a non-total order
-    can silently repeat or skip a row between pages. ``sort`` (Linear's ``IssueSortInput``) wins over
-    ``orderBy`` when both are given, matching the real API, where it is the richer multi-key form."""
+    can silently repeat or skip a row between pages. ``sort`` (Linear's ``IssueSortInput``) decides
+    the order when it names a key in ``LINEAR_SORT_COLUMNS``; the resolver refuses it beside
+    ``orderBy``, as the real API does (``_reject_sort_with_order_by`` in
+    ``backlot.graphql.linear_resolvers``)."""
     terms = []
     for entry in sort or []:
         for key, opts in (entry or {}).items():
@@ -1373,12 +1388,10 @@ def _linear_order(order_by: str | None, descending: bool, sort=None) -> str:
     if terms:
         return ", ".join(terms) + ", id"
     # An ABSENT orderBy is not "unordered": Linear documents createdAt as the default, so falling
-    # through to raw insertion order (`id`) was a real divergence — `issues(first: 10)`
-    # returned an arbitrary ten rather than the first ten by creation.
+    # through to raw insertion order (`id`) would answer `issues(first: 10)` with an arbitrary ten
+    # rather than the ten created last, newest first (see `LINEAR_DEFAULT_ORDER_BY`).
     col = LINEAR_ORDER_COLUMNS[order_by or LINEAR_DEFAULT_ORDER_BY]
-    direction = "DESC" if descending else "ASC"
-    # NULL updated_ts sorts last on DESC, which is where an issue with no recorded edit belongs.
-    return f"{col} {direction}, id"
+    return f"{col} DESC, id"
 
 
 def _linear_archived(archived: bool) -> str:
@@ -1396,7 +1409,6 @@ def list_linear_issues(
     limit=50,
     offset=0,
     order_by=None,
-    descending=False,
     prefilter=None,
     sort=None,
     archived=False,
@@ -1415,7 +1427,7 @@ def list_linear_issues(
         params += fparams
     sql += _linear_archived(archived)
     clause, cparams = _acl_clause("linear", visible_ids=visible_ids)
-    sql += clause + f" ORDER BY {_linear_order(order_by, descending, sort)} LIMIT ? OFFSET ?"
+    sql += clause + f" ORDER BY {_linear_order(order_by, sort)} LIMIT ? OFFSET ?"
     params += cparams + [limit, offset]
     return conn.execute(sql, params).fetchall()
 
@@ -1785,9 +1797,16 @@ def hubspot_associations(
 
     No join to ``hubspot_objects``: ``to_id`` IS the served id the v4 payload's ``toObjectId``
     reports, so it is read straight off this row. Recomputing it from a hash would not do —
-    hubspot's id is PROBED, so the raw hash can disagree with what the target resolves at."""
-    sql = "SELECT * FROM hubspot_associations WHERE from_id = ? AND to_type = ?"
-    params: list = [from_id, to_type]
+    hubspot's id is PROBED, so the raw hash can disagree with what the target resolves at.
+
+    ``to_type`` may be several spellings of one type, as for ``list_hubspot_objects``: the corpus
+    states the target's type in whichever spelling it likes."""
+    types = [to_type] if isinstance(to_type, str) else list(to_type)
+    sql = (
+        "SELECT * FROM hubspot_associations WHERE from_id = ? "
+        f"AND to_type IN ({','.join('?' * len(types))})"
+    )
+    params: list = [from_id, *types]
     if after_to_id:
         sql += " AND to_id > ?"
         params.append(after_to_id)
@@ -1970,6 +1989,8 @@ def count_documents(
     state=None,
     exclude_trashed=False,
     roots_only=False,
+    title=None,
+    subtype=None,
 ) -> int:
     # state: only valid for source_type="github" — it's the only items table with a `state`
     # column; passing it for any other source_type raises sqlite3.OperationalError. Likewise
@@ -1987,6 +2008,12 @@ def count_documents(
         sql += " AND COALESCE(trashed, 0) = 0"
     if roots_only:
         sql += _GMAIL_ROOT
+    if title is not None:
+        sql += " AND title = ? COLLATE NOCASE"
+        params.append(title)
+    if subtype is not None:
+        sql += " AND COALESCE(subtype, 'page') = ?"
+        params.append(subtype)
     clause, cparams = _acl_clause(source_type, visible_ids=visible_ids)
     sql += clause
     params += cparams
@@ -2046,16 +2073,23 @@ def _fireflies_where(
     if channel is not None:
         sql += " AND channel = ?"
         params.append(channel)
+    # `host_email` and `organizers` match an address as written, not case-folded. Measured against
+    # api.fireflies.ai on 2026-10-10 over a workspace whose owner organized both of its meetings,
+    # which serve `host_email: null`: the owner's address as served found both under `host_email`
+    # and `organizer_email`, and none came back with all of it, its local part, its domain or only
+    # its first letter upper-cased, while `participant_email` folds case. That workspace's organizer
+    # and participant addresses are all lower-case, so these requests cannot tell an exact match
+    # from one that folds the stored side alone.
     if host_email:
-        sql += " AND lower(author_email) = ?"
-        params.append(host_email.lower())
+        sql += " AND author_email = ?"
+        params.append(host_email)
     if organizers:
         # `organizer_email` is null when the organizer IS the host, which is the common case, so
         # the filter has to consider both — otherwise organizing a meeting you also hosted would
         # not match your own address.
         marks = ", ".join("?" for _ in organizers)
-        sql += f" AND lower(COALESCE(organizer_email, author_email)) IN ({marks})"
-        params += [o.lower() for o in organizers]
+        sql += f" AND COALESCE(organizer_email, author_email) IN ({marks})"
+        params += list(organizers)
     for email in participants or []:
         # `participants` is a JSON array column; json_each is the exact membership test (a LIKE on
         # the serialized text would match an address that is merely a substring of another).
@@ -2703,6 +2737,13 @@ def gmail_thread(conn, thread_id, visible_ids=None) -> list[sqlite3.Row]:
     return conn.execute(sql, params).fetchall()
 
 
+def gmail_rows_with_attachments(conn, visible_ids=None) -> list[sqlite3.Row]:
+    """Every Gmail message the caller can see that holds at least one attachment."""
+    sql = "SELECT * FROM gmail_messages WHERE COALESCE(attachments, '') NOT IN ('', '[]')"
+    clause, cp = _acl_clause("gmail", visible_ids=visible_ids)
+    return conn.execute(sql + clause, cp).fetchall()
+
+
 def gmail_by_id(conn, message_id, visible_ids=None) -> sqlite3.Row | None:
     """One message by the id the API reports. The stored key is unpadded lowercase hex; callers
     pass the id as the client spelled it, so both the case and any leading zeros are normalized
@@ -2733,6 +2774,10 @@ def github_by_number(conn, repo, number, visible_ids=None) -> sqlite3.Row | None
     can be primary (see the schema) — so this CAN return a file row, and the caller must reject
     one. `routers.github._issue_row` is where that happens; a file is addressed by (repo, path)
     and its number is never served."""
+    # Real answers a number outside 64 bits with the 404 an unknown number gets (api.github.com,
+    # 2026-10-10). SQLite holds no such number, and sqlite3 raises OverflowError binding one.
+    if not -(2**63) <= number < 2**63:
+        return None
     clause, cp = _acl_clause("github", visible_ids=visible_ids)
     return conn.execute(
         f"SELECT * FROM github_items WHERE repo = ? AND number = ?{clause}",
@@ -2806,6 +2851,18 @@ def jira_by_key(conn, key, visible_ids=None) -> sqlite3.Row | None:
     return conn.execute(f"SELECT * FROM jira_issues WHERE key = ?{clause}", [key, *cp]).fetchone()
 
 
+def jira_by_numeric_id(conn, issue_id: str, visible_ids=None) -> sqlite3.Row | None:
+    """One issue by its reported numeric id, matched as spelled. Measured on Jira Cloud
+    (2026-10-04): `issue/{id}` and `issue/{id}/comment` answer on v2 and v3 what the key answers,
+    and the id with `0` or `00` in front is a 404. The importer assigns unique ids, and TEXT
+    comparison preserves exact spelling.
+    """
+    clause, cp = _acl_clause("jira", visible_ids=visible_ids)
+    return conn.execute(
+        f"SELECT * FROM jira_issues WHERE numeric_id = ?{clause}", [issue_id, *cp]
+    ).fetchone()
+
+
 def _file_head_clause(visible_ids=None, tbl: str = "t") -> tuple[str, list]:
     """SQL restricting `tbl` to the HEAD of its `(repo, path)` — no snapshot the caller can also
     see is newer.
@@ -2877,6 +2934,8 @@ def get_github_comment(conn, comment_id: int) -> sqlite3.Row | None:
     A PRIMARY KEY lookup: the id is assigned at import (see :mod:`backlot.importer.byo`), so it
     cannot be ambiguous.
     """
+    if not -(2**63) <= comment_id < 2**63:  # a miss, as in github_by_number
+        return None
     return conn.execute(
         "SELECT id, repo, number, seq, author_email, body, created_ts, reactions, path, line, "
         "diff_hunk FROM github_comments WHERE id = ?",

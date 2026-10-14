@@ -91,11 +91,11 @@ incomplete rather than Backlot being wrong:
 - GitHub's spec describes neither `contents` without a path nor the legacy per-sha statuses read.
   Measured against api.github.com, both answer `200`.
 - Atlassian's published Confluence v1 document no longer describes the content and space reads
-  Backlot serves: `content`, `content/{id}` with its `child/page`, `child/comment` and `label`,
-  `space` and `space/{key}`. It still describes 65 reads — `content/search`,
-  `content/{id}/descendant`, `group`, `label` and `user/current` among them — and the writes. The
-  v1 reads Backlot serves are deprecated in favour of Confluence REST v2, not documented as
-  removed, so on that source this comparison currently covers almost nothing.
+  Backlot serves: `content`, `content/{id}` with its `child/page`, `child/comment`,
+  `child/attachment` and `label`, `space` and `space/{key}`. It still describes 65 reads —
+  `content/search`, `content/{id}/descendant`, `group`, `label` and `user/current` among them — and
+  the writes. The v1 reads Backlot serves are deprecated in favour of Confluence REST v2, not
+  documented as removed, so on that source this comparison currently covers almost nothing.
 
 So on a REST source, read `missing_*` as reliable and `extra_*` as *undocumented by the vendor —
 verify by hand*, never as proof of a bug. Those measurements are what the baseline notes carry.
@@ -133,7 +133,13 @@ clean match every time — a green check that means nothing.
 So S3 is compared by asking a running server instead. Backlot starts on a free port, every read
 operation botocore declares is sent to it signed, and the answer is classified:
 
-- **refused** — the honest answer for an operation Backlot does not serve. A `gap`.
+- **refused with `NotImplemented`** — the honest answer for an operation Backlot does not serve. A
+  `gap`.
+- **answered with the error real gives that operation** — the 404 `NoSuchCORSConfiguration` for a
+  bucket nobody configured, for one; `REAL_ERRORS` in `backlot.fidelity.s3_probe` holds each, as
+  measured. No finding.
+- **answered with any other error** — one real does not give that operation, whether real answers
+  it with a 200 or with another error. `unexpected_error`, and breaking.
 - **answered distinctly** — implemented. No finding.
 - **answered with the body the same path returns when nothing selects an operation** — Backlot
   neither implements the operation nor refuses it, so the caller parses another operation's body
@@ -385,13 +391,25 @@ are the GraphQL POSTs at `/fireflies/graphql` and `/linear/graphql`, which their
 covers — introspection, not a path map, so there is no mount to say so. Walking `app.routes`
 instead was ruled out for `gen_docs.py`, and the same reasoning holds here.
 
-Served, not declared: a `HEAD` under `/github`, `/health` or `/_meta` is answered as the `GET` with
-the body left off (`backlot.main.answer_head_as_the_get_without_its_body`), and no `head` operation
-is written for it, because real's own description declares none either. Real GitHub answers a `HEAD`
-that way on every route measured, so the divergence was the method missing, not the method being
-undocumented. But a path diff reads methods off the two documents, and neither mentions this one,
-so nothing here would catch it going away. The middleware's prefix tuple is the record of which
-vendors it covers; a vendor joins it once its own `HEAD` is measured.
+Served, not declared: a `HEAD` under `/github`, `/atlassian`, `/notion`, `/drive/v3`, `/gmail/v1`,
+`/health` or `/_meta` is answered as the `GET` with the body left off
+(`backlot.main.answer_head_as_the_get_without_its_body`), and no `head` operation is written for it,
+because real's own description declares none either. Each vendor prefix among those answers a
+`HEAD` that way on every route measured, so what can diverge here is whether the method is served,
+not whether it is documented. But a path diff reads methods off the two documents, and neither
+mentions this one, so nothing here would catch it going away. The middleware's prefix tuple is the
+record of which vendors it covers; a vendor joins it once its own `HEAD` is measured. On the three
+Google editor families a `HEAD` is their host's empty `text/html` 400 instead
+(`backlot.errors.google.head_refusal`). What the `HEAD` declares about the body's length is a second
+such gap: which Atlassian and Google answers declare it is
+`backlot.errors.atlassian.head_content_length`'s and `backlot.errors.google.head_content_length`'s
+to say, and `tests/test_atlassian.py` and `tests/test_google.py` are the record.
+
+An `OPTIONS` is a third. Jira answers a caller it can name 200 with the methods that route takes,
+and Confluence answers a JSON, wildcard or absent `Accept` with a 404 on every route but `search`,
+which answers by `Accept` too. No document here declares any of it — real's own description has no
+`options` operation and neither does Backlot's — so the two `Allow` tables in
+`backlot.errors.atlassian` and the tests beside them are what hold them.
 
 The five `x-ratelimit-*` headers are the same kind of gap. Every `/github` answer carries them
 (`backlot.main.report_github_rate_limit`), as every answer real gives does, but the comparison reads
@@ -399,12 +417,17 @@ parameters and operations off the two documents and never a response header; rea
 declares three of the five, on `GET /rate_limit`'s 200 alone, and Backlot's document declares none.
 The tests are the record here (`tests/test_github.py`, the rate-limit test), not the baseline.
 
-The `Allow` on S3's HEAD refusals is a third. A `HEAD` carrying a sub-resource selector is 405 on
-both sides, and real names the methods that sub-resource takes where Backlot names only `GET`, for
-the two selectors its own `GET` serves (`backlot.routers.s3._head_refusal`). The `s3` probe reads no
-response header, so the difference is invisible to the diff and a hand-written acknowledgement would
-come back as "acknowledged but no longer diverging" on the next run. `tests/test_s3.py` is the
-record, in the two parametrized sub-resource tests and the HEAD one beside them.
+The `Allow` on S3's sub-resource 405s is another. A `HEAD` carrying a sub-resource selector is 405
+on both sides, and real names the methods that sub-resource takes where Backlot names only `GET`,
+for the selectors its own `GET` at that path answers (`backlot.routers.s3._head_refusal`). A `GET`
+or a `HEAD` naming a selector no `GET` takes, `?delete` and a key's `?select` among them, is 405 on
+both sides too, and real names the write methods where Backlot sends no `Allow` at all
+(`backlot.routers.s3._BUCKET_READ_REFUSED`, `_OBJECT_READ_REFUSED`). The `s3` probe reads no
+response header, so neither difference is visible to the diff and a hand-written acknowledgement
+would come back as "acknowledged but no longer diverging" on the next run. `tests/test_s3.py` is the
+record: the `allow` column of
+`test_s3_a_method_this_router_does_not_serve_answers_reals_own_refusal` for the `GET`s, and the
+bucket configuration and object sub-resource tests for the `HEAD`s.
 
 Confluence is not yet fully covered: its reads now live in a v2 document whose paths are shaped
 differently from the v1 ones Backlot serves, so the eight reads Atlassian has removed from the v1

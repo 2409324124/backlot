@@ -29,6 +29,370 @@ from tests._helpers import (
     tok,
 )
 
+# What a trailing slash means on a `/github` path, per route. Measured against api.github.com on
+# 2026-09-22 with a token, each request carrying its own cache-buster (the readme rows' README-less
+# repository and three slashes on 2026-09-28):
+#
+#   path                          real
+#   ------------------------------|------------------------------------------------------------
+#   readme/, readme//             | 200, the repository's own README (the empty directory), or
+#                                 | the directory 404 when it holds none
+#   readme/{dir}                  | that directory's README, or a 404 naming the directory anchor
+#   readme///, readme/{dir}///    | the directory 404: the path may end in at most two slashes
+#   contents/{path}/              | 302 to /repositories/{id}/contents/{path}, before resolving
+#   git/trees/{ref}/, git/ref/…/  | 404 Not Found — the slash is part of the ref
+#   statuses/{sha}/               | 404 Not Found
+#   branches/{branch}/            | 404 Branch not found
+#   commits/{sha}/                | 422 No commit found for SHA: {sha with the slash}
+#
+# A trailing slash no route matches at all is `refuse_a_trailing_slash_on_github` in
+# `backlot.main`.
+
+_REF_SLASH_ROWS = [
+    # suffix, its status and message, and the status of the same suffix without the slash
+    ("git/trees/main/", 404, "Not Found", 200),
+    ("git/ref/heads/main/", 404, "Not Found", 200),
+    ("statuses/main/", 404, "Not Found", 200),
+    ("branches/main/", 404, "Branch not found", 200),
+    ("commits/main/", 422, "No commit found for SHA: main/", 200),
+    # the protection route does not match the slash, so the branch route answers it, as on real;
+    # without the slash it is the protection route's own 404
+    ("branches/main/protection/", 404, "Branch not found", 404),
+]
+
+
+@pytest.mark.parametrize(
+    "suffix, status, message, slash_free", _REF_SLASH_ROWS, ids=[r[0] for r in _REF_SLASH_ROWS]
+)
+def test_github_a_ref_ending_in_a_slash_is_refused(
+    gh_client, gh_org, gh_admin_h, suffix, status, message, slash_free
+):
+    """Measured: real reads the slash as part of the ref, so each route answers its own refusal for
+    a ref naming nothing."""
+    c, _ = gh_client
+    url = f"/github/repos/{gh_org}/codebase/{suffix}"
+    r = c.get(url, headers=gh_admin_h)
+    assert r.status_code == status, r.text
+    assert r.json()["message"] == message
+    # the control: the same URL without the slash
+    assert c.get(url.removesuffix("/"), headers=gh_admin_h).status_code == slash_free
+
+
+_CONTENTS_REDIRECT_ROWS = [
+    ("contents/src/", "contents/src"),
+    ("contents/src/main.py/", "contents/src/main.py"),
+    ("contents/no-such-dir/", "contents/no-such-dir"),
+    # measured on python/cpython: what the Location keeps encoded, what it decodes, and that a
+    # lower-case escape comes back upper-case (`_CONTENTS_LOCATION_SAFE`)
+    ("contents/a%3Fb/", "contents/a%3Fb"),
+    ("contents/a%23b/", "contents/a%23b"),
+    ("contents/my%20dir/", "contents/my%20dir"),
+    ("contents/a%24b%40c/", "contents/a%24b%40c"),
+    ("contents/%EB%AC%B8%EC%84%9C/", "contents/%EB%AC%B8%EC%84%9C"),
+    ("contents/%eb%ac%b8/", "contents/%EB%AC%B8"),
+    ("contents/a%28b%29/", "contents/a(b)"),
+    ("contents/a%2Fb/", "contents/a/b"),
+]
+
+
+@pytest.mark.parametrize(
+    "path, target", _CONTENTS_REDIRECT_ROWS, ids=[r[0] for r in _CONTENTS_REDIRECT_ROWS]
+)
+def test_github_a_contents_path_ending_in_a_slash_redirects(
+    gh_client, gh_org, gh_admin_h, path, target
+):
+    """Measured: a 302 to the id-keyed spelling without the slash, before the path resolves to
+    anything — a file, a directory and a path that names neither all redirect — with the path
+    encoded the way real encodes it."""
+    c, _ = gh_client
+    r = c.get(f"/github/repos/{gh_org}/codebase/{path}", headers=gh_admin_h, follow_redirects=False)
+    # the row is what went on the wire, not a spelling the client normalised first
+    assert r.request.url.raw_path.decode().endswith(f"/codebase/{path}")
+    assert r.status_code == 302
+    rid = synth.github_user_id("codebase")
+    assert r.headers["location"].endswith(f"/github/repositories/{rid}/{target}")
+    assert "?" not in r.headers["location"]
+
+
+def test_github_the_contents_redirect_removes_one_slash_and_names_a_content_type(
+    gh_client, gh_org, gh_admin_h
+):
+    """Measured: real removes ONE trailing slash per redirect — `contents/src//` points at
+    `contents/src/`, which redirects again — and the 302 carries `text/html;charset=utf-8`, no
+    space, and an empty body."""
+    c, _ = gh_client
+    r = c.get(
+        f"/github/repos/{gh_org}/codebase/contents/src//",
+        headers=gh_admin_h,
+        follow_redirects=False,
+    )
+    assert r.status_code == 302
+    assert r.headers["location"].endswith("/contents/src/")
+    assert r.headers["content-type"] == "text/html;charset=utf-8"
+    assert r.content == b""
+    again = c.get(r.headers["location"], headers=gh_admin_h, follow_redirects=False)
+    assert again.status_code == 302 and again.headers["location"].endswith("/contents/src")
+
+
+def test_github_the_contents_redirect_drops_the_ref_and_is_followable(
+    gh_client, gh_org, gh_admin_h
+):
+    """Measured: `?ref=main` is not carried into the `Location`. Following it answers the listing,
+    which is what makes the redirect usable rather than a dead end."""
+    c, _ = gh_client
+    r = c.get(
+        f"/github/repos/{gh_org}/codebase/contents/src/?ref=main",
+        headers=gh_admin_h,
+        follow_redirects=False,
+    )
+    assert r.status_code == 302 and "ref=" not in r.headers["location"]
+    followed = c.get(r.headers["location"], headers=gh_admin_h)
+    assert followed.status_code == 200 and isinstance(followed.json(), list)
+
+
+def test_github_a_bad_credential_is_answered_before_the_contents_redirect(gh_client, gh_org):
+    """Measured: an anonymous caller gets the 302 and a bearer real cannot read gets `Bad
+    credentials` first, so the credential is the earlier of the two."""
+    c, _ = gh_client
+    r = c.get(
+        f"/github/repos/{gh_org}/codebase/contents/src/",
+        headers={"Authorization": "Bearer nope"},
+        follow_redirects=False,
+    )
+    assert r.status_code == 401 and r.json()["message"] == "Bad credentials"
+
+
+def test_github_the_id_keyed_spelling_redirects_the_same_way(gh_client, gh_org, gh_admin_h):
+    """Measured: `/repositories/{id}/contents/{path}/` answers the same 302 the login-keyed
+    spelling does, to the id-keyed path without the slash."""
+    c, _ = gh_client
+    rid = synth.github_user_id("codebase")
+    r = c.get(
+        f"/github/repositories/{rid}/contents/src/", headers=gh_admin_h, follow_redirects=False
+    )
+    assert r.status_code == 302
+    assert r.headers["location"].endswith(f"/github/repositories/{rid}/contents/src")
+
+
+def test_github_a_directory_readme_is_that_directorys_and_acl_scoped(tmp_path):
+    """Measured on python/cpython: `readme/Doc` is that directory's README, not the repository's,
+    with as many slashes around it as real reads past. The route reads corpus content, so a caller
+    the document is not visible to gets the 404 the repository's own lookup gives rather than the
+    file. Stated in a corpus of its own, since the bundled ones hold no directory README, none
+    spelt `readme.md` or `README`, and none to scope."""
+    s = tiny_corpus(
+        tmp_path,
+        [
+            {
+                "source_type": "github",
+                "doc_id": "gh-acl-root",
+                "repo": "scoped",
+                "subtype": "file",
+                "path": "README.md",
+                "content": "# the repository",
+                "author_email": "owner@x.com",
+                "visibility": "public",
+            },
+            {
+                # beside `README.md`, as on curl/curl, where `README.md` is the one served
+                "source_type": "github",
+                "doc_id": "gh-acl-root-plain",
+                "repo": "scoped",
+                "subtype": "file",
+                "path": "README",
+                "content": "plain",
+                "author_email": "owner@x.com",
+                "visibility": "public",
+            },
+            {
+                "source_type": "github",
+                "doc_id": "gh-acl-dir",
+                "repo": "scoped",
+                "subtype": "file",
+                "path": "docs/README.md",
+                "content": "# the directory",
+                "author_email": "owner@x.com",
+                "visibility": "private",
+            },
+            {
+                # a second identity for the corpus to mint a token for, so the private file above
+                # has someone it is private FROM
+                "source_type": "github",
+                "doc_id": "gh-acl-outsider",
+                "repo": "scoped",
+                "title": "unrelated",
+                "content": "x",
+                "author_email": "outsider@x.com",
+                "visibility": "public",
+                "number": 1,
+            },
+            {
+                "source_type": "github",
+                "doc_id": "gh-lower-readme",
+                "repo": "lower",
+                "subtype": "file",
+                "path": "readme.md",
+                "content": "# spelt in lower case",
+                "author_email": "owner@x.com",
+                "visibility": "public",
+            },
+            {
+                "source_type": "github",
+                "doc_id": "gh-plain-readme",
+                "repo": "plain",
+                "subtype": "file",
+                "path": "README",
+                "content": "Hello World!\n",
+                "author_email": "owner@x.com",
+                "visibility": "private",
+            },
+            {
+                # what lets the outsider see the repository, so the README's own scope is what
+                # hides it
+                "source_type": "github",
+                "doc_id": "gh-plain-outsider",
+                "repo": "plain",
+                "title": "unrelated",
+                "content": "x",
+                "author_email": "outsider@x.com",
+                "visibility": "public",
+                "number": 1,
+            },
+        ],
+    )
+    with client_for(s, reload=True) as c:
+        admin = {"Authorization": f"Bearer {s.admin_token}"}
+        org = c.get("/_meta/users", headers=admin).json()["org"]
+        tokens = yaml.safe_load(s.tokens_path.read_text())["users"]
+        outsider = next(u["token"] for u in tokens if u["email"] == "outsider@x.com")
+        url = f"/github/repos/{org}/scoped/readme/docs"
+        got = c.get(url, headers=admin).json()
+        assert got["path"] == "docs/README.md"
+        assert base64.b64decode(got["content"]).decode() == "# the directory"
+        root = c.get(f"/github/repos/{org}/scoped/readme", headers=admin).json()
+        assert root["path"] == "README.md"
+        # measured on python/cpython `Doc`: two trailing slashes and a doubled leading one still
+        # name the directory, a third trailing one does not
+        for tail in ("readme/docs/", "readme/docs//", "readme//docs"):
+            r = c.get(f"/github/repos/{org}/scoped/{tail}", headers=admin)
+            assert r.status_code == 200 and r.json()["path"] == "docs/README.md", tail
+        assert c.get(f"/github/repos/{org}/scoped/readme/docs///", headers=admin).status_code == 404
+        # measured on sindresorhus/awesome: a README spelt `readme.md` is the empty directory's too
+        lower = c.get(f"/github/repos/{org}/lower/readme/", headers=admin)
+        assert lower.status_code == 200 and lower.json()["path"] == "readme.md"
+        assert c.get(url, headers={"Authorization": f"Bearer {outsider}"}).status_code == 404
+        # measured on octocat/Hello-World: a README with no extension, at either spelling and in
+        # either media type
+        for tail in ("readme", "readme/"):
+            plain = f"/github/repos/{org}/plain/{tail}"
+            got = c.get(plain, headers=admin).json()
+            assert got["path"] == "README" and got["size"] == 13, tail
+            raw = c.get(plain, headers={**admin, "Accept": "application/vnd.github.raw"})
+            assert raw.content == b"Hello World!\n", tail
+            hidden = c.get(plain, headers={"Authorization": f"Bearer {outsider}"})
+            assert hidden.status_code == 404, tail
+
+
+def test_github_the_redirect_does_not_precede_the_repository(tmp_path):
+    """Measured: a repository that does not exist, an owner that does not, and a repository the
+    caller cannot see each answer 404 rather than the redirect, so the redirect cannot be built
+    before the repository resolves. Without this, a caller could tell a repository the corpus holds
+    from one it does not by whether the slash redirected, and read its id off the `Location`. The
+    admin's 302 on the same path is the control. Stated in a corpus of its own, since the bundled
+    ones hold no repository whose every document is private."""
+    s = tiny_corpus(
+        tmp_path,
+        [
+            {
+                "source_type": "github",
+                "doc_id": "gh-hidden-file",
+                "repo": "hidden",
+                "subtype": "file",
+                "path": "src/a.md",
+                "content": "x",
+                "author_email": "owner@x.com",
+                "visibility": "private",
+            },
+            {
+                # a second identity for the corpus to mint a token for, so the repository above
+                # has someone it is private FROM
+                "source_type": "github",
+                "doc_id": "gh-open-issue",
+                "repo": "open",
+                "title": "unrelated",
+                "content": "x",
+                "author_email": "outsider@x.com",
+                "visibility": "public",
+                "number": 1,
+            },
+        ],
+    )
+    with client_for(s, reload=True) as c:
+        admin = {"Authorization": f"Bearer {s.admin_token}"}
+        org = c.get("/_meta/users", headers=admin).json()["org"]
+        tokens = yaml.safe_load(s.tokens_path.read_text())["users"]
+        outsider = next(u["token"] for u in tokens if u["email"] == "outsider@x.com")
+
+        def slash(owner_repo, headers):
+            url = f"/github/repos/{owner_repo}/contents/src/"
+            return c.get(url, headers=headers, follow_redirects=False)
+
+        assert slash(f"{org}/hidden", admin).status_code == 302
+        for owner_repo, headers in (
+            (f"{org}/hidden", {"Authorization": f"Bearer {outsider}"}),
+            (f"{org}/no-such-repo-xyz", admin),
+            ("no-such-owner-xyz/hidden", admin),
+        ):
+            r = slash(owner_repo, headers)
+            assert r.status_code == 404, (owner_repo, r.text)
+            assert "location" not in r.headers
+
+
+@pytest.mark.parametrize("tail", ["readme/", "readme//"])
+def test_github_readme_with_an_empty_directory_is_the_repositorys_own(
+    gh_client, gh_org, gh_admin_h, tail
+):
+    """Measured: `readme/` and `readme//` are a 200 carrying the repository's README, where the
+    routes around it answer a trailing slash with a refusal."""
+    c, _ = gh_client
+    root = c.get(f"/github/repos/{gh_org}/codebase/readme", headers=gh_admin_h).json()
+    empty = c.get(f"/github/repos/{gh_org}/codebase/{tail}", headers=gh_admin_h)
+    assert empty.status_code == 200 and empty.json()["path"] == root["path"]
+
+
+_README_404_ROWS = [
+    # repo, path, message, where documentation_url ends
+    ("codebase", "readme/docs", "Not Found", "#get-a-repository-readme-for-a-directory"),
+    # a repository holding no README
+    ("gateway", "readme/", "Not Found", "#get-a-repository-readme-for-a-directory"),
+    # a README the path would find, behind one slash more than real reads past
+    ("codebase", "readme///", "Not Found", "#get-a-repository-readme-for-a-directory"),
+    # the ref is refused before the slashes are (measured: `readme///?ref=nope`)
+    ("codebase", "readme///?ref=nope", "No commit found for the ref nope", "/v3/repos/contents/"),
+    # the root route, on a repository holding no README
+    ("gateway", "readme", "Not Found", "#get-a-repository-readme"),
+]
+
+
+@pytest.mark.parametrize(
+    "repo, tail, message, anchor",
+    _README_404_ROWS,
+    ids=[f"{r[0]}-{r[1]}" for r in _README_404_ROWS],
+)
+def test_github_a_readme_route_holding_none_is_its_own_anchors_404(
+    gh_client, gh_org, gh_admin_h, repo, tail, message, anchor
+):
+    """Measured: the directory route's 404 names `#get-a-repository-readme-for-a-directory`, where
+    the root route's names `#get-a-repository-readme`, and it is also what `readme/` answers on a
+    repository holding no README and what a path ending in three slashes answers. The raw media
+    type answers each of them with the same JSON."""
+    c, _ = gh_client
+    for accept in ({}, {"Accept": "application/vnd.github.raw"}):
+        r = c.get(f"/github/repos/{gh_org}/{repo}/{tail}", headers={**gh_admin_h, **accept})
+        assert r.status_code == 404, accept
+        assert r.json()["message"] == message
+        assert r.json()["documentation_url"].endswith(anchor)
+
 
 def test_github_serves_a_comment_dated_at_the_epoch(tmp_path):
     """A comment id is an INTEGER and `synth.epoch` hashes a string, so a comment
@@ -157,6 +521,124 @@ def test_github_pulls_filtered_by_state(client, admin_h, org):
         f"/github/repos/{org}/gateway/pulls", headers=admin_h, params={"state": "all"}
     ).json()
     assert [p["title"] for p in all_body] == ["Fix token-bucket refill off-by-one"]
+
+
+@pytest.fixture(scope="module")
+def gh_labelled(tmp_path_factory):
+    """One repository whose issues carry labels spelt in two cases, one of them a pull and one
+    private to hana, beside a labelled source file, for the issue listing's `labels` filter."""
+    rows = [
+        ("Bug", ["bug"], "issue", "public"),
+        ("Docs", ["documentation"], "issue", "public"),
+        ("Fix", ["BUG", "Documentation"], "pull_request", "public"),
+        ("Private bug", ["bug"], "issue", "private"),
+        ("Source", ["bug"], "file", "public"),
+    ]
+    records = [
+        {
+            "source_type": "github",
+            "doc_id": f"label-{i}",
+            "repo": "triage",
+            "title": title,
+            "labels": labels,
+            "subtype": kind,
+            "visibility": visibility,
+            "author_email": "hana@acme.com" if visibility == "private" else "bob@acme.com",
+            "state": "open",
+            **({"path": "src/main.py"} if kind == "file" else {}),
+        }
+        for i, (title, labels, kind, visibility) in enumerate(rows)
+    ]
+    with corpus_client(tmp_path_factory.mktemp("gh_labelled"), records) as (c, settings):
+        tokens = yaml.safe_load(settings.tokens_path.read_text())
+        org = c.get("/_meta/users").json()["org"]
+        yield (
+            c,
+            f"/github/repos/{org}/triage/issues",
+            {"Authorization": f"Bearer {settings.admin_token}"},
+            {"Authorization": f"Bearer {tok(tokens, 'bob@acme.com')}"},
+        )
+
+
+_LABELLED = {"Bug", "Docs", "Fix", "Private bug"}
+_BUG = {"Bug", "Fix", "Private bug"}
+
+
+@pytest.mark.parametrize(
+    "query, titles",
+    [
+        ("", _LABELLED),
+        ("labels=", _LABELLED),
+        ("labels=bug", _BUG),
+        ("labels=BUG", _BUG),
+        ("labels=documentation", {"Docs", "Fix"}),
+        ("labels=bug,documentation", {"Fix"}),
+        ("labels=Documentation,Bug", {"Fix"}),
+        ("labels=bug,bug", _BUG),
+        ("labels=bug,", _BUG),
+        ("labels=bug,,", _BUG),
+        ("labels=zzqq-no-such-label", set()),
+        ("labels=bug,zzqq-no-such-label", set()),
+        ("labels=%20bug", set()),
+        ("labels=bug%20", set()),
+        ("labels=bug,%20documentation", set()),
+        ("labels=bug,,documentation", set()),
+        # the last of a repeated parameter
+        ("labels=bug&labels=documentation", {"Docs", "Fix"}),
+        ("labels=documentation&labels=bug", _BUG),
+        ("labels=bug&labels=", _LABELLED),
+        # commas alone, or whitespace alone, filter nothing
+        ("labels=,", _LABELLED),
+        ("labels=,,", _LABELLED),
+        ("labels=%20", _LABELLED),
+        ("labels=%09", _LABELLED),
+        ("labels=%C2%A0", _LABELLED),
+        ("labels=%E3%80%80", _LABELLED),
+        ("labels=%1C", set()),
+        ("labels=%20,", set()),
+    ],
+)
+def test_github_the_issue_listing_serves_the_issues_carrying_every_named_label(
+    gh_labelled, query, titles
+):
+    """Each row is the answer real gave that spelling on psf/requests, transposed to this corpus
+    (the rule and its dates are in :func:`backlot.routers.github.list_issues`), asked by the admin
+    and by a token that cannot see the private issue. The pull is served like the issues, and the
+    source file never is."""
+    c, url, admin, scoped = gh_labelled
+    for headers, expected in ((admin, titles), (scoped, titles - {"Private bug"})):
+        r = c.get(f"{url}?{query}", headers=headers)
+        assert r.status_code == 200, r.text
+        assert {row["title"] for row in r.json()} == expected, headers is admin
+
+
+@pytest.mark.parametrize(
+    "query, titles, linked",
+    [
+        ("labels=BUG", _BUG, ["labels=BUG"]),
+        ("labels=documentation&labels=bug", _BUG, ["labels=bug"]),
+        ("labels=,", _LABELLED, ["labels=%2C"]),
+    ],
+)
+def test_github_the_issue_listing_filters_by_label_before_it_pages(
+    gh_labelled, query, titles, linked
+):
+    """The filter runs before the page is cut, so a walk of one-row pages serves each match once,
+    and every `next` carries `labels` once, the value the listing read, as it was spelt (see
+    :func:`backlot.routers.github.list_issues`). A separate walk rather than rows of the table
+    above, since what it reads is the page links."""
+    c, url, admin, _ = gh_labelled
+    r = c.get(f"{url}?{query}&per_page=1", headers=admin)
+    seen = []
+    while True:
+        assert r.status_code == 200, r.text
+        seen += [row["title"] for row in r.json()]
+        nxt = _link_rels(r.headers.get("Link", "")).get("next")
+        if nxt is None:
+            break
+        assert [p for p in nxt.partition("?")[2].split("&") if p.startswith("labels=")] == linked
+        r = c.get(nxt, headers=admin)
+    assert sorted(seen) == sorted(titles)
 
 
 def test_github_state_is_reals_enum_refused_on_issues_and_absorbed_on_pulls(tmp_path):
@@ -744,11 +1226,35 @@ def test_github_tree_recursive(gh_client, gh_admin_h, gh_org):
     assert "size" not in tree_dir
 
 
-def test_github_tree_non_recursive(gh_client, gh_admin_h, gh_org):
+@pytest.mark.parametrize(
+    "query,recursive",
+    [
+        ("", False),
+        ("?recursive", False),
+        ("?recursive=0&recursive", False),
+        ("?%72ecursive", False),
+        ("?recursive=", True),
+        ("?recursive=0", True),
+        ("?recursive=false", True),
+        ("?recursive=1", True),
+        ("?recursive=true", True),
+        ("?recursive=abc", True),
+        ("?recursive&recursive=0", True),
+        ("?%72ecursive=0", True),
+    ],
+)
+def test_github_tree_recurses_for_any_recursive_value(
+    gh_client, gh_admin_h, gh_org, query, recursive
+):
+    """Each row was measured on api.github.com. The rule is
+    :func:`backlot.routers.github.get_tree`'s and the percent-encoded name
+    :func:`backlot.routers.github._written_bare`'s."""
     c, _ = gh_client
-    body = c.get(f"/github/repos/{gh_org}/codebase/git/trees/main", headers=gh_admin_h).json()
-    paths = {e["path"] for e in body["tree"]}
-    assert paths == {"README.md", "src", "config"}  # top level only: root file + top dirs
+    r = c.get(f"/github/repos/{gh_org}/codebase/git/trees/main{query}", headers=gh_admin_h)
+    top = {"README.md", "src", "config"}
+    deep = {"src/main.py", "src/pkg", "src/pkg/utils.py", "config/secret.yaml"}
+    assert r.status_code == 200
+    assert {e["path"] for e in r.json()["tree"]} == (top | deep if recursive else top)
 
 
 @pytest.mark.parametrize(
@@ -811,15 +1317,32 @@ def test_github_blob_by_sha(gh_client, gh_admin_h, gh_org):
     assert base64.b64decode(body["content"]).decode() == content
 
 
-def test_github_blob_unknown_sha_404(gh_client, gh_admin_h, gh_org):
+_MAIN_PY_SHA = hashlib.sha1(b"def main():\n    return 1\n").hexdigest()
+_BAD_BLOB_SHA = "The sha parameter must be exactly 40 characters and contain only [0-9a-f]."
+
+
+@pytest.mark.parametrize(
+    "repo, sha, status, message",
+    [
+        ("codebase", "0" * 40, 404, "Not Found"),
+        ("codebase", _MAIN_PY_SHA[:7], 422, _BAD_BLOB_SHA),
+        ("codebase", _MAIN_PY_SHA[:39], 422, _BAD_BLOB_SHA),
+        ("codebase", _MAIN_PY_SHA + "0", 422, _BAD_BLOB_SHA),
+        ("codebase", _MAIN_PY_SHA.upper(), 422, _BAD_BLOB_SHA),
+        ("codebase", "zzzz", 422, _BAD_BLOB_SHA),
+        ("no-such-repo", "zzzz", 404, "Not Found"),
+    ],
+)
+def test_github_blob_refusals(gh_client, gh_admin_h, gh_org, repo, sha, status, message):
+    """The 422 and the two 404s `get_blob` records, in real's envelope with this route's own
+    documentation_url (see backlot.errors.github); `test_github_blob_by_sha` is the 200."""
     c, _ = gh_client
-    r = c.get(f"/github/repos/{gh_org}/codebase/git/blobs/{'0' * 40}", headers=gh_admin_h)
-    assert r.status_code == 404
-    # real's envelope, with this route's own documentation_url (see backlot.errors.github)
+    r = c.get(f"/github/repos/{gh_org}/{repo}/git/blobs/{sha}", headers=gh_admin_h)
+    assert r.status_code == status
     assert r.json() == {
-        "message": "Not Found",
+        "message": message,
         "documentation_url": "https://docs.github.com/rest/git/blobs#get-a-blob",
-        "status": "404",
+        "status": str(status),
     }
 
 
@@ -853,10 +1376,9 @@ def test_github_lists_the_refs_a_client_enumerates_before_it_reads(gh_client, gh
     assert body[0]["commit"]["url"] == single["commit"]["url"]
 
     # `?protected=` selects: real answers only the protected branches for a true value, only the
-    # unprotected ones for `false`/`0`, and all of them for an empty or omitted parameter —
-    # measured on fastapi/fastapi, 22 branches with one protected, answering 1 / 21 / 22. The one
-    # branch here is unprotected, so those last two coincide and `_truthy`'s split is the whole
-    # rule, as it is for `?recursive=` on git/trees.
+    # unprotected ones for a false one, and all of them for an empty or omitted parameter (`_truthy`
+    # carries the measurement). The one branch here is unprotected, so those last two coincide and
+    # `_truthy`'s split is the whole rule.
     for value, kept in (("true", 0), ("1", 0), ("yes", 0), ("false", 1), ("0", 1), ("", 1)):
         r = c.get(
             f"/github/repos/{gh_org}/codebase/branches",
@@ -948,16 +1470,66 @@ def test_github_a_stated_branch_listing_replaces_the_inferred_one(gh_client, gh_
     assert c.get(f"{base}/branches/trunk", headers=gh_admin_h).status_code == 200
 
 
+@pytest.mark.parametrize(
+    "value, selection",
+    [
+        pytest.param(None, None, id="omitted"),
+        pytest.param("", None, id="empty"),
+        pytest.param("0", False, id="zero"),
+        pytest.param("f", False, id="lower-f"),
+        pytest.param("F", False, id="upper-f"),
+        pytest.param("false", False, id="lower-false"),
+        pytest.param("FALSE", False, id="upper-false"),
+        pytest.param("off", False, id="lower-off"),
+        pytest.param("OFF", False, id="upper-off"),
+        pytest.param("1", True, id="one"),
+        pytest.param("t", True, id="lower-t"),
+        pytest.param("true", True, id="lower-true"),
+        pytest.param("TRUE", True, id="upper-true"),
+        pytest.param("yes", True, id="yes"),
+        pytest.param("banana", True, id="arbitrary"),
+        pytest.param("no", True, id="no"),
+        pytest.param("n", True, id="lower-n"),
+        pytest.param("00", True, id="double-zero"),
+        pytest.param("False", True, id="title-false"),
+        pytest.param("fAlSe", True, id="mixed-false"),
+        pytest.param("Off", True, id="title-off"),
+        pytest.param("oFF", True, id="mixed-off"),
+        pytest.param("0 ", True, id="zero-trailing-space"),
+        pytest.param(" false", True, id="false-leading-space"),
+        pytest.param("f ", True, id="f-trailing-space"),
+        pytest.param("false ", True, id="false-trailing-space"),
+        pytest.param(" off ", True, id="off-surrounded-spaces"),
+        pytest.param(" true ", True, id="true-surrounded-spaces"),
+    ],
+)
+def test_github_protected_filter_matches_measured_values(
+    gh_client, gh_admin_h, gh_org, value, selection
+):
+    """Each row is the selection real answered for that spelling on fastapi/fastapi (the date and
+    the method are :func:`backlot.routers.github._truthy`'s). The fixture holds one protected
+    branch and one unprotected one, so the three answers are distinct.
+    """
+    c, _ = gh_client
+    params = {} if value is None else {"protected": value}
+    response = c.get(
+        f"/github/repos/{gh_org}/stated-repo/branches", headers=gh_admin_h, params=params
+    )
+    assert response.status_code == 200, response.text
+    expected = {
+        None: [("release/2026-03", False), ("trunk", True)],
+        False: [("release/2026-03", False)],
+        True: [("trunk", True)],
+    }
+    assert [(b["name"], b["protected"]) for b in response.json()] == expected[selection]
+
+
 def test_github_stated_protection_decides_the_filter_and_the_protection_object(
     gh_client, gh_admin_h, gh_org
 ):
-    """`?protected=` selects for real once a corpus states which branches are protected, and the
-    same stated bit decides `protection.enabled` on the branch object.
-
-    Real is three-valued — a truthy value selects the protected branches, `false`/`0` the
-    unprotected ones, an absent or empty parameter all of them (measured on fastapi/fastapi: 22
-    branches, one protected, answering 1 / 21 / 22). Until a corpus could say so, every branch was
-    unprotected and the last two answers coincided; they no longer have to.
+    """`?protected=` selects ahead of the page cut once a corpus states which branches are
+    protected, and the same stated bit decides `protection.enabled` on the branch object. Which
+    branches each value selects is `test_github_protected_filter_matches_measured_values`.
 
     `protection.enabled` reports CLASSIC protection where `protected` covers any mechanism, and a
     stated bit is read as the classic one — measured 2026-09-03, see
@@ -966,20 +1538,14 @@ def test_github_stated_protection_decides_the_filter_and_the_protection_object(
     c, _ = gh_client
     url = f"/github/repos/{gh_org}/stated-repo/branches"
 
-    def names(params):
-        return [b["name"] for b in c.get(url, headers=gh_admin_h, params=params).json()]
-
     def next_url(params):
-        return _link_rels(c.get(url, headers=gh_admin_h, params=params).headers["Link"])["next"]
-
-    assert names({"protected": "true"}) == ["trunk"]
-    assert names({"protected": "1"}) == ["trunk"]
-    assert names({"protected": "false"}) == ["release/2026-03"]
-    assert names({"protected": "0"}) == ["release/2026-03"]
-    assert names({"protected": ""}) == ["release/2026-03", "trunk"]
-    assert names(None) == ["release/2026-03", "trunk"]
-    # and the flag rides on the entry itself, in both listings
-    assert [b["protected"] for b in c.get(url, headers=gh_admin_h).json()] == [False, True]
+        response = c.get(url, headers=gh_admin_h, params=params)
+        assert response.status_code == 200, response.text
+        links = _link_rels(response.headers["Link"])
+        assert set(links) == {"next", "last"}
+        assert links["next"] == links["last"]
+        assert links["last"].endswith("page=2")
+        return links["next"]
 
     # real's six members on EVERY branch, protected or not, and PyGithub's `Branch` declares the
     # three this used to omit
@@ -1032,9 +1598,15 @@ def test_github_stated_protection_decides_the_filter_and_the_protection_object(
 
     # the selection happens ahead of the page cut, and a page url spells out only a parameter the
     # caller sent, an empty value included (`list_branches` and `_echo` carry the measurements)
-    paged = c.get(url, headers=gh_admin_h, params={"protected": "false", "per_page": 1})
-    assert [b["name"] for b in paged.json()] == ["release/2026-03"]
-    assert "Link" not in paged.headers, "one unprotected branch here is a single page"
+    # `trunk` sorts second, so selecting it on page one also rules out filtering AFTER the cut.
+    for value, expected in (("f", [("release/2026-03", False)]), ("False", [("trunk", True)])):
+        params = {"protected": value, "per_page": 1}
+        paged = c.get(url, headers=gh_admin_h, params=params)
+        assert paged.status_code == 200, paged.text
+        assert [(b["name"], b["protected"]) for b in paged.json()] == expected
+        assert "Link" not in paged.headers, "the filtered listing has only one page"
+        past_last = c.get(url, headers=gh_admin_h, params={**params, "page": 2})
+        assert past_last.status_code == 200 and past_last.json() == []
     assert "protected=&" in next_url({"protected": "", "per_page": 1})
     assert "protected" not in next_url({"per_page": 1})
 
@@ -1296,6 +1868,16 @@ def test_github_git_ref_resolves_a_pulls_own_ref(gh_client, gh_admin_h, gh_org):
         assert r.status_code == 200, suffix
         assert r.json()["ref"] == f"refs/pull/{num}/{suffix}"
     assert c.get(f"{base}/git/ref/pull/999999/head", headers=gh_admin_h).status_code == 404
+    # the same number in other digits, or with a leading zero, names no ref (see `_ref_exists`)
+    digits = str(num)
+    for spelling in (
+        digits.translate(str.maketrans("0123456789", "０１２３４５６７８９")),
+        digits.translate(str.maketrans("0123456789", "٠١٢٣٤٥٦٧٨٩")),
+        f"0{digits}",
+    ):
+        for suffix in ("head", "merge"):
+            r = c.get(f"{base}/git/ref/pull/{spelling}/{suffix}", headers=gh_admin_h)
+            assert r.status_code == 404, (spelling, suffix)
     # this repo states no tags and `/tags` says so, so a tag ref cannot resolve either
     assert c.get(f"{base}/git/ref/tags/v1", headers=gh_admin_h).status_code == 404
 
@@ -1404,12 +1986,6 @@ def test_github_readme_real_content(gh_client, gh_admin_h, gh_org):
     text = "# codebase\n\nCore service source, browsable via the tree/contents API.\n"
     assert base64.b64decode(body["content"]).decode() == text
     assert body["sha"] == hashlib.sha1(text.encode()).hexdigest()
-
-
-def test_github_readme_stub_when_no_readme_file(client, admin_h, org):
-    # 'gateway' (base SAMPLE) has issues/PRs but no file docs -> falls back to the stub
-    body = client.get(f"/github/repos/{org}/gateway/readme", headers=admin_h).json()
-    assert base64.b64decode(body["content"]).decode().startswith("# gateway")
 
 
 def test_github_file_excluded_from_issues_and_pulls(gh_client, gh_admin_h, gh_org):
@@ -1740,6 +2316,7 @@ def test_github_documentation_url_names_the_route_that_failed(gh_client, gh_admi
             f"{missing}/collaborators",
             "rest/collaborators/collaborators#list-repository-collaborators",
         ),
+        (f"{missing}/issues/1", "rest/issues/issues#get-an-issue"),
         (f"{missing}/pulls/1/files", "rest/pulls/pulls#list-pull-requests-files"),
         # the two routes that take the rest of the path as one parameter still resolve
         (f"{missing}/git/ref/heads/release/2026-03", "rest/git/refs#get-a-reference"),
@@ -1951,23 +2528,53 @@ def test_github_pages_at_reals_thirty_and_caps_at_its_hundred(tmp_path):
         assert Settings.model_fields["max_page_size"].default == 1000
 
 
-def test_github_a_path_parameter_it_cannot_parse_is_the_route_s_404(gh_client, gh_admin_h, gh_org):
-    """Real has no route for `/issues/notanint`, so it answers the 404 that route's own anchor
-    names — measured: `Not Found`, `documentation_url: .../rest/issues/issues#get-an-issue`.
+@pytest.mark.parametrize(
+    "route",
+    [
+        "issues/{number}",
+        "issues/{number}/comments",
+        "issues/comments/{number}",
+        "pulls/{number}",
+        "pulls/{number}/reviews",
+        "pulls/{number}/comments",
+        "pulls/{number}/commits",
+        "pulls/{number}/files",
+        "pulls/comments/{number}",
+        "git/ref/pull/{number}/head",
+        "git/ref/pull/{number}/merge",
+    ],
+)
+@pytest.mark.parametrize(
+    "number",
+    [
+        "notanint",
+        "²",
+        "9223372036854775808",
+        "-9223372036854775809",
+        pytest.param("1" * 4301, id="4301-digits"),
+    ],
+)
+def test_github_a_path_number_it_cannot_read_is_the_unknown_number_404(
+    gh_client, gh_admin_h, gh_org, route, number
+):
+    """A path number that is not an integer (`²` included), or one outside 64 bits (see
+    store.github_by_number), gets the 404 an unknown number gets on that route, byte for byte, as
+    real answers both; `²` was measured on all eleven routes. A number of 4,301 digits, one more
+    than `int()` converts, gets that 404 too, where real answers a path that long with a 414 on
+    `issues/{number}` and the git refs, and with a 404 on `pulls/{number}`.
 
-    Backlot declares `number: int` and so matches the route and fails after, which is a difference
-    in how the two arrive rather than in what they answer. What it must not do is answer a 422:
-    `{"detail": [...]}` announced itself as the mock's own default, and an envelope does not — a
-    status real never sends would read as measured.
+    The routes that declare the number an `int` match `notanint` and then fail to validate it, and
+    that has to be the route's 404 rather than a 422: `{"detail": [...]}` would announce itself as
+    the mock's own default, and an envelope would not, so a status real never sends would read as
+    measured.
     """
     c, _ = gh_client
-    r = c.get(f"/github/repos/{gh_org}/codebase/issues/notanint", headers=gh_admin_h)
-    assert r.status_code == 404
-    assert r.json() == {
-        "message": "Not Found",
-        "documentation_url": "https://docs.github.com/rest/issues/issues#get-an-issue",
-        "status": "404",
-    }
+    base = f"/github/repos/{gh_org}/codebase/"
+    unknown = c.get(base + route.format(number="999999999"), headers=gh_admin_h)
+    actual = c.get(base + route.format(number=number), headers=gh_admin_h)
+    assert unknown.status_code == 404
+    assert actual.status_code == unknown.status_code
+    assert actual.content == unknown.content
 
 
 def test_github_a_wrong_method_is_not_dressed_as_a_measured_answer(gh_client, gh_admin_h, gh_org):
@@ -2007,9 +2614,12 @@ def test_github_a_head_is_the_get_with_the_body_left_off(gh_client, gh_admin_h, 
     answered by ``backlot.main.answer_head_as_the_get_without_its_body``, which runs the GET and
     keeps its headers, so the version echo, the charset and the id-path rewrite land on a `HEAD` by
     construction; each is asserted below so that the construction is not the only thing saying so.
-    The OpenAPI document is untouched: real's description declares no `head` operation (none in
-    the 2026-09-09 read) and neither does Backlot's, so `backlot diff` and the MCP slice see what
-    they saw. The other vendors' `HEAD` answers are not measured and stay the 405 they were.
+    Real's description declares no `head` operation (none in the 2026-09-09 read) and neither does
+    Backlot's OpenAPI document, so `backlot diff` and the MCP slice have no `HEAD` to read.
+    Atlassian's and Notion's `HEAD` are measured too and answered the same way (see
+    ``test_atlassian_a_head_is_the_get_without_its_body``, which pins the `content-length` Jira and
+    Confluence disagree about, and ``test_notion_a_head_is_the_get_without_its_body``); a vendor
+    whose `HEAD` is not measured answers it 405, Slack's below.
     """
     c, _ = gh_client
     codebase = f"/github/repos/{gh_org}/codebase"
@@ -3017,16 +3627,11 @@ def test_github_raw_media_type_returns_the_bytes(gh_client, gh_admin_h, gh_org, 
             "application/vnd.github.raw",
             _CODEBASE_README,
         ),
-        # 'gateway' carries no README doc, so this one exercises the synthesized-stub branch
-        (f"/github/repos/{gh_org}/gateway/readme", "application/vnd.github.raw", None),
     ]:
         r = c.get(url, headers={**gh_admin_h, "Accept": accept})
         assert r.status_code == 200, url
         assert r.headers["content-type"].startswith(ctype), url
-        if body is None:
-            assert r.text.startswith("# gateway")
-        else:
-            assert r.text == body and len(r.content) == len(body.encode()), url
+        assert r.text == body and len(r.content) == len(body.encode()), url
 
 
 def test_github_raw_accept_leaves_the_json_envelope_alone(gh_client, gh_admin_h, gh_org):
@@ -3149,6 +3754,8 @@ def test_github_user_repos(gh_client, gh_admin_h, gh_user_tokens, gh_org):
         "/git/trees/main",
         "/git/ref/heads/main",
         "/branches",
+        "/branches?protected=f",
+        "/branches?protected=False",
         "/branches/main",
         "/tags",
         "/commits/main",
@@ -3157,7 +3764,10 @@ def test_github_user_repos(gh_client, gh_admin_h, gh_user_tokens, gh_org):
         "/teams",
     ):
         assert c.get(f"/github/repos/{gh_org}/vault{path}", headers=bob_h).status_code == 404, path
-        assert c.get(f"/github/repos/{gh_org}/vault{path}", headers=gh_admin_h).status_code == 200
+        expected = 404 if path == "/readme" else 200  # vault has no README file
+        assert (
+            c.get(f"/github/repos/{gh_org}/vault{path}", headers=gh_admin_h).status_code == expected
+        )
 
     page = c.get("/github/user/repos", headers=gh_admin_h, params={"per_page": 1, "page": 1})
     assert len(page.json()) == 1 and 'rel="next"' in page.headers.get("Link", "")
@@ -3759,11 +4369,7 @@ def test_github_pull_diff_reverse_applies_with_real_git(
 
 def test_github_pull_files_empty_when_the_repo_has_no_file_docs(tmp_path):
     """No file docs means no snapshot to diff against, so the changeset is empty rather than
-    invented — and the pull object's counts follow it down to zero.
-
-    Driven through the builders rather than a client: this file's two module-scoped clients share
-    ``backlot.main.app``'s state (see ``client_for``), so "a corpus with no file docs" is not
-    something an HTTP test here can rely on."""
+    invented — and the pull object's counts follow it down to zero."""
     from backlot.routers.github import _pr_files, _pr_obj
 
     s = tiny_corpus(
@@ -4338,11 +4944,16 @@ def test_github_tree_truncates_at_the_real_caps(gh_client, gh_admin_h, gh_org, m
 # --- OpenAPI enrichment: github response fidelity ------------------------------------------
 
 
-def test_github_list_issues_documents_state_param(client):
+def test_github_list_issues_documents_its_filters(client):
     op = client.get("/openapi.json").json()["paths"]["/github/repos/{owner}/{repo}/issues"]["get"]
     params = {p["name"]: p for p in op.get("parameters", [])}
     assert "state" in params and {"page", "per_page"} <= set(params)
     assert params["state"]["schema"].get("default") == "open"
+    # `labels` as GitHub's OpenAPI description declares it
+    assert params["labels"]["description"] == (
+        "A list of comma separated label names. Example: `bug,ui,@high`"
+    )
+    assert params["labels"]["schema"]["type"] == "string"
 
 
 def test_github_the_statuses_listing_declares_the_page_parameters_real_accepts(client):
@@ -4358,9 +4969,31 @@ def test_github_the_statuses_listing_declares_the_page_parameters_real_accepts(c
     assert {"page", "per_page"} <= {p["name"] for p in op.get("parameters", [])}
 
 
-def test_github_search_still_filters_by_q(client, admin_h):
-    body = client.get("/github/search/issues", params={"q": "is:issue"}, headers=admin_h).json()
-    assert "items" in body and "total_count" in body
+@pytest.mark.parametrize(
+    "path, q, search_type",
+    [
+        ("/github/search/issues", "is:issue", "lexical"),
+        ("/github/search/issues", "is:pr", "lexical"),
+        ("/github/search/issues", "no-matching-issue-lexical-search", "lexical"),
+        ("/github/search/code", "extension:md", None),
+    ],
+)
+def test_github_search_envelope_members_and_their_order_match_real(
+    client, admin_h, path, q, search_type
+):
+    """Issue search sends `search_type` last, after `items`; code search sends no such member."""
+    response = client.get(path, params={"q": q}, headers=admin_h)
+    assert response.status_code == 200
+    members = ["total_count", "incomplete_results", "items"] + ["search_type"] * bool(search_type)
+    assert list(response.json()) == members
+    assert response.json().get("search_type") == search_type
+
+
+def test_github_issue_search_schema_requires_search_type(client):
+    spec = client.get("/openapi.json").json()
+    schema = spec["components"]["schemas"]["GitHubIssueSearch"]
+    assert "search_type" in schema["required"]
+    assert schema["properties"]["search_type"]["type"] == "string"
 
 
 def test_github_responses_unchanged_by_enrichment(client, admin_h):
@@ -4682,6 +5315,44 @@ def test_github_sort_and_direction_order_the_issue_and_pull_listings_as_measured
         link = c.get(pulls, headers=h, params={"per_page": 1}).headers["Link"]
         assert "sort=" not in link and "direction=" not in link
         assert _numbers(c, pulls, h, sort="created", per_page=1, page=2) == [4]
+
+
+def test_github_issues_updated_in_the_same_second_stay_newest_first(tmp_path):
+    """Under `sort=updated` the issue listing serves a tie newest first in either direction and the
+    pull listing serves it by number in the direction asked (see `_ISSUE_ORDERING` and
+    `_PULL_ORDERING`). Every document here shares one `updated_at`, so the whole answer is the tie.
+    """
+    updated = "2021-09-09T00:28:33Z"
+    docs = [
+        {
+            "source_type": "github",
+            "doc_id": f"tie-{n}",
+            "repo": "ties",
+            "subtype": "pull_request" if n > 3 else "issue",
+            "number": n,
+            "title": f"Document {n}",
+            "content": "x",
+            "author_email": "bob@acme.com",
+            "visibility": "public",
+            "state": "open",
+            "created": f"2020-01-0{n}T00:00:00Z",
+            "updated": updated,
+            **({"head": f"feat/{n}", "base": "main"} if n > 3 else {}),
+        }
+        for n in range(1, 7)
+    ]
+    settings = build_corpus(tmp_path, docs, name="ties.jsonl")
+    with client_for(settings, reload=True) as c:
+        h = {"Authorization": f"Bearer {settings.admin_token}"}
+        org = c.get("/_meta/users").json()["org"]
+        issues = f"/github/repos/{org}/ties/issues"
+        # 6 is newest; the issue listing includes the pulls, and both directions keep that order
+        assert _numbers(c, issues, h, sort="updated", direction="asc") == [6, 5, 4, 3, 2, 1]
+        assert _numbers(c, issues, h, sort="updated", direction="desc") == [6, 5, 4, 3, 2, 1]
+        pulls = f"/github/repos/{org}/ties/pulls"
+        assert _numbers(c, pulls, h, sort="updated", direction="asc") == [4, 5, 6]
+        assert _numbers(c, pulls, h, sort="updated") == [4, 5, 6]
+        assert _numbers(c, pulls, h, sort="updated", direction="desc") == [6, 5, 4]
 
 
 def test_github_type_visibility_sort_and_direction_on_the_repository_listings(tmp_path):

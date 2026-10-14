@@ -499,6 +499,22 @@ SAMPLE = [
         "visibility": "group",
         "created": "2026-01-05T10:00:00Z",
     },
+    # A third bucket, public and after `people-vault` in name order, so a caller who cannot see
+    # `people-vault` pages through ListBuckets with a bucket it cannot see between two it can.
+    {
+        "source_type": "s3",
+        "doc_id": "s3-robots",
+        "bucket": "web-assets",
+        "group": "engineering",
+        "key": "site/robots.txt",
+        "title": "robots.txt",
+        "content": "User-agent: *\nDisallow:",
+        "content_type": "text/plain",
+        "author_email": "bob@acme.com",
+        "author_groups": ["engineering"],
+        "visibility": "public",
+        "created": "2026-03-02T09:00:00Z",
+    },
     # HubSpot: the object type is the container, so these span three of them. The contact and the
     # note are associated with the company (declared once; the loader writes both directions).
     {
@@ -922,8 +938,7 @@ def client(sample_settings):
     """A TestClient over the SAMPLE DB, not the ambient ``data/`` import.
 
     Module-scoped, so each vendor's test file gets its own — a lifespan over SAMPLE costs ~5ms once
-    the corpus is built, and sharing one session-wide would collide with the tests that reload
-    ``backlot.main`` to serve a different DB."""
+    the corpus is built."""
     from tests._helpers import client_for
 
     with client_for(sample_settings) as c:

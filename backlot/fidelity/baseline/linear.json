@@ -3,7 +3,7 @@
   "endpoints": [
     "https://api.linear.app/graphql"
   ],
-  "measured": "2026-09-17",
+  "measured": "2026-10-09",
   "acknowledged": [
     {
       "kind": "missing_field",
@@ -22,6 +22,13 @@
       "severity": "gap",
       "path": "AgentSession.archivedAt",
       "detail": "vendor serves archivedAt: DateTime; Backlot does not"
+    },
+    {
+      "kind": "missing_field",
+      "severity": "gap",
+      "path": "AgentSession.codingHarness",
+      "detail": "vendor serves codingHarness: AgentSessionCodingHarness; Backlot does not",
+      "note": "Linear's own description marks it internal: \"[Internal] Coding harness metadata for this cloud or local session.\" It joins the family whose gap is recorded on `Query.agentSession`, and it carries a note of its own because the 2026-09-24 scheduled run read it as new surface. Measured against api.linear.app on 2026-09-29: it takes no argument and answers an `AgentSessionCodingHarness` (\"[Internal] Coding harness metadata for a cloud or local coding session.\"), an object of two fields, `harness` and `modelLabel`."
     },
     {
       "kind": "missing_field",
@@ -470,6 +477,13 @@
     {
       "kind": "missing_field",
       "severity": "gap",
+      "path": "Document.parentDocument",
+      "detail": "vendor serves parentDocument: Document; Backlot does not",
+      "note": "Linear's own description marks it internal: \"[Internal] The parent document. Null if the document is not a sub-document.\" It joins the family whose gap is recorded on `Query.document`."
+    },
+    {
+      "kind": "missing_field",
+      "severity": "gap",
       "path": "Document.project",
       "detail": "vendor serves project: Project; Backlot does not"
     },
@@ -490,6 +504,13 @@
       "severity": "gap",
       "path": "Document.sortOrder",
       "detail": "vendor serves sortOrder: Float!; Backlot does not"
+    },
+    {
+      "kind": "missing_field",
+      "severity": "gap",
+      "path": "Document.subDocumentSortOrder",
+      "detail": "vendor serves subDocumentSortOrder: Float; Backlot does not",
+      "note": "Linear's own description marks it internal: \"[Internal] The sort order of the sub-document among its siblings. Null if the document is not a sub-document.\" It joins the family whose gap is recorded on `Query.document`."
     },
     {
       "kind": "missing_field",
@@ -2865,7 +2886,7 @@
       "severity": "gap",
       "path": "Query.agentSession",
       "detail": "vendor serves agentSession: AgentSession!; Backlot does not",
-      "note": "No corpus states an agent session. A Linear record here is an issue with its team, its comments and the people on it; nothing in it says an agent was delegated a piece of work, what it did while it held it, or what machine it ran on, so the whole family is a gap \u2014 `agentSession`, `agentSessions`, `agentSessionSandbox`, `agentSessionSshAddress`, `agentActivity`, `agentActivities`, `agentSkill` and `agentSkills`. Backlot states that absence rather than leaving it open: `User.supportsAgentSessions` resolves to `false` and `Comment.agentSession` to null, and `AgentSession` itself is the id-only stub that field and the `@linear/sdk` fragments need in order to validate. Measured against api.linear.app on 2026-09-10, the vendor's `AgentSession` carries 31 fields, five of them deprecated, and the 30 it declares beyond `id` are the `AgentSession.*` entries this file opens with; most are live session state (`status`, `startedAt`, `endedAt`, `summary`, `plan`, `context`, `sourceMetadata`, `activities`, `pullRequest`, `pullRequests`, `codingHarnessModelLabel`), over `AgentSessionStatus`, `AgentActivityConnection`, `PullRequest` and `AgentSessionToPullRequestConnection`, none of which this schema declares."
+      "note": "No corpus states an agent session. A Linear record here is an issue with its team, its comments and the people on it; nothing in it says an agent was delegated a piece of work, what it did while it held it, or what machine it ran on, so the whole family is a gap \u2014 `agentSession`, `agentSessions`, `agentSessionSandbox`, `agentSessionSshAddress`, `agentActivity`, `agentActivities`, `agentSkill` and `agentSkills`. Backlot states that absence rather than leaving it open: `User.supportsAgentSessions` resolves to `false` and `Comment.agentSession` to null, and `AgentSession` itself is the id-only stub that field and the `@linear/sdk` fragments need in order to validate. Measured against api.linear.app on 2026-09-29, the vendor's `AgentSession` carries 32 fields, five of them deprecated, and the 31 it declares beyond `id` are the `AgentSession.*` entries this file opens with; most are live session state (`status`, `startedAt`, `endedAt`, `summary`, `plan`, `context`, `sourceMetadata`, `activities`, `pullRequest`, `pullRequests`, `codingHarnessModelLabel`, `codingHarness`), over `AgentSessionStatus`, `AgentActivityConnection`, `PullRequest`, `AgentSessionToPullRequestConnection` and `AgentSessionCodingHarness`, none of which this schema declares."
     },
     {
       "kind": "missing_field",
@@ -3057,6 +3078,13 @@
     {
       "kind": "missing_field",
       "severity": "gap",
+      "path": "Query.dependencyPackageMetadata",
+      "detail": "vendor serves dependencyPackageMetadata: [DependencyPackageMetadataResult!]!; Backlot does not",
+      "note": "No corpus states it: it answers package-registry data rather than anything a Linear workspace holds. Linear's own description: \"Registry metadata (license, publish date, weekly download count) for a batch of dependency package versions, used by the dependency lock file diff preview. Cached across all workspaces since registry data isn't workspace-specific. A package the registry has no data for (or an unsupported ecosystem) is simply omitted from the result rather than erroring. At most 500 packages per request.\" Measured against api.linear.app on 2026-09-29: it takes one argument, `packages: [DependencyPackageInput!]!`, each an `ecosystem`, a `name` and a `version`, and answers `[DependencyPackageMetadataResult!]!`, whose five fields are `name`, `version`, `license`, `publishedAt` and `weeklyDownloads`. This schema declares neither type."
+    },
+    {
+      "kind": "missing_field",
+      "severity": "gap",
       "path": "Query.diff",
       "detail": "vendor serves diff: Diff!; Backlot does not"
     },
@@ -3064,7 +3092,8 @@
       "kind": "missing_field",
       "severity": "gap",
       "path": "Query.document",
-      "detail": "vendor serves document: Document!; Backlot does not"
+      "detail": "vendor serves document: Document!; Backlot does not",
+      "note": "No corpus states a document. Linear's own description of `Document`: \"A rich-text document that lives within a project, initiative, team, issue, release, or cycle.\" A Linear record here is an issue with its team, its comments and the people on it, and nothing in it is a document, so `Document` is one of the id-only stubs at the top of `backlot/graphql/linear.graphql`, and this root, `documents` and the `Document.*` entries here, its fields beyond `id`, are gaps. The one field in this schema that answers a `Document`, `DocumentContent.document`, is never reached: `Comment.documentContent` and `Project.documentContent` resolve to null and `Release.releaseNotes` is an empty list. Measured against api.linear.app on 2026-10-07: none of the vendor's `Document` fields is deprecated, and the workspace measured has no document, `documents(first: 50, includeArchived: true)` answering an empty list."
     },
     {
       "kind": "missing_field",
@@ -3449,6 +3478,27 @@
     {
       "kind": "missing_field",
       "severity": "gap",
+      "path": "Query.originInstallUrl",
+      "detail": "vendor serves originInstallUrl: OriginInstallUrlPayload!; Backlot does not",
+      "note": "Linear's own description marks it internal: \"[Internal] Builds the URL that starts installing Linear's Origin app into a codebase, or reinstalling it to grant new scopes.\" It joins the family whose gap is recorded on `Query.originInstallation`. Measured against api.linear.app on 2026-10-07: it takes no argument and answers `OriginInstallUrlPayload!`, an object of one field, `installUrl: String!` (\"The Origin URL to send the user to in order to install Linear's app.\"). Asked once, it answered a `https://cursor.com/codebase/apps/install` URL whose query carries `client_id`, `scope`, `redirect_uri`, `state`, `summary` and `include_granted_scopes`. This schema does not declare `OriginInstallUrlPayload`."
+    },
+    {
+      "kind": "missing_field",
+      "severity": "gap",
+      "path": "Query.originInstallation",
+      "detail": "vendor serves originInstallation: OriginInstallationDetails!; Backlot does not",
+      "note": "No corpus states an Origin installation. Linear's own description marks the root internal: \"[Internal] Describes an Origin installation that started on Origin, for its installer to confirm before connecting.\" What it describes is the Origin side of an install: the Origin owner Linear's app was installed on, which of that owner's repositories it covers, and whether the current workspace has connected it. A Linear record here is an issue with its team, its comments and the people on it, and nothing in it says the app was installed anywhere, so the three `origin*` roots on `Query` are a gap: this one, `originInstallUrl` and `originPendingInstallations`. Measured against api.linear.app on 2026-10-07: it takes one argument, `installationId: String!` (\"The Origin installation id from the install redirect.\"), and answers `OriginInstallationDetails!`, whose five fields are `installationId`, `ownerSlug`, `ownerType` (\"Whether the Origin owner is a `team` or a `user`.\"), `repositorySelection` (\"Whether the installation covers `all` repositories of the owner or only `selected` ones.\") and `connectedToWorkspace` (\"Whether the installation is already connected to the current workspace, as after a reinstall that updated it.\"). Asked for three ids no installation carries (`not-a-real-installation`, `12345678` and the nil UUID), it answered each with a 200 whose body is `data: null` and an `errors` member, `Internal server error` with `INTERNAL_SERVER_ERROR` and `userError: false`. This schema does not declare `OriginInstallationDetails`. The same introspection lists three Origin mutations, `integrationOriginConnect`, `integrationOriginConnectInstallation` and `originInstallationCancel`, which this comparison does not read because Backlot declares no `Mutation` type."
+    },
+    {
+      "kind": "missing_field",
+      "severity": "gap",
+      "path": "Query.originPendingInstallations",
+      "detail": "vendor serves originPendingInstallations: [OriginInstallationDetails!]!; Backlot does not",
+      "note": "Linear's own description marks it internal: \"[Internal] Lists the Origin installations the current user started on Origin that no workspace has connected yet, matched by the user's email.\" It joins the family whose gap is recorded on `Query.originInstallation`, and each item is the `OriginInstallationDetails` that root answers. Measured against api.linear.app on 2026-10-07: it takes no argument and answered `[]` for the user the API key belongs to, so a constant empty list would match that answer and state nothing."
+    },
+    {
+      "kind": "missing_field",
+      "severity": "gap",
       "path": "Query.partnerOfferDetails",
       "detail": "vendor serves partnerOfferDetails: PartnerOfferDetailsPayload; Backlot does not"
     },
@@ -3548,6 +3598,13 @@
       "severity": "gap",
       "path": "Query.pushSubscriptionTest",
       "detail": "vendor serves pushSubscriptionTest: PushSubscriptionTestPayload!; Backlot does not"
+    },
+    {
+      "kind": "missing_field",
+      "severity": "gap",
+      "path": "Query.quotas",
+      "detail": "vendor serves quotas: OrganizationQuotaConnection!; Backlot does not",
+      "note": "Linear's own description: \"Public resource quotas for the authenticated workspace. These are not subscription limits.\" No corpus states a workspace's limits: a Linear record here is an issue with its team, its comments and the people on it, and `Query.organization` is a gap in this file as well. Measured against api.linear.app on 2026-10-07: it takes `filter: OrganizationQuotaFilter` (\"Filter public workspace quotas by key.\", over `key`, `and` and `or`) and `before`, `after`, `first` and `last`, and answers an `OrganizationQuotaConnection!` of `OrganizationQuota` (\"A public resource quota for the current workspace.\"), whose five fields are `id`, `key` (\"Stable quota key.\"), `limit: Float!` (\"Effective quota limit, including workspace overrides.\"), `name` and `description`. The workspace measured answered 27 quotas on one page, each with an `id` equal to its `key`, such as `max-teams` at 1000 and `max-issues-per-team` at 60000. Since each `limit` includes the workspace's own overrides, serving the measured values would present one workspace's limits as every corpus's. This schema declares none of `OrganizationQuotaConnection`, `OrganizationQuota` or `OrganizationQuotaFilter`."
     },
     {
       "kind": "missing_field",
@@ -4093,6 +4150,13 @@
     {
       "kind": "missing_field",
       "severity": "gap",
+      "path": "Team.agentAutomationEnabled",
+      "detail": "vendor serves agentAutomationEnabled: Boolean!; Backlot does not",
+      "note": "Linear's own description marks it internal: \"[Internal] Whether the team has enabled agent automation.\" `@linear/sdk` 97.1.0 has neither this field nor `Team.codingAgentEnabled` on its generated `Team` type and selects neither in any document it sends, so both are a gap; so is the internal `Team.joinByDefault`, which that type declares and no document selects. No product default is measured to serve in their place: against api.linear.app on 2026-10-09 neither is deprecated, and the one team in the workspace measured answered `true` for both, as did the workspace's `Organization.agentAutomationEnabled` and `Organization.codingAgentEnabled`, which Backlot leaves undeclared with `Query.organization`."
+    },
+    {
+      "kind": "missing_field",
+      "severity": "gap",
       "path": "Team.ancestors",
       "detail": "vendor serves ancestors: [Team!]!; Backlot does not"
     },
@@ -4101,6 +4165,13 @@
       "severity": "gap",
       "path": "Team.children",
       "detail": "vendor serves children: [Team!]!; Backlot does not"
+    },
+    {
+      "kind": "missing_field",
+      "severity": "gap",
+      "path": "Team.codingAgentEnabled",
+      "detail": "vendor serves codingAgentEnabled: Boolean!; Backlot does not",
+      "note": "Linear's own description marks it internal: \"[Internal] Whether the team has enabled Coding Sessions.\" It joins the gap recorded on `Team.agentAutomationEnabled`."
     },
     {
       "kind": "missing_field",
@@ -4257,6 +4328,20 @@
       "severity": "gap",
       "path": "Team.templates",
       "detail": "vendor serves templates: TemplateConnection!; Backlot does not"
+    },
+    {
+      "kind": "missing_field",
+      "severity": "gap",
+      "path": "Team.viewerCanLeave",
+      "detail": "vendor serves viewerCanLeave: Boolean!; Backlot does not",
+      "note": "Linear's own description: \"Whether the viewer can remove themselves from the team. False when the viewer is not a member, the team is SCIM-managed, the viewer is an app user the team does not accept, or leaving would leave the viewer without an active team. Otherwise mirrors the checks `teamMembershipDelete` applies to a viewer leaving on their own.\" The `false` measured is no default to serve: the member it answered is in no other team, so leaving would leave them without an active team. It joins the gap recorded on `Team.viewerMembership`."
+    },
+    {
+      "kind": "missing_field",
+      "severity": "gap",
+      "path": "Team.viewerMembership",
+      "detail": "vendor serves viewerMembership: TeamMembership; Backlot does not",
+      "note": "Linear's own description: \"The viewer's membership in the team. Null when the viewer is not a member.\" It answers a `TeamMembership`, a type this server does not declare, and Backlot serves no team membership: `Team.members`, `membership` and `memberships` are gaps too. `@linear/sdk` 97.1.0 has neither this field nor `Team.viewerCanLeave` on its generated `Team` type and selects neither in any document it sends, so both are a gap. Measured against api.linear.app on 2026-10-09: neither is deprecated, and the one team in the workspace answered its member a `TeamMembership` here and `false` for `Team.viewerCanLeave`."
     },
     {
       "kind": "missing_field",

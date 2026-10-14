@@ -193,11 +193,10 @@ def jira_search_placement(spec: dict) -> dict:
     declare and what the live service reads: a `nextPageToken` in the query string of a POST is not
     read, and `?maxResults=1` with a body that omits it is ignored (measured 2026-09-15).
 
-    Here rather than in two `openapi_extra` dicts on two routes, because ``openapi_extra`` is per
-    ROUTE and a route is per path: splitting the methods into a route each would leave both paths
-    served by two single-method routes, and Starlette fills `Allow` from the one route that
-    partially matched, so a `PUT` would name one method where real names both. One route keeps the
-    header and this keeps the document.
+    Here, on the served document, because one route serves both methods and ``openapi_extra`` is
+    per route: the route declares both placements and this leaves each on its own method. The
+    `Allow` a `PUT` gets is the measured table's (``errors.atlassian.jira_allow``), keyed by the
+    path, so it names both methods however they are split across routes.
     """
     for path, item in spec.get("paths", {}).items():
         if not path.endswith("/search/jql"):
@@ -219,10 +218,12 @@ def google_system_parameters(spec: dict) -> dict:
 
     `$.xgafv` alone, though real's document declares `callback` beside it and Backlot validates that
     one for the router too (``errors.google.validate_system_parameters``). `callback` is honoured on
-    a Google error answered to a GET — a POST ignores it, as real's POSTs do — and on a SUCCESS only
-    under ``/sheets/v4``, which is where :func:`qp` declares it. The two Sheets POST routes share
-    that declaration and ignore the parameter exactly as real's do, so it promises a caller no more
-    there than the vendor's own document does."""
+    a Google error answered to a GET — a POST ignores it outright, as real's POSTs do, and a Drive
+    download neither wraps nor refuses through it but answers it with real's own 503
+    (``routers.google._system_parameters``) — and on a SUCCESS only under ``/sheets/v4``, which is
+    where :func:`qp` declares it. The two Sheets POST routes share that declaration and ignore the
+    parameter exactly as real's do, so it promises a caller no more there than the vendor's own
+    document does."""
     for path, item in spec.get("paths", {}).items():
         if gerr.family(path) is None:
             continue

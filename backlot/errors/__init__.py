@@ -19,10 +19,17 @@ A module in ``_ENVELOPES`` provides:
 - ``method_not_allowed(path, method)``, optional — the vendor's own 405, as an exception carrying
   its body, media type and headers. The router raises a 405 before any vendor code runs, so a
   vendor whose 405 differs from the shape its other refusals take says so here. Atlassian and S3
-  implement it: what Atlassian's two products answer is in
-  :func:`backlot.errors.atlassian.method_not_allowed`, and S3 answers a method it defines nothing
-  for with a 400 rather than a 405 (:func:`backlot.errors.s3.method_not_allowed`). A vendor without
-  it keeps the shared envelope.
+  implement it. What Atlassian's two products answer is in
+  :func:`backlot.errors.atlassian.method_not_allowed`, which its own catch-all route raises rather
+  than the router, because that route matches every method on every path it owns. S3 answers a
+  method it defines nothing for with a 400 rather than a 405
+  (:func:`backlot.errors.s3.method_not_allowed`). A vendor without it keeps the shared envelope.
+- ``head_content_length(request, status_code)``, optional — whether a `HEAD` declares the length
+  of the body its `GET` would have carried. The whole REQUEST, because Google's answer turns on
+  whether the GET was a download, which the path does not say. A vendor without it declares the
+  length, as GitHub and Notion are measured to; Atlassian and Google implement it, and which of
+  their answers declare one is :func:`backlot.errors.atlassian.head_content_length` and
+  :func:`backlot.errors.google.head_content_length`.
 - ``json_media_type(path, status_code)``, optional — the `content-type` the vendor puts on a JSON
   body answered at that path with that status, when it is measured to differ from FastAPI's bare
   `application/json`. GitHub and Atlassian implement it — Atlassian's names Jira's charset and keeps
@@ -76,6 +83,17 @@ def method_not_allowed(path: str, method: str):
         if envelope.owns(path):
             answer = getattr(envelope, "method_not_allowed", None)
             return answer(path, method) if answer is not None else None
+    return None
+
+
+def head_content_length(request: Request, status_code: int) -> bool | None:
+    """The answer of the hook the module docstring describes, for the vendor this request's path
+    belongs to, or ``None`` for a vendor without it, which ``backlot.main`` answers as it does
+    ``True``."""
+    for envelope in _ENVELOPES:
+        if envelope.owns(request.url.path):
+            answer = getattr(envelope, "head_content_length", None)
+            return answer(request, status_code) if answer is not None else None
     return None
 
 

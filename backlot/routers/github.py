@@ -15,7 +15,7 @@ import time
 from collections.abc import Callable
 from email.utils import formatdate
 from typing import NamedTuple
-from urllib.parse import quote
+from urllib.parse import quote, unquote_plus
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
 from fastapi.responses import JSONResponse, PlainTextResponse
@@ -661,6 +661,8 @@ class GitHubIssueSearch(_Loose):
     total_count: int
     incomplete_results: bool
     items: list[GitHubIssue]
+    # After `items`, where real sends it; a response's members go out in the order declared here.
+    search_type: str
 
 
 class GitHubCodeHit(_Loose):
@@ -884,7 +886,9 @@ class _Ordering(NamedTuple):
 #: pull seen through this listing, its review comments: 5797 (`comments: 105`, `review_comments:
 #: 25`) sits between 2966 (211) and 1573 (122), which no single member orders. Ties keep the
 #: unsent order whatever the direction: `sort=comments&direction=asc` answers 7620, 7619, 7618,
-#: three rows at 0 comments, newest first.
+#: three rows at 0 comments, newest first, and on 2026-10-13 `labels=Bug&state=all&sort=updated`
+#: answered 1703 before 1642, 1755 before 1746 and 1029 before 639, each pair sharing one
+#: `updated_at`, with `direction=asc` and with `direction=desc`.
 _ISSUE_ORDERING = _Ordering(
     sorts=("created", "updated", "comments"),
     default="created",
@@ -905,7 +909,11 @@ _ISSUE_ORDERING = _Ordering(
 #: here. `direction=asc` alone 4, 8, 10. `sort=bogus` 4, 8, 10 and `sort=bogus&direction=desc`
 #: 7619, 7616, 7609, so an unknown sort is read as `created` with the direction honoured;
 #: `direction=bogus` alone the unsent order and `sort=updated&direction=bogus` 7025, 7026, 6675,
-#: the `direction=desc` order, so an unknown direction is `desc` with the sort kept.
+#: the `direction=desc` order, so an unknown direction is `desc` with the sort kept. Pulls that
+#: share an `updated_at` are ordered by number in the direction asked: on 2026-10-13, with
+#: `state=all&per_page=100`, the first page of `sort=updated` held 27 such groups, each lowest
+#: number first (192 before 196), and that of `sort=updated&direction=desc` 4, each highest number
+#: first (7543 before 7520).
 _PULL_ORDERING = _Ordering(
     sorts=("created", "updated", "popularity", "long-running"),
     default="created",
@@ -1007,15 +1015,20 @@ def _updated_ts(row) -> int:
     return row["updated_ts"] or _created_ts(row) + 3600
 
 
-def _issue_sort_keys(conn, repo: str, sort: str, ids) -> dict[str, Callable]:
+def _issue_sort_keys(
+    conn, repo: str, sort: str, ids, *, updated_keeps_unsent: bool = False
+) -> dict[str, Callable]:
     """The sort keys of the issue and pull listings, over the store's rows.
 
-    The timestamps are the ones the bodies serve (:func:`_shared_obj` reads the same two
-    functions), and the number breaks a tie the way real's monotonic ids do. `comments` and
-    `popularity` are one key: both order by the conversation and review comments added together,
-    which is the count real orders by (see :data:`_ISSUE_ORDERING`), read in one query for the
-    repository and only when asked for. `long-running` is `created` with no filter (see
-    :data:`_PULL_ORDERING`).
+    The timestamps are the ones the bodies serve (:func:`_shared_obj` reads the same two functions).
+    `created` breaks a same-second tie by number, and so does `updated` on the pull listing, so that
+    number reverses with the direction (see :data:`_PULL_ORDERING`). The issue listing passes
+    ``updated_keeps_unsent``, which makes `updated` the timestamp alone, so rows that share an
+    `updated_at` keep the unsent order, newest first, in either direction (see
+    :data:`_ISSUE_ORDERING`). `comments` and `popularity` are one key: both order by the
+    conversation and review comments added together, which is the count real orders by (see
+    :data:`_ISSUE_ORDERING`), read in one query for the repository and only when asked for.
+    `long-running` is `created` with no filter (see :data:`_PULL_ORDERING`).
 
     ``ids`` scopes that count to the comments the caller is served, so a row's position is the
     position its own served numbers put it in (see :func:`store.github_comment_counts`)."""
@@ -1027,7 +1040,10 @@ def _issue_sort_keys(conn, repo: str, sort: str, ids) -> dict[str, Callable]:
         return _created_ts(row), row["number"]
 
     def updated(row):
-        return _updated_ts(row), row["number"]
+        ts = _updated_ts(row)
+        if updated_keeps_unsent:
+            return ts
+        return ts, row["number"]
 
     def comments(row):
         return counts.get(row["number"], 0)
@@ -1247,7 +1263,15 @@ async def search_issues(
         for r in matched[start : start + per_page]
     ]
     _search_paged(request, response, q, page, per_page, len(matched))
-    return {"total_count": len(matched), "incomplete_results": False, "items": items}
+    # Real answers `lexical` to a search that does not ask for `search_type=semantic` or `hybrid`,
+    # an empty one included (measured 2026-10-10). This route ignores `search_type` and always
+    # matches lexically.
+    return {
+        "total_count": len(matched),
+        "incomplete_results": False,
+        "items": items,
+        "search_type": "lexical",
+    }
 
 
 # --- code search ----------------------------------------------------------------
@@ -1880,6 +1904,9 @@ async def list_issues(
     state: str = _state_param(_ISSUE_STATE_DESCRIPTION),
     sort: str = _enum_param("created", _ISSUE_SORT_DESCRIPTION, _ISSUE_ORDERING.sorts),
     direction: str = _enum_param("desc", _ISSUE_DIRECTION_DESCRIPTION, _DIRECTIONS),
+    labels: str = Query(
+        None, description="A list of comma separated label names. Example: `bug,ui,@high`"
+    ),
     page: PageParam = None,
     per_page: PageParam = None,
 ):
@@ -1907,9 +1934,29 @@ async def list_issues(
         for r in store.list_documents(conn, "github", repo, ids, limit=10_000, state=state_filter)
         if r["kind"] != "file"
     ]
+    # Measured on psf/requests, api.github.com, 2026-10-12 and 2026-10-13: an issue is served when
+    # its labels include every name the value lists, comma-separated and compared without case, and
+    # the last repeated parameter is the one read and the one a page link carries. A space is part
+    # of a name (`%20Bug` and `Bug%20` match nothing) and an empty name between two others is a name
+    # too (`Bug,,Documentation` matches nothing), but empty names at the end are dropped
+    # (`Bug,` is `Bug`). A value of commas alone (`,`) or of whitespace alone (`%20`, `%09`,
+    # `%C2%A0`, `%E3%80%80`) filters nothing; `%1C` to `%1F`, which `str.isspace` counts too, match
+    # nothing.
+    named = (labels or "").rstrip(",")
+    if named and not all(ch.isspace() and not 0x1C <= ord(ch) <= 0x1F for ch in labels):
+        wanted = {name.lower() for name in named.split(",")}
+        all_rows = [
+            row
+            for row in all_rows
+            if wanted <= {name.lower() for name in store.jcol(row, "labels")}
+        ]
     sort, descending = _order(request, _ISSUE_ORDERING)
     all_rows = _ordered(
-        all_rows, _issue_sort_keys(conn, repo, sort, ids), _ISSUE_ORDERING, sort, descending
+        all_rows,
+        _issue_sort_keys(conn, repo, sort, ids, updated_keeps_unsent=True),
+        _ISSUE_ORDERING,
+        sort,
+        descending,
     )
     asserted = page  # kept: the page urls carry the number the caller claimed, or none at all
     page, per_page = _clamp(page, per_page)
@@ -1930,7 +1977,7 @@ async def list_issues(
     return _paged_by_cursor(
         request,
         len(all_rows),
-        _echo(request, state=state, **_sent(request, "sort", "direction")),
+        _echo(request, state=state, **_sent(request, "sort", "direction", "labels")),
         body,
         link_page,
         per_page,
@@ -2274,7 +2321,7 @@ async def commit_statuses(
     caller = _require(request)
     ids = auth.visible_ids(request, caller)
     _require_repo(conn, repo, ids)  # a repo this caller cannot see must not answer for its shas
-    if sha.strip("/") not in _commit_ish(conn, owner, repo, ids):
+    if _ref_as_sent(sha) not in _commit_ish(conn, owner, repo, ids):
         raise HTTPException(status_code=404, detail="Not Found")
     page, per_page = _clamp(page, per_page)
     return _paged(request, 0, {}, [], page, per_page)
@@ -2334,7 +2381,7 @@ async def get_git_ref(owner: str, repo: str, ref: str, request: Request):
     caller = _require(request)
     ids = auth.visible_ids(request, caller)
     _require_repo(conn, repo, ids)
-    ref = ref.strip("/")
+    ref = _ref_as_sent(ref)
     if not _ref_exists(conn, owner, repo, ref, ids):
         raise HTTPException(status_code=404, detail="Not Found")
     ab = _api_base(request)
@@ -2362,7 +2409,18 @@ def _ref_exists(conn, owner: str, repo: str, ref: str, ids) -> bool:
         return bool(name) and name in _repo_tags(conn, repo)
     if head == "pull":
         number, _, kind = name.partition("/")
-        if kind not in ("head", "merge") or not number.isdigit():
+        # Only a pull's number in its own decimal spelling names its ref. Measured on
+        # octocat/Hello-World (api.github.com, 2026-10-11): `pull/11482/head` and `…/merge` are
+        # 200, and the same number in fullwidth, Arabic-Indic or Devanagari digits, with leading
+        # zeros or a sign, and `²` are each the 404 an unknown number gets. Nineteen digits hold
+        # every number SQLite stores (`store.github_by_number` misses one past 64 bits), and the
+        # bound keeps `int()` off a string longer than the 4,300 digits it converts.
+        if kind not in ("head", "merge") or not (
+            number.isascii()
+            and number.isdigit()
+            and len(number) <= 19
+            and str(int(number)) == number
+        ):
             return False
         row = store.github_by_number(conn, repo, int(number), ids)
         if row is None or row["kind"] != "pull_request":
@@ -2379,8 +2437,10 @@ def _ref_exists(conn, owner: str, repo: str, ref: str, ids) -> bool:
 async def get_tree(
     owner: str, repo: str, ref: str, request: Request, recursive: str | None = Query(None)
 ):
-    """The repo's file set as a git tree (real API shape). `recursive` (any truthy value,
-    GitHub-style) returns every blob/tree entry; otherwise only the entries directly under root.
+    """The repo's file set as a git tree (real API shape). `recursive=` with any value, the empty
+    one, `0` and `false` included, returns every blob/tree entry; without it, or written bare as
+    `?recursive`, only the entries directly under root. Repeated, the last one decides. Measured on
+    api.github.com (2026-10-04): psf/requests answers 21 entries flat and 153 recursive.
 
     `ref` selects WHICH tree, exactly as on real GitHub: a SUBTREE's own sha — the one a client
     reads out of a parent listing's `tree` entry — answers that directory's entries, with paths
@@ -2422,7 +2482,7 @@ async def get_tree(
     caller = _require(request)
     ids = auth.visible_ids(request, caller)
     _require_repo(conn, repo, ids)
-    ref = ref.strip("/")
+    ref = _ref_as_sent(ref)
     ab = _api_base(request)
     rows = store.list_repo_files(conn, repo, ids)
     entries = _tree_from_paths(owner, repo, rows, ab)
@@ -2438,7 +2498,7 @@ async def get_tree(
         entries = [
             {**e, "path": e["path"][len(prefix) :]} for e in entries if e["path"].startswith(prefix)
         ]
-    if not _truthy(recursive):
+    if recursive is None or _written_bare(request, "recursive"):
         entries = [e for e in entries if "/" not in e["path"]]
     entries, truncated = _cap_tree(entries)
     tree_sha = _repo_tree_sha(repo) if subtree is None else _dir_sha(repo, subtree)
@@ -2550,8 +2610,57 @@ async def get_contents(
 ):
     """`ref` selects a SNAPSHOT of the file when the corpus named one; see store.get_repo_file for
     why an unnamed ref answers HEAD instead of 404. A directory listing ignores it — the tree has
-    no per-ref shape here (the no-history simplification in :func:`get_tree`)."""
+    no per-ref shape here (the no-history simplification in :func:`get_tree`).
+
+    A path ending in a slash is a 302 to the id-keyed spelling without it, which is real's own
+    answer. Measured 2026-09-22: `contents/backlot/`, `contents/README.md/` and
+    `contents/no-such-dir/` all answer `302` to
+    `https://api.github.com/repositories/{id}/contents/{path}`, so the redirect is reached before
+    the path resolves to anything; the `Location` carries no query, `?ref=main` included; and the
+    id-keyed spelling redirects to itself the same way.
+
+    What it does NOT precede is the repository: a repository that does not exist, an owner that
+    does not, and one the caller cannot see are each a 404 rather than a redirect (measured the
+    same day on three such paths), so the credential and the repository are resolved first and the
+    redirect answers only for a repository this caller can read.
+    """
+    if path.endswith("/"):
+        conn = auth.conn(request)
+        caller = _require(request)
+        _require_repo(conn, repo, auth.visible_ids(request, caller))
+        target = _redirect_to_the_slash_free_contents_path(request, repo, path)
+        # Real's redirect carries `text/html;charset=utf-8`, no space, and an empty body, measured
+        # on the four redirects the docstring lists.
+        return Response(
+            status_code=302,
+            headers={"Location": target, "Content-Type": "text/html;charset=utf-8"},
+        )
     return await _contents_response(owner, repo, path, request, ref)
+
+
+# What the contents redirect's `Location` leaves unencoded, beside the letters, digits and `-._~`
+# that `quote` always leaves. Measured 2026-09-28 by sending each byte 0x01-0x7F percent-encoded in
+# `contents/x%XXy/` on python/cpython: these come back as the character, `%2F` included as a `/`,
+# and every other byte comes back as `%XX` in upper case (the controls, the space, the backtick
+# and `"#$%<>?@\^{|}`), as does UTF-8 (`%C3%A9`, and `%eb` sent is `%EB`). So real decodes the
+# path and encodes it again rather than echoing what was sent: `%28` sent is `(` in the `Location`.
+_CONTENTS_LOCATION_SAFE = "/!&'()*+,:;=[]"
+
+
+def _redirect_to_the_slash_free_contents_path(request: Request, repo: str, path: str) -> str:
+    """Where real points a `contents` path that ends in a slash: the id-keyed spelling of the same
+    path with ONE slash gone, absolute, and carrying no query.
+
+    One, not all of them: measured 2026-09-22, `contents/backlot//` points at `contents/backlot/`
+    and `contents///` at `contents//`, so a path carrying several takes a hop per slash and a
+    client following redirects walks them off one at a time.
+
+    `path` arrives decoded, so it is encoded again the way real encodes it
+    (``_CONTENTS_LOCATION_SAFE``): `contents/a%3Fb/` points at `contents/a%3Fb`, where the decoded
+    `a?b` would name the file `a` with a query.
+    """
+    rest = quote(path[:-1], safe=_CONTENTS_LOCATION_SAFE)
+    return f"{_api_base(request)}/repositories/{synth.github_user_id(repo)}/contents/{rest}"
 
 
 @router.get("/repos/{owner}/{repo}/git/blobs/{sha}")
@@ -2560,6 +2669,16 @@ async def get_blob(owner: str, repo: str, sha: str, request: Request):
     caller = _require(request)
     ids = auth.visible_ids(request, caller)
     _require_repo(conn, repo, ids)
+    # Measured on psf/requests on 2026-10-03: a seven-character prefix, an upper-case sha and
+    # `zzzz` each answered this 422 with the route's own documentation_url, where a well-formed
+    # sha naming no blob is the 404 below. Upper case is refused here though `commits/{ref}`
+    # resolves it. A repository that does not exist is the 404 above, whatever the sha (measured
+    # 2026-10-05 with `zzzz` on a missing repository and on a missing owner).
+    if not re.fullmatch(r"[0-9a-f]{40}", sha):
+        raise HTTPException(
+            status_code=422,
+            detail="The sha parameter must be exactly 40 characters and contain only [0-9a-f].",
+        )
     # every snapshot, not just HEAD: a blob sha is content-addressed, so a superseded snapshot
     # keeps its own and stays fetchable at it (see store.iter_repo_file_snapshots). Streamed, so a
     # match stops the scan rather than reading the repo's every file first.
@@ -2608,27 +2727,25 @@ async def list_branches(
     both would hand a client a field real GitHub never sends here.
 
     `?protected=` selects, so it is honoured rather than ignored: a client that asked for the
-    protected branches and got an unprotected one back would read that branch as push-guarded.
-    Real has three answers — only protected branches for a true value, only unprotected ones for
-    `false`, and all of them when the parameter is omitted — and parses the value the way
-    `?recursive=` is parsed, every non-empty value but `false`/`0` reading true. Measured on
-    fastapi/fastapi (22 branches, one of them protected): `true`/`1`/`TRUE`/`yes`/`banana` answer
-    1, `false`/`0` answer 21, an empty value and an omitted one answer 22.
+    protected branches and got an unprotected one back would read that branch as push-guarded. Real
+    has three answers — only protected branches for a true value, only unprotected ones for a false
+    value, and all of them when the parameter is omitted or empty. Which spellings real reads as
+    false is :func:`_truthy`, with the measurement.
 
     All three answers are distinct for a repo whose `subtype: "repo"` record states which branches
     are protected. For one that does not, every branch is unprotected and real's last two coincide
     — a pull cannot imply protection, so an inferred listing has none (see :func:`_branch_rows`).
 
     `?protected=` selects AHEAD of the page cut, so the `Link` counts the pages of the selection:
-    `?protected=false&per_page=1` on fastapi/fastapi answers one of the 21 unprotected branches and
-    reports `rel="last"` page 21, not the 22 of the whole listing.
+    `?protected=false&per_page=1` on fastapi/fastapi (2026-10-05) answers one of the 24 unprotected
+    branches and reports `rel="last"` page 24, not the 25 of the whole listing.
     """
     conn = auth.conn(request)
     caller = _require(request)
     ids = auth.visible_ids(request, caller)
     _require_repo(conn, repo, ids)
     rows = _branch_rows(conn, owner, repo, ids)
-    if protected:  # an EMPTY value selects nothing, as an absent one does: real answers all 22
+    if protected:  # an empty or absent value leaves the listing unfiltered
         rows = [b for b in rows if b["protected"] is _truthy(protected)]
     page, per_page = _clamp(page, per_page)
     start = (page - 1) * per_page
@@ -2732,7 +2849,7 @@ async def get_branch(owner: str, repo: str, branch: str, request: Request):
     caller = _require(request)
     ids = auth.visible_ids(request, caller)
     _require_repo(conn, repo, ids)
-    branch = branch.strip("/")
+    branch = _ref_as_sent(branch)
     found = next((b for b in _branch_rows(conn, owner, repo, ids) if b["name"] == branch), None)
     if found is None:
         raise HTTPException(status_code=404, detail="Branch not found")
@@ -2777,7 +2894,7 @@ async def get_commit(owner: str, repo: str, sha: str, request: Request):
     caller = _require(request)
     ids = auth.visible_ids(request, caller)
     _require_repo(conn, repo, ids)
-    sha = sha.strip("/")
+    sha = _ref_as_sent(sha)
     if sha not in _commit_ish(conn, owner, repo, ids):
         raise _no_commit_for_sha(sha)
     # A NAME resolves to the commit it stands for rather than being echoed back as one: real
@@ -2803,9 +2920,70 @@ async def get_commit(owner: str, repo: str, sha: str, request: Request):
     }
 
 
+#: The names a README is looked up by, the first the corpus holds winning. Measured 2026-10-07:
+#: curl/curl holds `README` and `README.md` and is served `README.md`, octocat/Hello-World's
+#: `README` is served at `readme` and at `readme/`, and torvalds/linux's `fs/cramfs/README` at
+#: `readme/fs/cramfs`.
+_README_NAMES = ("README.md", "readme.md", "README")
+
+
+def _readme_row(conn, repo: str, directory: str, ids, ref: str | None):
+    """The first of :data:`_README_NAMES` the corpus holds in ``directory`` for this caller."""
+    for name in _README_NAMES:
+        row = store.get_repo_file(conn, repo, f"{directory}{name}", ids, ref=ref)
+        if row is not None:
+            return row
+    return None
+
+
+@router.get("/repos/{owner}/{repo}/readme/{dir:path}")
+async def get_readme_for_a_directory(
+    owner: str, repo: str, dir: str, request: Request, ref: str | None = Query(None)
+):
+    """The README of a directory, which real serves at its own route beside the root one.
+
+    Measured 2026-09-22: `readme/Doc` on python/cpython is that directory's README at 200, a
+    directory holding none is a 404 whose `documentation_url` names the directory anchor rather
+    than the root one, and `readme/` — the empty directory — is the repository's own README, which
+    is why a trailing slash answers 200 here where it is a refusal on the routes around it.
+
+    The empty directory is a directory like any other, so it is looked up here rather than handed
+    to :func:`get_readme`, whose 404 names the root anchor: measured 2026-09-28, `readme/` on a
+    repository holding no README (octocat/test-repo1) is the same directory-anchor 404.
+
+    Slashes, measured 2026-09-28 on github/gitignore and python/cpython: a path ending in up to two
+    still names the directory, and one ending in three does not. `readme//` and `readme/Doc//` are
+    still the README, `readme///` and `readme/Doc///` are the directory 404, and a doubled slash
+    before the directory (`readme//Doc`) is `Doc`'s README. The slash 404 comes after the
+    credential and after `?ref=` (`readme///?ref=nope` is the ref's own 404).
+
+    WHICH file it serves is where this and real part: real answers whatever the directory's README
+    is, `Doc/README.rst` on python/cpython among them, and this looks for :data:`_README_NAMES`, as
+    the root route does. A corpus stating `docs/README.rst` gets a 404 here and a 200 on real.
+    """
+    conn = auth.conn(request)
+    caller = _require(request)
+    ids = auth.visible_ids(request, caller)
+    _require_repo(conn, repo, ids)
+    _require_ref(conn, owner, repo, ref, ids)
+    sent = f"/{dir}"
+    if len(sent) - len(sent.rstrip("/")) > 2:
+        raise HTTPException(status_code=404, detail="Not Found")
+    inside = dir.strip("/")
+    row = _readme_row(conn, repo, f"{inside}/" if inside else "", ids, ref)
+    if row is None:
+        raise HTTPException(status_code=404, detail="Not Found")
+    return _raw_response(request, row["content"], _CONTENT_RAW_TYPE) or _file_obj(
+        owner, repo, row, _api_base(request), ref
+    )
+
+
 @router.get("/repos/{owner}/{repo}/readme")
 async def get_readme(owner: str, repo: str, request: Request, ref: str | None = Query(None)):
-    """`ref` selects a snapshot, as on `/contents` — real GitHub takes it here too, and both serve
+    """The repository's README (:func:`_readme_row`), and where the corpus holds none the 404 real
+    gives octocat/test-repo1 in either media type (measured 2026-10-07).
+
+    `ref` selects a snapshot, as on `/contents` — real GitHub takes it here too, and both serve
     the same underlying object (see :func:`_file_obj`), so a README the corpus snapshots would
     otherwise be reachable at an older revision through one route and not the other."""
     conn = auth.conn(request)
@@ -2814,38 +2992,12 @@ async def get_readme(owner: str, repo: str, request: Request, ref: str | None = 
     _require_repo(conn, repo, ids)
     _require_ref(conn, owner, repo, ref, ids)
     ab = _api_base(request)
-    row = store.get_repo_file(conn, repo, "README.md", ids, ref=ref) or store.get_repo_file(
-        conn, repo, "readme.md", ids, ref=ref
-    )
+    row = _readme_row(conn, repo, "", ids, ref)
     if row is not None:
         return _raw_response(request, row["content"], _CONTENT_RAW_TYPE) or _file_obj(
             owner, repo, row, ab, ref
         )
-    text = f"# {repo}\n\nRepository `{owner}/{repo}`.\n"
-    raw = _raw_response(request, text, _CONTENT_RAW_TYPE)
-    if raw is not None:
-        return raw
-    sha = hashlib.sha1(text.encode()).hexdigest()
-    url = f"{ab}/repos/{owner}/{repo}/contents/README.md"
-    return {
-        "type": "file",
-        "name": "README.md",
-        "path": "README.md",
-        "encoding": "base64",
-        "content": base64.b64encode(text.encode()).decode(),
-        "size": len(text),
-        "sha": sha,
-        "node_id": synth.node_id("Blob", sha[:12]),
-        "url": url,
-        "git_url": f"{ab}/repos/{owner}/{repo}/git/blobs/{sha}",
-        "html_url": f"https://github.com/{owner}/{repo}/blob/main/README.md",
-        "download_url": f"https://raw.githubusercontent.com/{owner}/{repo}/main/README.md",
-        "_links": {
-            "self": url,
-            "git": f"{ab}/repos/{owner}/{repo}/git/blobs/{sha}",
-            "html": f"https://github.com/{owner}/{repo}/blob/main/README.md",
-        },
-    }
+    raise HTTPException(status_code=404, detail="Not Found")
 
 
 @router.get("/repos/{owner}/{repo}/collaborators")
@@ -2953,9 +3105,28 @@ _DEFAULT_BRANCH = store.GITHUB_DEFAULT_BRANCH
 _UNSTATED_HEAD_REF = "feature"
 
 
-def _truthy(v: str | None) -> bool:
-    """GitHub's `?recursive=` accepts any non-empty, non-'0'/'false' value as true."""
-    return v is not None and v.lower() not in ("", "0", "false")
+def _written_bare(request: Request, name: str) -> bool:
+    """Whether the last `name` in the query string has no `=`. Starlette reads `?name` and `?name=`
+    alike as the empty string, and :func:`get_tree` answers them differently. Keys are matched
+    percent-decoded, as Starlette and api.github.com both read them: on psf/requests (2026-10-05)
+    `?%72ecursive` answers the flat tree and `?%72ecursive=0` the recursive one."""
+    last = None
+    for pair in request.scope.get("query_string", b"").decode("latin-1").split("&"):
+        key, eq, _ = pair.partition("=")
+        if unquote_plus(key) == name:
+            last = eq
+    return last == ""
+
+
+def _truthy(v: str) -> bool:
+    """How :func:`list_branches` reads `?protected=`. Measured on fastapi/fastapi (25 branches, one
+    protected), 2026-10-05, unauthenticated with API version 2022-11-28 and a fresh nonce per
+    request: `0`, `f`, `F`, `false`, `FALSE`, `off`, `OFF` select the 24 unprotected branches.
+    `False`, `fAlSe`, `Off`, `oFF`, `0 `, ` false`, `f `, `false ` and ` off ` select the protected
+    one: do not fold case or strip. An empty or omitted value answers all 25, so the route leaves it
+    unfiltered.
+    """
+    return v not in ("0", "f", "F", "false", "FALSE", "off", "OFF")
 
 
 def _blob_sha(content: str) -> str:
@@ -3079,6 +3250,20 @@ def _commit_ish(conn, owner: str, repo: str, ids) -> set[str]:
     branches = _branch_rows(conn, owner, repo, ids, pulls=pulls)
     names = {b["name"] for b in branches} | set(_repo_tags(conn, repo))
     return names | _commit_shas(repo, pulls)
+
+
+def _ref_as_sent(ref: str) -> str:
+    """The ref the caller sent, with only a LEADING slash dropped.
+
+    A TRAILING one is part of the name real reads, and each route refuses the name it then fails to
+    find: measured 2026-09-22, `git/trees/main/` and `git/ref/heads/main/` are 404 `Not Found`,
+    `statuses/main/` a 404, `branches/main/` a 404 `Branch not found`, and `commits/main/` a 422
+    whose message echoes the slash.
+
+    The leading slash is dropped because a ref arriving as `//main` — a client joining a base and a
+    ref that both carry one — otherwise reaches the lookup with a name no corpus holds.
+    """
+    return ref.lstrip("/")
 
 
 def _no_commit_for_sha(sha: str) -> HTTPException:

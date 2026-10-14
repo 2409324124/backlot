@@ -2,8 +2,11 @@
 
 Base URL for a client: ``http://<host>/notion/v1/`` (the notion-client SDK appends ``/v1/`` to
 its ``base_url``, so point it at ``http://<host>/notion``). Bearer auth
-(``Authorization: Bearer <token>``); the admin/service token sees everything, a user token is
-ACL-filtered. Errors use Notion's envelope: ``{"object":"error","status","code","message"}``.
+(``Authorization: Bearer <token>``, that scheme and no other); the admin/service token sees
+everything, a user token is ACL-filtered. Errors use Notion's envelope:
+``{"object":"error","status","code","message","request_id"}``, the last of which is also the
+response's ``x-notion-request-id`` (see :func:`_error`). The OAuth client endpoints Notion puts
+behind Basic auth refuse in their own shape, ``{"error","request_id"}`` (see ``unmatched_path``).
 
 **Version-aware databases.** Notion moved database querying to the *data sources* model in
 ``2025-09-03``. This router keys off the ``Notion-Version`` request header:
@@ -22,9 +25,11 @@ Backlot has one data source per database, its id assigned at import alongside th
 
 **The header is required** on every route here, as Notion requires it on every REST request: a
 request that omits it -- or names a version Notion does not publish -- is answered
-``missing_version``, behind the 401 that a request with no usable credential gets (see
-``_refusal``). Every route declares it in the spec as well, so a client generated from that spec
--- ``backlot mcp``'s tools among them -- can send what the route asks for.
+``missing_version``, behind both 401s a request with no usable credential gets -- the one that
+names the bearer format and the one that says the token does not resolve (see ``_refusal``) --
+and behind the 400 a URL Notion does not publish gets ahead of everything (see
+``unmatched_path``). Every route declares it in the spec as well, so a client generated from that
+spec -- ``backlot mcp``'s tools among them -- can send what the route asks for.
 
 Object mapping: a Notion *page* is one doc (``subtype='page'``); a *database* is one doc
 (``subtype='database'``, ``content`` → its description); a *database row* is a page whose
@@ -34,7 +39,11 @@ Object mapping: a Notion *page* is one doc (``subtype='page'``); a *database* is
 
 from __future__ import annotations
 
+import hashlib
 import json
+import re
+import uuid
+from pathlib import Path
 
 from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse
@@ -45,6 +54,9 @@ from backlot.openapi import qp
 from backlot.routers import json_body
 
 router = APIRouter(prefix="/notion/v1", tags=["notion"])
+# Everything under `/notion` that no route above answers. Mounted after `router` in
+# `backlot.main`, so a real route wins and only what is left reaches this one.
+unmatched_router = APIRouter(prefix="/notion", include_in_schema=False)
 
 _PAGE_MAX = 100  # Notion caps page_size at 100
 # The version that split databases into data sources, so the cut between the two models: a
@@ -89,7 +101,7 @@ class NotionList(_NLoose):
 
 
 _P_PAGINATE = [qp("start_cursor"), qp("page_size", "integer")]
-_P_COMMENTS = [qp("block_id"), *_P_PAGINATE]
+_P_COMMENTS = [qp("block_id", required=True), *_P_PAGINATE]
 
 
 def _body(props: dict) -> dict:
@@ -166,11 +178,59 @@ _B_QUERY_DATABASE = _query_extra("versions up to and including 2022-06-28", "202
 # --------------------------------------------------------------------------- helpers
 
 
-def _error(status: int, code: str, message: str) -> JSONResponse:
+_BEARER_REQUIRED = 'Authorization header must use the format "Bearer <token>".'
+_TOKEN_INVALID = "API token is invalid."
+
+
+def _request_id(request: Request) -> str:
+    """The id every Notion answer names itself by, in the body and on the response.
+
+    Measured 2026-09-22 with no credential, which is enough because the URL and the credential are
+    checked before anything else: every refusal carries `"request_id": "<uuid>"` and
+    `x-notion-request-id` with that same value. Real's is per response — three calls to one URL
+    answered three ids — and this one is derived from the method, path and query string instead,
+    the choice this repository makes for a synthesised id so that a corpus served twice answers the
+    same thing and a test can assert one. Two POSTs that differ only in their body share an id
+    here, where real would answer two; the body is left out because a request id is read from a
+    log line beside a URL, not recomputed from what was sent.
+    """
+    raw = hashlib.shake_256(
+        f"notion-req:{request.method} {request.url.path}?{request.url.query}".encode()
+    )
+    return str(uuid.UUID(bytes=raw.digest(16), version=4))
+
+
+def _error(request: Request, status: int, code: str, message: str) -> JSONResponse:
+    request_id = _request_id(request)
     return JSONResponse(
         status_code=status,
-        content={"object": "error", "status": status, "code": code, "message": message},
+        content={
+            "object": "error",
+            "status": status,
+            "code": code,
+            "message": message,
+            "request_id": request_id,
+        },
+        headers={"x-notion-request-id": request_id},
     )
+
+
+def _bearer_credential(request: Request) -> str | None:
+    """The token from `Authorization: Bearer <t>`, and from nothing else.
+
+    `auth.bearer_token` also takes GitHub's legacy `token <t>`, which Notion does not: measured
+    2026-09-22, `token <anything>`, `Basic …`, a bare value with no scheme, a `Bearer` with no
+    token and no header at all are each refused as a header that is not a bearer credential, where
+    `Bearer <a token that does not resolve>` is refused as a token. The header is exactly two
+    words: on 2026-09-28 `Bearer a b`, `Bearer a  b` and `Bearer nope x` were told the format, and
+    `Bearer  nope` with two spaces, `Bearer` and `nope` with a tab between them, `bearer nope` and
+    `BEARER nope` were told the token: two spaces or a tab separate the words as one space does,
+    and the scheme is read without its case.
+    """
+    parts = (request.headers.get("authorization") or "").split()
+    if len(parts) == 2 and parts[0].lower() == "bearer":
+        return parts[1]
+    return None
 
 
 def _version(request: Request) -> str:
@@ -214,7 +274,9 @@ def _refusal(request: Request, caller) -> JSONResponse | None:
 
     The credential first: on 2026-09-15 an invalid token answered ``unauthorized`` on both query
     paths under 2022-06-28, under 2025-09-03 and with no version header at all, so the version is
-    never what a request without a usable credential hears about.
+    never what a request without a usable credential hears about. Which of that 401's two messages
+    it gets is :func:`_bearer_credential`: a header that is not a bearer credential is told the
+    format, and a bearer the server cannot resolve is told the token.
 
     Then the version, which Notion requires on every request and refuses when it is one Notion
     does not publish. Both halves answer ``missing_version``, and each has its own message:
@@ -227,18 +289,21 @@ def _refusal(request: Request, caller) -> JSONResponse | None:
     An empty header value is a value rather than a missing one, and real answers it the
     enumerating way -- so it is refused here too, which is what keeps it from sorting below
     2025-09-03 and quietly picking the legacy model for a caller that named nothing."""
+    if _bearer_credential(request) is None:
+        return _error(request, 401, "unauthorized", _BEARER_REQUIRED)
     if caller is None:
-        return _error(401, "unauthorized", "API token is invalid.")
+        return _error(request, 401, "unauthorized", _TOKEN_INVALID)
     version = request.headers.get("notion-version")
     if version is None:
         return _error(
+            request,
             400,
             "missing_version",
             "Notion-Version header failed validation: Notion-Version header should be defined, "
             "instead was `undefined`.",
         )
     if version not in PUBLISHED_VERSIONS:
-        return _error(400, "missing_version", _unknown_version(version))
+        return _error(request, 400, "missing_version", _unknown_version(version))
     return None
 
 
@@ -260,21 +325,24 @@ def _unmounted_here(request: Request, *, data_sources: bool) -> JSONResponse | N
     made-up path", so the message here is what api.notion.com answered on 2026-09-15 for a path no
     version mounts at all."""
     if _data_sources_model(_version(request)) is not data_sources:
-        return _error(400, "invalid_request_url", "Invalid request URL.")
+        return _error(request, 400, "invalid_request_url", "Invalid request URL.")
     return None
 
 
 def _norm(nid: str) -> str:
-    """Notion accepts an id dashed or dashless, any case. Canonicalize to the dashed lowercase
-    form the stored ``id`` / ``data_source_id`` columns actually hold (see
-    ``synth._uuid_from``) rather than to a dashless key: a UUID's dashes sit at fixed offsets
-    (8-4-4-4-12), so reconstructing them is deterministic, and the column's job is to hold the
-    value the API reports, not a lookup key a reader has to rebuild dashes from.
+    """Notion accepts an id dashed or dashless, and does not fold its case: a dashed id in upper
+    case was a 404 on ``pages/{id}`` (measured 2026-09-30) and on ``comments`` (2026-10-02), where
+    a dashless one in upper case was not read as a uuid at all. Folding case here serves an id
+    real does not. Canonicalize to the dashed lowercase form the stored ``id`` /
+    ``data_source_id`` columns actually hold (see ``synth._uuid_from``) rather than to a dashless
+    key: a UUID's dashes sit at fixed offsets (8-4-4-4-12), so reconstructing them is
+    deterministic, and the column's job is to hold the value the API reports, not a lookup key a
+    reader has to rebuild dashes from.
 
-    Malformed input (the wrong length once dashes are stripped) comes back unchanged, which just
-    won't match any stored id -- the same 404 every unknown-but-well-formed id already gets.
-    Notion draws no 400-vs-404 shape distinction the way gmail does (see
-    routers.google._gmail_check_shape); there is nothing to preserve here."""
+    Malformed input (the wrong length once dashes are stripped) comes back unchanged, which
+    matches no stored id. Real refuses a malformed id with a 400 before it looks anything up;
+    ``list_comments`` checks its ``block_id`` that way first, and the path routes answer it the
+    404 an unknown id gets."""
     h = (nid or "").replace("-", "").lower()
     if len(h) != 32:
         return h
@@ -334,7 +402,10 @@ def _user_obj(conn, email: str) -> dict:
         "type": "person",
         "name": name,
         "avatar_url": None,
-        "person": {"email": email},
+        # Real's person member is `email` then `email_verified` under each Notion-Version, the
+        # latter `true` for the one person measured (2026-10-13). The corpus records no
+        # verification, so every person is served `true`.
+        "person": {"email": email, "email_verified": True},
     }
 
 
@@ -462,7 +533,7 @@ async def get_page(page_id: str, request: Request):
     # redirect to a different row (see store.notion_by_id).
     row = store.notion_by_id(conn, _norm(page_id), auth.visible_ids(request, caller))
     if row is None or row["subtype"] == "database":
-        return _error(404, "object_not_found", f"Could not find page with ID: {page_id}.")
+        return _error(request, 404, "object_not_found", f"Could not find page with ID: {page_id}.")
     return _page_obj(conn, row)
 
 
@@ -474,14 +545,16 @@ async def get_block(block_id: str, request: Request):
     conn = auth.conn(request)
     row = store.notion_by_id(conn, _norm(block_id), auth.visible_ids(request, caller))
     if row is None:
-        return _error(404, "object_not_found", f"Could not find block with ID: {block_id}.")
+        return _error(
+            request, 404, "object_not_found", f"Could not find block with ID: {block_id}."
+        )
     bid = row["id"]
     kind = "child_database" if row["subtype"] == "database" else "child_page"
     return {
         "object": "block",
         "id": bid,
         "type": kind,
-        "has_children": True,
+        "has_children": row["subtype"] != "database",
         "archived": False,
         "in_trash": False,
         "created_time": synth.rfc3339(row["created_ts"]),
@@ -503,8 +576,13 @@ async def get_block_children(block_id: str, request: Request):
     conn = auth.conn(request)
     row = store.notion_by_id(conn, _norm(block_id), auth.visible_ids(request, caller))
     if row is None:
-        return _error(404, "object_not_found", f"Could not find block with ID: {block_id}.")
-    blocks = synth.notion_blocks(row["id"], row["content"])
+        return _error(
+            request, 404, "object_not_found", f"Could not find block with ID: {block_id}."
+        )
+    # A database's rows are pages reached through the query route, not blocks: on api.notion.com
+    # (2026-10-04, three databases, Notion-Version 2022-06-28 and 2025-09-03) its children are the
+    # empty list, and its block reports `has_children` false.
+    blocks = [] if row["subtype"] == "database" else synth.notion_blocks(row["id"], row["content"])
     offset = pagination.decode_cursor(request.query_params.get("start_cursor"))
     limit = _page_size(request.query_params.get("page_size"))
     page = blocks[offset : offset + limit]
@@ -522,7 +600,9 @@ async def get_database(database_id: str, request: Request):
     conn = auth.conn(request)
     row = store.notion_by_id(conn, _norm(database_id), auth.visible_ids(request, caller))
     if row is None or row["subtype"] != "database":
-        return _error(404, "object_not_found", f"Could not find database with ID: {database_id}.")
+        return _error(
+            request, 404, "object_not_found", f"Could not find database with ID: {database_id}."
+        )
     return _database_obj(conn, row, _version(request))
 
 
@@ -543,7 +623,10 @@ async def get_data_source(data_source_id: str, request: Request):
     )
     if row is None:
         return _error(
-            404, "object_not_found", f"Could not find data source with ID: {data_source_id}."
+            request,
+            404,
+            "object_not_found",
+            f"Could not find data source with ID: {data_source_id}.",
         )
     return _data_source_obj(conn, row)
 
@@ -565,7 +648,7 @@ async def _query_rows(request: Request, row_id: str, *, data_sources: bool):
     visible = auth.visible_ids(request, caller)
     db = store.get_document(conn, "notion", db_id, visible_ids=visible) if db_id else None
     if db is None or db["subtype"] != "database":
-        return _error(404, "object_not_found", "Could not find the requested database.")
+        return _error(request, 404, "object_not_found", "Could not find the requested database.")
     body = await json_body(request)
     offset = pagination.decode_cursor(body.get("start_cursor"))
     limit = _page_size(body.get("page_size"))
@@ -600,11 +683,25 @@ async def search(request: Request):
     caller = auth.resolve_bearer(request)
     if (refusal := _refusal(request, caller)) is not None:
         return refusal
+    body = await json_body(request)
+    # Measured against api.notion.com on 2026-10-01 and 2026-10-04: once the credential and the
+    # version clear, a `query` that is present must be a string and a `filter` that is present an
+    # object, `null` included, or the request is 400 `validation_error` quoting the value back.
+    # When both are wrong the message names `query`, wherever each sits in the body.
+    for member, kind, named in (("query", str, "a string"), ("filter", dict, "an object")):
+        if member in body and not isinstance(body[member], kind):
+            value = json.dumps(body[member], ensure_ascii=False, separators=(",", ":"))
+            return _error(
+                request,
+                400,
+                "validation_error",
+                f"body failed validation: body.{member} should be {named} or `undefined`, "
+                f"instead was `{value}`.",
+            )
     conn = auth.conn(request)
     visible = auth.visible_ids(request, caller)
-    body = await json_body(request)
-    query = body.get("query") or ""
-    want = (body.get("filter") or {}).get("value")  # 'page' | 'database' | None
+    query = body.get("query", "")
+    want = body.get("filter", {}).get("value")  # 'page' | 'database' | None
     offset = pagination.decode_cursor(body.get("start_cursor"))
     limit = _page_size(body.get("page_size"))
     # Over-fetch so object-type filtering still fills a page; cap keeps it bounded. An empty query
@@ -681,7 +778,7 @@ async def get_user(user_id: str, request: Request):
     for u in store.list_users(conn):
         if _norm(synth.notion_user_id(u["email"])) == key:
             return _user_obj(conn, u["email"])
-    return _error(404, "object_not_found", f"Could not find user with ID: {user_id}.")
+    return _error(request, 404, "object_not_found", f"Could not find user with ID: {user_id}.")
 
 
 # --------------------------------------------------------------------------- comments
@@ -694,15 +791,61 @@ async def list_comments(request: Request):
         return refusal
     conn = auth.conn(request)
     block_id = request.query_params.get("block_id")
+    # Once the credential and the version clear, real refuses a comments query whose `block_id`
+    # is absent, empty or not a uuid before it looks the id up (measured 2026-10-01 and
+    # 2026-10-02), and answers a database's id as restricted -- where a page's or a block's id is
+    # the 200 list both sides agree on.
+    if block_id is None:
+        return _error(
+            request,
+            400,
+            "validation_error",
+            "query failed validation: query.block_id should be defined, instead was `undefined`.",
+        )
+    if not block_id.strip():
+        return _error(
+            request,
+            400,
+            "validation_error",
+            "query failed validation: query.block_id should be a string, instead was `0`.",
+        )
+    # What real reads as a uuid here (measured 2026-10-02): the dashed 8-4-4-4-12 form in either
+    # case, or 32 lower-case hex digits. It echoes anything else as JSON.
+    if not re.fullmatch(
+        r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}|[0-9a-f]{32}",
+        block_id,
+    ):
+        return _error(
+            request,
+            400,
+            "validation_error",
+            "query failed validation: query.block_id should be a valid uuid, instead was "
+            f"`{json.dumps(block_id, ensure_ascii=False)}`.",
+        )
     # One ACL-scoped query (the parent must itself be visible to the caller), not
     # a resolve followed by a get_document refetch of the same row -- see get_page and friends.
-    row = (
-        store.notion_by_id(conn, _norm(block_id), auth.visible_ids(request, caller))
-        if block_id
-        else None
-    )
+    row = store.notion_by_id(conn, _norm(block_id), auth.visible_ids(request, caller))
     if row is None:
-        return _list_obj([], 0, 0, 0, "comment")
+        # A block is not a row: it is one of the blocks `blocks/{id}/children` derives for a page,
+        # and Backlot keeps no comment on one, so a block of a page the caller can see is the empty
+        # list real answered on 2026-10-02.
+        visible = auth.visible_ids(request, caller)
+        wanted = _norm(block_id)
+        for page in store.list_documents(conn, "notion", visible_ids=visible, limit=-1):
+            if page["subtype"] != "database" and any(
+                b["id"] == wanted for b in synth.notion_blocks(page["id"], page["content"])
+            ):
+                return _list_obj([], 0, 0, 0, "comment")
+        return _error(
+            request, 404, "object_not_found", f"Could not find block with ID: {block_id}."
+        )
+    if row["subtype"] == "database":
+        return _error(
+            request,
+            403,
+            "restricted_resource",
+            "This object is managed by Notion and isn’t accessible via MCP",
+        )
     parent_id = row["id"]
     comments = store.doc_comments(conn, "notion", parent_id)
     offset = pagination.decode_cursor(request.query_params.get("start_cursor"))
@@ -725,3 +868,99 @@ async def list_comments(request: Request):
 
 
 # --------------------------------------------------------------------------- misc
+
+
+# The baseline `backlot diff --source notion` keeps, the file ``backlot.fidelity.baseline_path``
+# names; read here without importing that package, whose ``__init__`` loads the comparison modules.
+_BASELINE = Path(__file__).resolve().parent.parent / "fidelity" / "baseline" / "notion.json"
+
+
+def _published_operations_not_served() -> tuple[tuple[str, re.Pattern[str]], ...]:
+    """The operations Notion publishes and no route here serves, as (method, path pattern): the
+    baseline's ``missing_operation`` rows, each ``{}`` one path segment. Read off that file rather
+    than listed here, so an operation Notion adds reaches ``unmatched_path`` once the baseline
+    acknowledges it; a route added here wins over ``unmatched_path`` whatever the file says."""
+    operations = []
+    for row in json.loads(_BASELINE.read_text())["acknowledged"]:
+        if row["kind"] == "missing_operation":
+            method, path = row["path"].split(" ", 1)
+            pattern = "[^/]+".join(re.escape(part) for part in path.split("{}"))
+            operations.append((method, re.compile(pattern)))
+    return tuple(operations)
+
+
+_PUBLISHED_NOT_SERVED = _published_operations_not_served()
+# The three operations Notion's document puts behind `basicAuth` rather than the `bearerAuth`
+# every other operation inherits (read 2026-09-28): its OAuth client endpoints.
+_CLIENT_AUTH_OPERATIONS = frozenset(
+    {("POST", "/v1/oauth/token"), ("POST", "/v1/oauth/introspect"), ("POST", "/v1/oauth/revoke")}
+)
+
+
+def _invalid_client(request: Request) -> JSONResponse:
+    """An OAuth client endpoint's refusal, in its own shape rather than Notion's envelope.
+
+    Measured 2026-09-28: `POST /v1/oauth/token`, `/v1/oauth/introspect` and `/v1/oauth/revoke`
+    each answered 401 `{"error":"invalid_client","request_id":"<uuid>"}` with the id in
+    `x-notion-request-id` too and `WWW-Authenticate: Basic realm="OAuth"`, with no header, with
+    `Bearer nope` and with `Basic YTpi`. Backlot registers no OAuth client, so there is no header
+    this answers any other way."""
+    request_id = _request_id(request)
+    return JSONResponse(
+        status_code=401,
+        content={"error": "invalid_client", "request_id": request_id},
+        headers={"x-notion-request-id": request_id, "www-authenticate": 'Basic realm="OAuth"'},
+    )
+
+
+@unmatched_router.api_route(
+    "/{rest:path}", methods=["GET", "POST", "PATCH", "PUT", "DELETE", "OPTIONS"]
+)
+async def unmatched_path(request: Request, rest: str) -> JSONResponse:
+    """Notion's answer for a URL no route here serves: the credential's refusal where Notion
+    publishes the operation, and otherwise the URL's 400, which it gives before it reads anything
+    else.
+
+    Measured 2026-09-22 with no credential at all: `/v1/nonexistent_thing/xyz` answers 400
+    `invalid_request_url` with `Invalid request URL.`, and so do the same path carrying a token
+    that cannot resolve, the same path with no `Notion-Version`, a path outside `/v1` entirely, and
+    a POST to an unknown `/v1` path. A path that does exist answers the credential's 401 instead,
+    so the URL is the first thing that API checks.
+
+    A published operation exists for that check whether or not Backlot serves it. On 2026-09-28
+    each of the 53 the baseline lists as ``missing_operation`` (see
+    :func:`_published_operations_not_served`) answered the format's 401 with no header and the
+    token's 401 with `Bearer nope`, the two a served route answers, apart from the three OAuth
+    client endpoints and their own refusal (see :func:`_invalid_client`). A request that clears
+    the credential and the version on one of the other fifty gets the URL's 400 here, as
+    Backlot has no operation to run: that is the gap each of those rows acknowledges.
+
+    The method is part of the URL that check reads: `GET /v1/search` and `GET /v1/pages`, both POST
+    routes, `DELETE`, `PUT`, `PATCH` and `OPTIONS` on `/v1/users/me`, a GET route, and `PUT` on
+    `/v1/pages/{id}`, which Notion publishes for `GET` and `PATCH`, are each that same 400 rather
+    than a 405 — which is why this route takes the six methods below rather than the ones the
+    routes above happen to declare, and why no `method_not_allowed` envelope is needed for this
+    vendor. `TRACE` is left off: real refuses it at the front door with Cloudflare's own `405 Not
+    Allowed` HTML page, never reaching the API, so leaving it unrouted keeps the framework's 405
+    here rather than trading it for a 400. An invented method such as `FOO` is a bare 501 there,
+    and over uvicorn it never reaches this app: the server's parser answers it 400 `Invalid HTTP
+    request received.` (both measured 2026-09-28). A `HEAD` arrives as the GET it is rewritten to
+    (`backlot.main.answer_head_as_the_get_without_its_body`), and one trailing slash is dropped
+    before routing, so a slashed spelling of a served path does not land here
+    (`backlot.main.serve_a_slashed_notion_path_as_the_path_without_it`).
+
+    Not reproduced here: real's own root, `/`, a 302 to the marketing site, a page Backlot does not
+    serve; a path in another case, which real routes as the lower-case one (`GET /V1/USERS/ME`
+    and `PATCH /v1/Pages/{id}` were each the format's 401 on 2026-09-28) and this answers the URL's
+    400; and a method outside the six that the front door passes on to the API, `PROPFIND` and
+    `QUERY` among them, which real answered the URL's 400 on 2026-09-28 and this answers the
+    framework's 405. `/notion/` gets the URL's 400, and `/notion` is Starlette's 307 to it — the one
+    path under `/notion` where its slash redirect fires, since this route matches every other.
+    """
+    path = request.url.path.removeprefix("/notion")
+    if any(m == request.method and p.fullmatch(path) for m, p in _PUBLISHED_NOT_SERVED):
+        if (request.method, path) in _CLIENT_AUTH_OPERATIONS:
+            return _invalid_client(request)
+        if (refusal := _refusal(request, auth.resolve_bearer(request))) is not None:
+            return refusal
+    return _error(request, 400, "invalid_request_url", "Invalid request URL.")

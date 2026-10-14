@@ -39,7 +39,15 @@ dependencies = [
     "httpx>=0.27",  # /batch self-dispatches sub-requests in-process via httpx.ASGITransport
     # The GraphQL.js port: its parse/validate/error envelopes land close to what the real
     # servers return, and introspection comes free. Pure Python, no transitive deps.
-    "graphql-core>=3.2",
+    # Below 3.3: 3.3 follows GraphQL.js 17; Linear and Fireflies answer in GraphQL.js 16's words.
+    "graphql-core>=3.2,<3.3",
+    # The three xxhash checksums an S3 PutObject or DeleteObjects carries
+    # (`x-amz-checksum-xxhash64`, `-xxhash3`, `-xxhash128`), which real compares with the body; the
+    # standard library has none of them.
+    "xxhash>=3.0",
+    # SigV4a's ECDSA over P-256 (`backlot.sigv4a`), which the standard library has none of either;
+    # `pyjwt[crypto]` above installs it already, and this names the import the S3 router makes.
+    "cryptography>=3.4",
 ]
 
 [project.optional-dependencies]
@@ -58,14 +66,14 @@ dev = [
     "httpx2",
     # Pinned, not a lower bound: a ruff minor can change both the formatter and the lint
     # defaults. CI installs it from here, so local and CI cannot disagree.
-    "ruff>=0.15.22,<0.17.0",
+    "ruff>=0.15.22,<0.18.0",
 ]
 # Official SDKs used by examples/using-official-sdk/, tests/test_sdk.py (one per service) + the ACL demo.
 official-sdk = [
-    "slack_sdk>=3.27",
+    "slack_sdk>=3.43",
     "PyGithub>=2.3",
     "atlassian-python-api>=3.41",
-    "google-api-python-client>=2.120",
+    "google-api-python-client>=2.198",
     "google-auth>=2.55",
     "notion-client>=3.1",
     "boto3>=1.34",
@@ -208,6 +216,8 @@ backlot = [
     "schemas/*.json",
     "schemas/*.md",
     "graphql/*.graphql",
+    "data/*.json",
     "data/*.jsonl",
+    "data/*.wadl",
     "fidelity/baseline/*.json",
 ]
