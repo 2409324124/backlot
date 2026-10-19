@@ -938,10 +938,9 @@ def unserved_answer(request: Request) -> Response | None:
     if name in _ANSWERED_BY_ARGUMENTS:
         if name == "blocks.validate" and request.method == "GET":
             return _err("unsupported_http_method")
-        refusal = _caller_or_error(request)[1]
-        if _ANSWERED_BY_ARGUMENTS[name] and refusal is not None and _credential_sent(request):
-            return refusal
-        return None
+        if not (_ANSWERED_BY_ARGUMENTS[name] and _credential_sent(request)):
+            return None
+        return _caller_or_error(request)[1]
     other = _OTHER_ANSWERS.get(name)
     if other is None and name not in _PUBLISHED:
         return JSONResponse({"ok": False, "error": "unknown_method", "req_method": name})
