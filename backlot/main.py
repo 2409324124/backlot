@@ -37,7 +37,7 @@ from backlot.routers import (
     s3,
     slack,
 )
-from backlot.telemetry import recorder
+from backlot.telemetry import naming, recorder
 from backlot.telemetry.middleware import TelemetryMiddleware
 
 
@@ -123,7 +123,9 @@ async def lifespan(app: FastAPI):
     app.state.warm_thread.start()
     exporter = None
     if telemetry.enabled(settings):
-        exporter = recorder.Exporter(recorder.RECORDER, recorder.ENDPOINT, recorder.INTERVAL)
+        exporter = recorder.Exporter(
+            recorder.RECORDER, recorder.ENDPOINT, recorder.INTERVAL, surface=naming.surface
+        )
         exporter.start()
         print(telemetry.notice(recorder.ENDPOINT), file=sys.stderr)
     try:

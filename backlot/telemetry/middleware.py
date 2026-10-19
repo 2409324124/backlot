@@ -18,6 +18,7 @@ from urllib.parse import parse_qsl
 from backlot import synth
 from backlot.config import get_settings
 from backlot.telemetry import codes, enabled
+from backlot.telemetry.classes import error_class
 from backlot.telemetry.naming import Namer, own_route
 from backlot.telemetry.recorder import RECORDER, Recorder
 
@@ -116,6 +117,7 @@ class TelemetryMiddleware:
             }
             if code:
                 attributes["backlot.error_code"] = code
+                attributes["backlot.error_class"] = error_class(named.source, code)
             self.recorder.record(attributes, ((ended or time.perf_counter()) - began) * 1000)
         except Exception:  # noqa: BLE001 — counting a call must never change the answer to it
             pass

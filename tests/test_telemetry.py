@@ -15,7 +15,8 @@ import pytest
 
 from backlot.config import get_settings
 from backlot.server import HELLO_CORPUS
-from backlot.telemetry import codes, enabled, notice, recorder
+from backlot.telemetry import codes, enabled, naming, notice, recorder
+from backlot.telemetry.classes import error_class
 from backlot.telemetry.recorder import MAX_SERIES, RECORDER, Exporter, Recorder, encode
 from tests._helpers import build_corpus, client_for
 
@@ -30,6 +31,7 @@ STORED = {
     "backlot.operation": r"^[A-Za-z_][A-Za-z0-9_.,/+{}-]{0,127}$",
     "backlot.error_code": r"^[A-Za-z][A-Za-z0-9_.-]{0,63}$",
     "backlot.client": r"^[A-Za-z0-9@_.-]{1,48}(/[0-9]+[.][0-9]+)?$",
+    "backlot.error_class": r"^(client|auth|rate_limit|unsupported|internal|unclassified)$",
 }
 
 
@@ -168,6 +170,20 @@ def test_client_labels_are_the_ones_measured_from_the_examples():
     assert codes.client({"user-agent": "curl/8.7.1"}) == "curl/8.7"
 
 
+def test_every_slug_backlot_writes_has_a_class():
+    tables = {"github": codes._GITHUB, "jira": codes._JIRA, "confluence": codes._CONFLUENCE}
+    tables |= {"linear": codes._GRAPHQL, "fireflies": codes._GRAPHQL}
+    unclassed = [
+        (s, slug)
+        for s, t in tables.items()
+        for _, slug in t
+        if error_class(s, slug) == "unclassified"
+    ]
+    assert unclassed == []
+    assert error_class("s3", "internal_error") == "internal"
+    assert error_class("github", "unrecognized") == "unclassified"
+
+
 GITHUB = "/github/repos/acme/docs-site"
 
 
@@ -262,6 +278,9 @@ def test_a_call_is_named_by_the_baseline(client, method, path, kwargs, expected)
     )
     assert got == expected
     assert c["http.request.method"] == method
+    assert c.get("backlot.error_class") == (
+        error_class(c["backlot.source"], got[4]) if got[4] else None
+    )
 
 
 @pytest.mark.parametrize(
@@ -429,11 +448,13 @@ def test_the_exporter_posts_each_interval_and_survives_a_dead_endpoint(collector
     }
     for ms in (3, 30, 3000):
         recorder.record(attrs, ms)
-    live = Exporter(recorder, url, 3600)
+    live = Exporter(recorder, url, 3600, surface=lambda: {("github", "implemented"): 32})
     live.flush()
     live.flush()  # an empty interval sends nothing
     assert (live.sent, live.failed, len(bodies)) == (1, 0, 1)
-    (sums, hists) = bodies[0]["resourceMetrics"][0]["scopeMetrics"][0]["metrics"]
+    (sums, hists, gauge) = bodies[0]["resourceMetrics"][0]["scopeMetrics"][0]["metrics"]
+    assert gauge["name"] == "backlot.surface.operations"
+    assert gauge["gauge"]["dataPoints"][0]["asInt"] == "32"
     assert (
         sums["sum"]["dataPoints"][0]["asInt"] == "3" and sums["sum"]["aggregationTemporality"] == 1
     )
@@ -477,3 +498,28 @@ def test_a_server_sends_what_it_counted_when_it_stops(hello, collector):
         "repos/get",
         "repos/list-commits",
     ]
+    # The surface it serves goes along, counted from its own baselines.
+    (gauge,) = [
+        m
+        for b in bodies
+        for m in b["resourceMetrics"][0]["scopeMetrics"][0]["metrics"]
+        if "gauge" in m
+    ]
+    points = {
+        tuple(a["value"]["stringValue"] for a in p["attributes"]): int(p["asInt"])
+        for p in gauge["gauge"]["dataPoints"]
+    }
+    assert points == {k: v for k, v in naming.surface().items()}
+    assert {source for source, _ in points} == {
+        "github",
+        "slack",
+        "gmail",
+        "google_drive",
+        "jira",
+        "confluence",
+        "notion",
+        "s3",
+        "hubspot",
+        "linear",
+        "fireflies",
+    }

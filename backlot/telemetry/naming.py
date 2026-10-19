@@ -292,3 +292,24 @@ def _root_fields(
                 fragments[node.name.value].selection_set.selections, fragments, depth + 1
             )
     return out
+
+
+def surface() -> dict[tuple[str, str], int]:
+    """How many vendor operations each source's baseline records, by support state: the
+    denominator of coverage, as this Backlot knows it. An operation named under several rows (Jira's
+    v2 and v3, Slack's two verbs) counts once, in its best state; a served route with no vendor id
+    is not one of the vendor's operations and is left out."""
+    best: dict[tuple[str, str], str] = {}
+    for name in (*OPENAPI, *GOOGLE_DISCOVERY, "s3"):
+        for entry in Baseline.load(baseline_path(name)).operations or ():
+            key = (name, entry.id)
+            if entry.id and (key not in best or _PREFERENCE[entry.status] < _PREFERENCE[best[key]]):
+                best[key] = entry.status
+    for name in GRAPHQL:
+        raw = json.loads(baseline_path(name).read_text(encoding="utf-8"))
+        for field, entry in raw["types"][raw["root"]["query"]]["fields"].items():
+            best[(name, field)] = entry["status"]
+    counts: dict[tuple[str, str], int] = {}
+    for (name, _), status in best.items():
+        counts[(name, status)] = counts.get((name, status), 0) + 1
+    return counts

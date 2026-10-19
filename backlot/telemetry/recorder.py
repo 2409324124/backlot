@@ -14,13 +14,15 @@ import sys
 import threading
 import time
 from importlib import metadata
-from typing import Any, Mapping
+from typing import Any, Callable, Mapping
 
 import httpx
 
 ENDPOINT = "https://telemetry.brekkylab.com/v1/metrics"
 # Seconds between exports. What was counted since the last one is also sent at shutdown.
 INTERVAL = 60.0
+# Attributes that describe how a call was answered rather than the call.
+_ANSWER = ("http.response.status_code", "backlot.error_code", "backlot.error_class")
 # Upper bounds, in ms, of the latency histogram's buckets.
 BOUNDS = (5, 10, 25, 50, 100, 250, 500, 1000, 2500, 5000)
 # Combinations kept per interval. A request that would add one more is counted as dropped instead,
@@ -59,9 +61,8 @@ class Recorder:
 
     def record(self, attributes: Mapping[str, Any], duration_ms: float) -> None:
         key = tuple(sorted(attributes.items()))
-        timing = tuple(
-            (k, v) for k, v in key if k not in ("http.response.status_code", "backlot.error_code")
-        )
+        # The latency of a call does not depend on how it was answered.
+        timing = tuple((k, v) for k, v in key if k not in _ANSWER)
         with self._lock:
             if key not in self._counts and len(self._counts) >= MAX_SERIES:
                 self.dropped += 1
@@ -89,8 +90,18 @@ def _attrs(pairs) -> list[dict]:
     ]
 
 
-def encode(start_ns: int, end_ns: int, counts: dict, histograms: dict) -> dict | None:
-    """The OTLP/JSON body for one interval, None for an interval with no calls."""
+def encode(
+    start_ns: int,
+    end_ns: int,
+    counts: dict,
+    histograms: dict,
+    surface: Mapping[tuple[str, str], int] | None = None,
+) -> dict | None:
+    """The OTLP/JSON body for one interval, None for an interval with no calls.
+
+    ``surface`` adds the ``backlot.surface.operations`` gauge: per source and support state, how
+    many vendor operations this Backlot's baselines record, so coverage is read off the sender's own
+    version."""
     if not counts:
         return None
     start, end = str(start_ns), str(end_ns)
@@ -138,6 +149,7 @@ def encode(start_ns: int, end_ns: int, counts: dict, histograms: dict) -> dict |
                                 "unit": "ms",
                                 "histogram": {"aggregationTemporality": 1, "dataPoints": hists},
                             },
+                            *_surface_metric(surface or {}, end),
                         ],
                     }
                 ],
@@ -146,11 +158,39 @@ def encode(start_ns: int, end_ns: int, counts: dict, histograms: dict) -> dict |
     }
 
 
+def _surface_metric(surface: Mapping[tuple[str, str], int], end: str) -> list[dict]:
+    if not surface:
+        return []
+    points = [
+        {
+            "attributes": _attrs((("backlot.source", source), ("backlot.support", support))),
+            "timeUnixNano": end,
+            "asInt": str(n),
+        }
+        for (source, support), n in sorted(surface.items())
+    ]
+    return [
+        {
+            "name": "backlot.surface.operations",
+            "unit": "{operation}",
+            "gauge": {"dataPoints": points},
+        }
+    ]
+
+
 class Exporter:
     """Posts the recorder's intervals from a daemon thread."""
 
-    def __init__(self, recorder: Recorder, url: str, interval: float) -> None:
+    def __init__(
+        self,
+        recorder: Recorder,
+        url: str,
+        interval: float,
+        surface: Callable[[], Mapping[tuple[str, str], int]] | None = None,
+    ) -> None:
         self._recorder = recorder
+        self._surface_of = surface
+        self._surface: Mapping[tuple[str, str], int] | None = None
         self._url = url
         self._interval = max(interval, 1.0)
         self._stop = threading.Event()
@@ -167,9 +207,15 @@ class Exporter:
             self.flush()
 
     def flush(self, timeout: float = _POST_TIMEOUT) -> None:
-        body = encode(*self._recorder.take())
-        if body is None:
+        interval = self._recorder.take()
+        if not interval[2]:
             return
+        if self._surface is None and self._surface_of is not None:
+            try:  # read once, on this thread rather than a request's
+                self._surface = self._surface_of()
+            except Exception:  # noqa: BLE001 — the counts go out without it
+                self._surface = {}
+        body = encode(*interval, surface=self._surface)
         try:
             response = httpx.post(
                 self._url,
