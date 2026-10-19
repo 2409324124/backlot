@@ -370,9 +370,10 @@ def _unquote(raw: bytes) -> bytes:
 
 
 def _multipart_parts(content_type: str, body: bytes) -> list[tuple[bytes, bytes | None]] | None:
-    """The (name, value) of each part of a multipart body, the value None for a file's part; None
-    for a body real cannot read and for a part whose headers end without a blank line, which real
-    reads as more of the header above and this does not; no part for a body with no delimiter.
+    """The (name, value) of each part of a multipart body, the value None for a file's part, or None
+    for a Content-Type with no boundary, a part with no name and a part whose headers end without a
+    blank line, which real reads as more of the header above and this does not; no part for a body
+    in which none is read.
 
     The boundary is what follows the first `=` after the first `boundary` in the Content-Type, in
     that case, wherever it is (`xboundary=b` and `boundary =b` are `b`): up to the next `"` if it
@@ -1682,7 +1683,8 @@ def _within_64_bits(raw: str) -> int | None:
     """``raw``, which `_SLACK_INTEGER` matches, as an int within the signed 64-bit range, or None.
     Its digits, its zeros in front dropped, are counted before `int` sees them, which raises past
     4300 of them; real refuses a `count` of 4301 nines as one past 2**63 and serves such a `limit`
-    as one too large for a float (slack.com/api, 2026-10-20)."""
+    as one too large for a float, on each of the seven methods that read one, by `GET`, and on
+    `conversations.list` and `search.messages` by a form `POST` (slack.com/api, 2026-10-20)."""
     digits = raw.lstrip("-").lstrip("0") or "0"
     if len(digits) > 19:
         return None

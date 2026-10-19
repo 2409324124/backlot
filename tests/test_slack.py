@@ -3012,8 +3012,7 @@ def test_slack_post_charset_warning_on_a_refusal(
                 (b"--bx\r\n", b"--b--\r\n", {"a": "b"}),
             )
         ),
-        # a part with no headers is no part, a value's first line is the value's whatever it holds,
-        # and a value that runs to the end of the body keeps a lone CR
+        # the headerless-part, first-line and end-of-body rules of ``slack._multipart_parts``
         *(
             ("POST", _MULTIPART, body, want)
             for body, want in (
