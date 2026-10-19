@@ -3797,7 +3797,16 @@ _RETIRED = (
         # real's 404 page
         *(
             ("GET", path, None, None, None, _PAGE)
-            for path in ("nonexistent-xyz", "a-b.c", "a_b.c", "%C3%A9.x", "a.b;c", "a/b.c")
+            for path in (
+                "nonexistent-xyz",
+                "a-b.c",
+                "a_b.c",
+                "%C3%A9.x",
+                "a.b;c",
+                "a/b.c",
+                "/a/b.c",
+                "/a-b",
+            )
         ),
         ("POST", "nonexistent-xyz", None, "application/json", b"{}", _PAGE),
         ("POST", "nonexistent-xyz", None, None, b"{}", _PAGE),
@@ -3848,8 +3857,8 @@ _RETIRED = (
         # a method a route serves, for another HTTP method, is the route's to answer
         *((verb, m, None, None, None, _ROUTED) for verb, m in _ROUTED_ROWS),
         # left to the router: a token that resolves, a method of `slack._ANSWERED_BY_ARGUMENTS`, a
-        # path ending in `/`, the dot segments, and a method outside `slack.UNSERVED_METHODS`, its
-        # body unread
+        # path ending in `/`, the dot segments, a name after two `/`s, and a method outside
+        # `slack.UNSERVED_METHODS`, its body unread
         ("GET", "emoji.list", "admin", None, None, _LEFT),
         ("GET", "files.getUploadURLExternal", "admin", None, None, _LEFT),
         ("POST", "blocks.validate", None, _FORM, b"", _LEFT),
@@ -3857,6 +3866,8 @@ _RETIRED = (
         ("GET", "emoji.list/", None, None, None, _LEFT),
         ("GET", "%2E", None, None, None, _LEFT),
         ("GET", "%2E%2E", None, None, None, _LEFT),
+        ("GET", "/api.test", None, None, None, _LEFT),
+        ("GET", "//emoji.list", "bogus", None, None, _LEFT),
         ("POST", "%2E", None, None, b"{}", _LEFT),
         ("POST", "%2E%2E", None, None, b"{}", _LEFT),
         ("OPTIONS", "nonexistent.method", None, None, None, _LEFT),

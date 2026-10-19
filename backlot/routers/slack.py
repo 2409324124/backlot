@@ -783,10 +783,10 @@ def _register(pairs: list[tuple[bytes, bytes | None]]) -> tuple[dict | None, str
 UNSERVED_METHODS = ("GET", "POST", "PUT", "PATCH", "DELETE")
 
 #: A path segment this server reads as a method's name once it is decoded (`a%2Eb` is `a.b`): ASCII
-#: letters, digits and `.`; any other byte in it, but a `/` at its end, is answered with real's 404
-#: page. Real answers `-`, `_` and the bytes past ASCII so, but refuses `%00`, `%2F`, `%3F` and
-#: `%5C` at its front end, and `%0A` but at a name's end, where it drops `%09`, `%0A`, `%0B`, `%0D`,
-#: `%20` and `%2B`.
+#: letters, digits and `.`; any other byte in it, but a `/` at its end or before a name
+#: (:func:`unserved_answer`), is answered with real's 404 page. Real answers `-`, `_` and the bytes
+#: past ASCII so, but refuses `%00`, `%2F`, `%3F` and `%5C` at its front end, and `%0A` but at a
+#: name's end, where it drops `%09`, `%0A`, `%0B`, `%0D`, `%20` and `%2B`.
 _METHOD_NAME = re.compile(r"[0-9A-Za-z.]+")
 #: The methods Slack has, by name, for a path no route here matches: those Slack's reference index
 #: lists (``backlot/data/slack_methods.json``, written by ``scripts/gen_slack_methods.py``). The
@@ -917,9 +917,13 @@ def unserved_answer(request: Request) -> Response | None:
     the name for one it has none by, whatever the credential; and its 404 page for a path that names
     no method. A credential that resolves, on a method :data:`_OTHER_ANSWERS` does not hold, and a
     method of :data:`_ANSWERED_BY_ARGUMENTS` are left to the router, and so are an empty name, the
-    names `.` and `..` and a path ending in `/`."""
+    names `.` and `..`, a path ending in `/`, and a name after two or more `/`s, which real reads as
+    that name, its slashes merged (`//api.test` is `api.test`, slack.com/api, 2026-10-20)."""
     path = request.scope["path"]
-    if path.removeprefix("/slack/api/") in ("", ".", "..") or path.endswith("/"):
+    rest = path.removeprefix("/slack/api/")
+    if rest in ("", ".", "..") or path.endswith("/"):
+        return None
+    if rest.startswith("/") and _METHOD_NAME.fullmatch(rest.lstrip("/")):
         return None
     name = method_name(path)
     if name is None:
