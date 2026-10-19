@@ -852,18 +852,39 @@ async def report_atlassian_headers(request: Request, call_next):
     return response
 
 
-def _a_slack_route_serves(scope: Scope) -> bool:
-    """Whether a Slack route serves this scope's method and path. Asked of
+def _some_slack_route_matches(scope: Scope) -> bool:
+    """Whether a Slack route matches this scope's path, whatever the method. Asked of
     ``backlot.routers.slack.router``, which holds the Slack routes and nothing else."""
-    return any(route.matches(scope)[0] is Match.FULL for route in slack.router.routes)
+    return any(route.matches(scope)[0] is not Match.NONE for route in slack.router.routes)
+
+
+@app.middleware("http")
+async def answer_an_unserved_slack_method(request: Request, call_next):
+    """A `GET` or a `POST` to a `/slack/api/` path no Slack route matches is answered as real
+    answers it (``slack.unserved_answer``). Registered before ``parse_slack_form``, which makes it
+    the inner of the two: a body real refuses is refused first, as real refuses it, and a token
+    sent in the body is read here."""
+    path = request.scope["path"]
+    if (
+        request.method in ("GET", "POST")
+        and path.startswith("/slack/api/")
+        and not _some_slack_route_matches(request.scope)
+    ):
+        answer = slack.unserved_answer(request)
+        if answer is not None:
+            return answer
+    return await call_next(request)
 
 
 @app.middleware("http")
 async def parse_slack_form(request: Request, call_next):
-    """Read a Slack POST's body before the method runs, as real does (``slack.read_post_body``):
-    answer one real refuses with its error, or stash the arguments it carries for the router's
-    param lookup and the token's (``slack._param``, ``auth.slack_token``)."""
-    if request.method == "POST" and _a_slack_route_serves(request.scope):
+    """Read the body of a Slack POST to a path real reads as a method's name
+    (``slack.method_name``), served here or not, before the method runs, as real does
+    (``slack.read_post_body``): answer one real refuses with its error, or stash the arguments it
+    carries for the router's param lookup and the token's (``slack._param``,
+    ``auth.slack_token``)."""
+    path = request.scope["path"]
+    if request.method == "POST" and path.startswith("/slack/api/") and slack.method_name(path):
         args, error = slack.read_post_body(slack.post_content_type(request), await request.body())
         if error is not None:
             request.state.slack_body_refused = True

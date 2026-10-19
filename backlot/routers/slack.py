@@ -15,10 +15,10 @@ import re
 import urllib.parse
 
 from fastapi import APIRouter, Request
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, Response
 from pydantic import BaseModel, ConfigDict
 
-from backlot import auth, store, synth
+from backlot import auth, published, store, synth
 from backlot.acl import Caller
 from backlot.config import get_settings
 from backlot.openapi import qp
@@ -216,6 +216,12 @@ def _caller_or_error(request: Request) -> tuple[Caller | None, dict | None]:
     if store.slack_is_deactivated(auth.conn(request), caller.email):
         return None, _err("account_inactive")
     return caller, None
+
+
+def _credential_sent(request: Request) -> bool:
+    """Whether the request sends a credential ``_caller_or_error`` resolves or refuses: a token it
+    reads (``auth.slack_token``), or a `token` query parameter it refuses."""
+    return auth.slack_query_token_refused(request) or auth.slack_token(request) is not None
 
 
 def _missing_argument(request: Request, *names: str) -> JSONResponse | None:
@@ -752,6 +758,118 @@ def _register(pairs: list[tuple[bytes, bytes | None]]) -> tuple[dict | None, str
     }, None
 
 
+# --- Paths no route here serves -----------------------------------------------
+# How real answers a `GET` or a `POST` to a path under `/api/` that none of the methods routed
+# below is, measured against slack.com/api on 2026-09-28 and 2026-10-20.
+
+#: A path segment real reads as a method's name once it is decoded (`a%2Eb` is `a.b`): ASCII
+#: letters, digits and `.`. Any other byte in it, `-`, `_` and the bytes past ASCII among them, is
+#: real's 404 page.
+_METHOD_NAME = re.compile(r"[0-9A-Za-z.]+")
+#: The methods Slack publishes and no route here serves, by name: the baseline's `missing`
+#: operations (``backlot.published``), each published for a `GET` or a `POST`, and real answers
+#: either method alike.
+_PUBLISHED_NOT_SERVED = frozenset(
+    op.split(" ", 1)[1].removeprefix("/") for op in published.missing_operations("slack")
+)
+#: Of :data:`_PUBLISHED_NOT_SERVED`, the methods real answers `unknown_method` for, as for a name it
+#: never had. Each of the 164 the baseline lists was sent with no token and with a bogus one on
+#: 2026-10-20, and these ten were `unknown_method` both ways.
+_RETIRED = frozenset(
+    {
+        "apps.permissions.info",
+        "apps.permissions.request",
+        "apps.permissions.resources.list",
+        "apps.permissions.scopes.list",
+        "apps.permissions.users.list",
+        "apps.permissions.users.request",
+        "oauth.token",
+        "workflows.stepCompleted",
+        "workflows.stepFailed",
+        "workflows.updateStep",
+    }
+)
+#: Real's answer to a path that is no method's name: this page, 1736 bytes under
+#: `text/html; charset=utf-8`, the same on each of the 228 such answers measured on 2026-10-20.
+_NOT_FOUND_PAGE = (
+    b"<!DOCTYPE html>\n"
+    b'<html lang="en-US">\n'
+    b"<head>\n"
+    b'<meta charset="utf-8">\n'
+    b'<meta name="viewport" content="width=device-width, initial-scale=1">\n'
+    b'<meta name="robots" content="noindex">\n'
+    b"<title>There\xe2\x80\x99s been a glitch\xe2\x80\xa6 | Slack</title>\n"
+    b"<style>\n"
+    b"html, body { height: 100%; margin: 0; }\n"
+    b"body {\n"
+    b"\tbackground: #c6f5ff url('https://a.slack-edge.com/80588/img/404/marrakesh-meadow-80.j"
+    b"pg') no-repeat 50% 100% / cover;\n"
+    b"\tcolor: #1d1c1d;\n"
+    b"\tfont: 17px/1.5 Slack-Lato, Lato, -apple-system, BlinkMacSystemFont, 'Segoe UI', Robot"
+    b"o, Helvetica, Arial, sans-serif;\n"
+    b"}\n"
+    b"header { background: rgba(255, 255, 255, 0.95); border-bottom: 1px solid #ddd; padding:"
+    b" 20px 24px; }\n"
+    b"header img { display: block; height: 28px; }\n"
+    b"main {\n"
+    b"\tbackground: #fff; border: 1px solid #ddd; border-radius: 4px; box-shadow: 0 1px 0 rgb"
+    b"a(0, 0, 0, 0.25);\n"
+    b"\tmargin: 56px auto 0; max-width: 390px; padding: 32px 36px;\n"
+    b"}\n"
+    b"h1 { font-size: 32px; font-weight: 900; letter-spacing: -0.5px; line-height: 1.2; margi"
+    b"n: 0 0 20px; }\n"
+    b"h1 svg { height: 32px; margin-right: 8px; vertical-align: -5px; width: 32px; }\n"
+    b"p { margin: 0 0 12px; }\n"
+    b"a { color: #1264a3; }\n"
+    b"@media (max-width: 480px) { main { margin: 24px 16px 0; } }\n"
+    b"</style>\n"
+    b"</head>\n"
+    b"<body>\n"
+    b'<header><a href="https://slack.com/"><img src="https://a.slack-edge.com/9cc0056/img/sla'
+    b'ck_logo.svg" alt="Slack"></a></header>\n'
+    b"<main>\n"
+    b'<h1><svg viewBox="0 0 24 24" aria-hidden="true"><path fill="none" stroke="#de4e2b" stro'
+    b'ke-width="2" stroke-linejoin="round" d="M12 3 2 21h20L12 3z"/><path fill="#de4e2b" d="M'
+    b'11 10h2v6h-2zM11 17.5h2v2h-2z"/></svg>There\xe2\x80\x99s been a glitch\xe2\x80\xa6</h1>'
+    b"\n"
+    b"<p>We\xe2\x80\x99re not quite sure what went wrong. You can go back, or try looking on "
+    b'our <a href="http://get.slack.help" target="_blank">Help Center</a> if you need a hand.'
+    b"</p>\n"
+    b"</main>\n"
+    b"</body>\n"
+    b"</html>"
+)
+
+
+def method_name(path: str) -> str | None:
+    """The method a `/slack/api/` path names, as real reads it, or None for one it reads as none."""
+    name = path.removeprefix("/slack/api/")
+    if name in (".", "..") or not _METHOD_NAME.fullmatch(name):
+        return None
+    return name
+
+
+def unserved_answer(request: Request) -> Response | None:
+    """Real's answer to a request for a path no route here matches, or None for the router's 404:
+    the method's credential refusal (``_caller_or_error``) for a method Slack publishes, ahead of
+    whatever the method would read, `unknown_method` with the name for one it does not, whatever
+    the credential, and its 404 page for a path that names no method. A credential that resolves,
+    on a method Slack publishes, is left to the router."""
+    path = request.scope["path"]
+    if path.removeprefix("/slack/api/") in ("", ".", "..") or path.endswith("/"):
+        return None
+    name = method_name(path)
+    if name is None:
+        return Response(_NOT_FOUND_PAGE, status_code=404, media_type="text/html; charset=utf-8")
+    if name not in _PUBLISHED_NOT_SERVED or name in _RETIRED:
+        return JSONResponse({"ok": False, "error": "unknown_method", "req_method": name})
+    # The two the same measurement answered `invalid_code`, where the others were `not_authed` and
+    # `invalid_auth`: `oauth.access` both ways, `oauth.v2.access` with no token alone.
+    if name == "oauth.access" or (name == "oauth.v2.access" and not _credential_sent(request)):
+        return _err("invalid_code")
+    return _caller_or_error(request)[1]
+
+
 def attach_warning(payload: dict, warning: str) -> dict:
     """Add `warning` and `response_metadata.warnings` to a Slack answer where real puts them:
     `warning` after the method's own keys, `response_metadata` after it, and `warnings` after
@@ -975,7 +1093,7 @@ async def api_test(request: Request):
     included, and last when it came in the bearer header alone. A non-empty `error` answers
     `ok: false` with that error, `null` for a body's that is not UTF-8, and `args` beside it.
     Measured against slack.com/api on 2026-10-13 and 2026-10-20."""
-    if auth.slack_query_token_refused(request) or auth.slack_token(request) is not None:
+    if _credential_sent(request):
         _, refusal = _caller_or_error(request)
         if refusal is not None:
             return refusal

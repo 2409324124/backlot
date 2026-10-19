@@ -2598,8 +2598,6 @@ def test_slack_deactivation_changes_every_slack_answer_about_a_member_and_nothin
         ("POST", "conversations.list", "application/json", b"{}", "missing_charset"),
         ("POST", "conversations.history", "application/json", b"{}", "missing_charset"),
         ("POST", "conversations.history", f"{_FORM}; charset=utf-8", b"", "superfluous_charset"),
-        # a 404 carries none, as real's HTML 404 for a path that names no method does not
-        ("POST", "nonexistent-xyz", "application/json", b"{}", None),
     ],
 )
 def test_slack_post_charset_warnings(
@@ -3718,3 +3716,119 @@ def test_slack_refuses_a_body_before_the_method_runs(
     assert got.json() == client.get(url, headers=headers, params=params).json()
     elsewhere = client.post("/slack/api/nonexistent-xyz", headers=sent, params=params, content=body)
     assert elsewhere.status_code == 404
+
+
+_PAGE = "<real's 404 page>"
+
+
+@pytest.mark.parametrize(
+    "verb, path, credential, content_type, body, want",
+    [
+        # a name Slack has no method by, before the credential
+        *(
+            (
+                "GET",
+                "nonexistent.method",
+                cred,
+                None,
+                None,
+                ("unknown_method", "nonexistent.method"),
+            )
+            for cred in (None, "bogus", "query")
+        ),
+        *(
+            ("GET", name, None, None, None, ("unknown_method", name))
+            for name in ("a.b", "A.B", "1.2", "a", "a..b", "api.test.x")
+        ),
+        ("GET", "chat.postmessage", None, None, None, ("unknown_method", "chat.postmessage")),
+        ("GET", "a%2Eb", None, None, None, ("unknown_method", "a.b")),
+        (
+            "POST",
+            "nonexistent.method",
+            None,
+            "application/json",
+            b"{}",
+            ("unknown_method", "nonexistent.method"),
+        ),
+        ("POST", "nonexistent.method", None, _FORM, b"{}", "invalid_form_data"),
+        # a method Slack publishes and no route here serves, by its credential: a `token` query
+        # parameter, and a body, beside the two credentials the test below sends to each of them
+        ("GET", "emoji.list", "query", None, None, "invalid_auth"),
+        ("POST", "emoji.list", None, "application/json", b"{}", "not_authed"),
+        ("POST", "emoji.list", None, None, b"{}", "missing_post_type"),
+        ("POST", "emoji.list", None, "text/html", b"{}", "invalid_post_type"),
+        # a path that is no method's name
+        *(
+            ("GET", path, None, None, None, _PAGE)
+            for path in ("nonexistent-xyz", "a-b.c", "a_b.c", "%C3%A9.x", "a.b;c", "a/b.c")
+        ),
+        ("POST", "nonexistent-xyz", None, "application/json", b"{}", _PAGE),
+        ("POST", "nonexistent-xyz", None, None, b"{}", _PAGE),
+    ],
+)
+def test_slack_answers_a_path_no_route_serves_as_real_does(
+    client, verb, path, credential, content_type, body, want
+):
+    """A path under `/slack/api/` that none of the routes serves, answered as slack.com/api answered
+    each row (``slack.unserved_answer`` dates the measurement): ``want`` is the error, (error,
+    `req_method`) for `unknown_method`, or real's 404 page. A `POST` with a JSON body carries the
+    `missing_charset` warning, as each of real's answers to one did but the page."""
+    headers = {}
+    url = f"/slack/api/{path}"
+    if credential == "bogus":
+        headers["Authorization"] = "Bearer xoxb-not-a-real-token"
+    elif credential == "query":
+        url += "?token=xoxb-not-a-real-token"
+    if content_type is not None:
+        headers["Content-Type"] = content_type
+    r = client.request(verb, url, headers=headers, content=body)
+    if want == _PAGE:
+        assert r.status_code == 404
+        assert r.headers["content-type"] == "text/html; charset=utf-8"
+        assert r.content == slack._NOT_FOUND_PAGE
+        return
+    if isinstance(want, tuple):
+        expected = {"ok": False, "error": want[0], "req_method": want[1]}
+    else:
+        expected = {"ok": False, "error": want}
+    if content_type == "application/json" and body:
+        expected |= {
+            "warning": "missing_charset",
+            "response_metadata": {"warnings": ["missing_charset"]},
+        }
+    assert r.status_code == 200
+    assert r.content == JSONResponse(expected).body
+
+
+_RETIRED = (
+    "apps.permissions.info",
+    "apps.permissions.request",
+    "apps.permissions.resources.list",
+    "apps.permissions.scopes.list",
+    "apps.permissions.users.list",
+    "apps.permissions.users.request",
+    "oauth.token",
+    "workflows.stepCompleted",
+    "workflows.stepFailed",
+    "workflows.updateStep",
+)
+# Real's answers, with no token and with a bogus one, where they were not `not_authed` and
+# `invalid_auth`.
+_PUBLISHED_ANSWERS = {
+    "oauth.access": ("invalid_code", "invalid_code"),
+    "oauth.v2.access": ("invalid_code", "invalid_auth"),
+    **{name: ("unknown_method", "unknown_method") for name in _RETIRED},
+}
+
+
+@pytest.mark.parametrize("name", sorted(slack._PUBLISHED_NOT_SERVED))
+def test_slack_answers_each_published_method_no_route_serves(client, name):
+    """Each method the baseline lists as published and not served, sent with no token and with a
+    bogus one, answered as real answered each of the 164 on 2026-10-20."""
+    none, bogus = _PUBLISHED_ANSWERS.get(name, ("not_authed", "invalid_auth"))
+    for headers, error in (({}, none), ({"Authorization": "Bearer xoxb-not-a-real-token"}, bogus)):
+        expected = {"ok": False, "error": error}
+        if error == "unknown_method":
+            expected["req_method"] = name
+        r = client.get(f"/slack/api/{name}", headers=headers)
+        assert r.content == JSONResponse(expected).body, (name, headers)
