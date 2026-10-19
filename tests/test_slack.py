@@ -3843,8 +3843,7 @@ _RETIRED = (
         ("GET", "oauth.access", "admin", None, None, "invalid_code"),
         ("GET", "oauth.v2.user.access", "admin", None, None, "invalid_code"),
         ("GET", "openid.connect.token", "bogus", None, None, "invalid_auth"),
-        # a method of `slack._ANSWERED_BY_ARGUMENTS` that refuses a credential first, and the `GET`
-        # `blocks.validate` refuses whatever the credential
+        # a method of `slack._ANSWERED_BY_ARGUMENTS` past its own checks (its comment)
         ("GET", "tooling.tokens.rotate", "bogus", None, None, "invalid_auth"),
         ("PUT", "blocks.validate", "bogus", None, None, "invalid_auth"),
         ("GET", "blocks.validate", "admin", None, None, "unsupported_http_method"),

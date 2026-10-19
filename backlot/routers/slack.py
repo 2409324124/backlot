@@ -842,7 +842,7 @@ _OTHER_ANSWERS: dict[str, tuple[dict, bool]] = {
     },
 }
 #: Methods whose answer to a caller real lets through turns on the arguments sent, which is left to
-#: the router, each with whether a credential sent that does not resolve is refused ahead of them
+#: the router, each with whether it refuses a credential that does not resolve before reading them
 #: (`invalid_auth`, as on any method). Real answered `oauth.v2.exchange` `invalid_arguments` naming
 #: the arguments missing whatever the credential, `tooling.tokens.rotate` `invalid_arguments`
 #: without a `refresh_token` and `invalid_refresh_token` with a bogus one, and `blocks.validate`
