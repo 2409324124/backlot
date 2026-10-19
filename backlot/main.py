@@ -125,12 +125,7 @@ async def lifespan(app: FastAPI):
     if telemetry.enabled(settings):
         exporter = recorder.Exporter(recorder.RECORDER, recorder.ENDPOINT, recorder.INTERVAL)
         exporter.start()
-        print(
-            "Backlot counts which vendor operations it is asked for and sends the counts to "
-            f"{recorder.ENDPOINT}; no path, query, body, token or corpus value is sent. "
-            "Turn it off with --disable-telemetry or BACKLOT_TELEMETRY=0 (docs/telemetry.md).",
-            file=sys.stderr,
-        )
+        print(telemetry.notice(recorder.ENDPOINT), file=sys.stderr)
     try:
         yield
     finally:

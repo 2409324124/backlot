@@ -15,7 +15,7 @@ import pytest
 
 from backlot.config import get_settings
 from backlot.server import HELLO_CORPUS
-from backlot.telemetry import codes, enabled, recorder
+from backlot.telemetry import codes, enabled, notice, recorder
 from backlot.telemetry.recorder import MAX_SERIES, RECORDER, Exporter, Recorder, encode
 from tests._helpers import build_corpus, client_for
 
@@ -90,16 +90,23 @@ def _calls(send) -> list[dict]:
     return [dict(key) | {"count": n} for key, n in counts.items()]
 
 
-def test_it_is_on_unless_backlot_telemetry_says_off(hello):
+def test_it_is_on_unless_backlot_telemetry_says_off(hello, capsys):
     with _env(BACKLOT_TELEMETRY=None):
         get_settings.cache_clear()
         assert enabled(get_settings())
+    with _env(BACKLOT_TELEMETRY="1"), _ExportTo(UNREACHABLE):
+        capsys.readouterr()
+        with client_for(hello):
+            pass
+        # A server that sends says so, says why, and says how to stop it.
+        assert capsys.readouterr().err.strip() == notice(UNREACHABLE)
     for off in ("0", "false"):
         with _env(BACKLOT_TELEMETRY=off), _ExportTo(UNREACHABLE):
             get_settings.cache_clear()
             assert not enabled(get_settings())
             with client_for(hello) as c:
                 assert _calls(lambda: c.get("/github/repos/acme/docs-site", headers=ADMIN)) == []
+            assert "usage counts" not in capsys.readouterr().err
     get_settings.cache_clear()
 
 

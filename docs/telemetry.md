@@ -1,8 +1,20 @@
 # Usage telemetry
 
-A running Backlot server counts which vendor operations it is asked for and sends the counts to `https://telemetry.brekkylab.com/v1/metrics` once a minute. The counts show which sources and operations people use, which ones they ask for that Backlot does not serve yet, and where answers fail. That decides what gets built next.
+Backlot is only worth using where it answers the way the real API does, and every vendor publishes far more API than Backlot serves today. We would rather put the work where people already are than guess at it. So a running Backlot server counts which vendor operations it is asked for, and sends those counts to us.
 
-It is anonymous and coarse by design. It counts calls, never callers. Nothing in it identifies a person, a machine or an installation. Nothing from your corpus or your requests is sent.
+## Why we collect it
+
+The counts answer three questions, and the answers set the order of work on Backlot:
+
+- **Which sources and operations do people use?** Those are measured against the real API and fixed first.
+- **What do people ask for that Backlot does not serve yet?** A call to an operation Backlot lacks is counted under that operation's own name, so the next operations built are the ones people reached for.
+- **Where do answers fail?** An internal error, or a filter Backlot cannot evaluate yet, points at what to fix next.
+
+That is the whole use of it. In return, the parts of Backlot you use are the parts that get better first. If you would rather not take part, turning it off is one flag, below.
+
+## What it is not
+
+It is anonymous and coarse by design. It counts calls, never callers. Nothing in it identifies a person, a machine or an installation. Nothing from your corpus or your requests is sent. The counts go to `https://telemetry.brekkylab.com/v1/metrics` once a minute.
 
 ## Turning it off
 
