@@ -517,6 +517,9 @@ def attach_warning(payload: dict, warning: str) -> dict:
 # has no such check, `sort=bogus` is served.
 _SORT_DIRS = {"asc", "desc"}
 _SORT_DIR_LINE = "[ERROR] must be a valid enum value [json-pointer:/sort_dir]"
+# A search's `query` made of these characters alone is `no_query` on all three search methods,
+# where one of `\x0c` or U+00A0 alone is searched for (slack.com/api, 2026-10-20).
+_QUERY_BLANKS = " \t\n\r\0\x0b"
 
 
 def _channel_core(request: Request, conn, name: str, caller: Caller) -> dict:
@@ -1194,8 +1197,9 @@ def _messages_block(request: Request, *, empty_sort_dir_ok: bool):
     if isinstance(query, Undecodable):
         return _err("internal_error"), None
     # A query that arrived with nothing in it has its own error, measured live on all three search
-    # methods: blank or whitespace-only is `no_query`, where absent is `invalid_arguments` above.
-    if not query.strip():
+    # methods: blank or only `_QUERY_BLANKS` is `no_query`, where absent is `invalid_arguments`
+    # above.
+    if not query.strip(_QUERY_BLANKS):
         return _err("no_query"), None
     terms, container, phrase = _parse_slack_query(query)
     ids = auth.visible_ids(request, caller)  # results are scoped to the caller's ACL
@@ -1274,7 +1278,7 @@ async def search_files(request: Request):
     query = _param(request, "query") or ""
     if isinstance(query, Undecodable):
         return _err("internal_error")
-    if not query.strip():
+    if not query.strip(_QUERY_BLANKS):
         return _err("no_query")
     count = counts["count"]
     empty = {

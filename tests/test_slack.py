@@ -917,6 +917,13 @@ _OWN_CHANNEL = "<the caller's own channel>"  # stands for an id only the test bo
         ("search.all", {"query": ""}, "no_query", []),
         ("search.files", {"query": ""}, "no_query", []),
         ("search.messages", {"query": "   "}, "no_query", []),  # whitespace is not a query either
+        # what real strips before it reads a query as none is `slack._QUERY_BLANKS`, and a query of
+        # another such character alone is searched for
+        *(
+            (method, {"query": query}, error, [])
+            for method in ("search.messages", "search.all", "search.files")
+            for query, error in (("\x00 \x0b\r\n\t", "no_query"), ("\x0c", None), ("\xa0", None))
+        ),
         # users.info is the exception, and is left one: live it answers `user_not_found` to all of
         # them, absent argument included. Pinned so the rule above is not "tidied" onto it.
         ("users.info", {}, "user_not_found", []),
@@ -938,6 +945,9 @@ def test_slack_an_absent_argument_is_not_a_thing_that_was_not_found(
         k: (_a_channel_id(client, admin_h) if v == _OWN_CHANNEL else v) for k, v in params.items()
     }
     j = client.get(f"/slack/api/{method}", headers=admin_h, params=params).json()
+    if error is None:
+        assert j["ok"] is True
+        return
     want = {"ok": False, "error": error}
     if missing:
         want["response_metadata"] = {
