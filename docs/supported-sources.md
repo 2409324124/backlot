@@ -727,7 +727,7 @@ Each method answers on `GET` and `POST` alike, as the real Web API does.
 | `search.all` | |
 | `search.files` | |
 | `auth.test` | |
-| `api.test` | Auth-free connectivity check |
+| `api.test` | Connectivity check, served with no credential; one it is sent must resolve, and `args` echoes the token it read as `token` |
 
 A person the [roster](../backlot/schemas/README.md) marks `deactivated: true` is Slack's offboarded
 member: `users.list` and `users.info` answer them `deleted: true`, `conversations.members` and

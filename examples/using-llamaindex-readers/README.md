@@ -91,9 +91,9 @@ exactly as against the real API.
   then set `_client.base_url`" isn't enough, since that eager call would hit the real
   `https://slack.com/api/` default first. `slack_reader_at()` swaps the `slack_sdk` module's
   `WebClient` for a subclass defaulting to Backlot's `base_url`, for the duration of construction
-  only (restored after), so even that first call lands on Backlot — which gained an auth-free
-  `/slack/api/api.test` endpoint for exactly this. `_client.base_url` is set again explicitly
-  afterward for clarity.
+  only (restored after), so even that first call lands on Backlot, whose `/slack/api/api.test`
+  answers the reader's token as real does. `_client.base_url` is set again explicitly afterward for
+  clarity.
 - **Notion** (`notion.py`): `NotionPageReader` hardcodes the Notion host in module-level URL
   constants (no `base_url` arg at all). `patch_notion_at()` rebinds every constant that points at
   `api.notion.com` before the reader runs.

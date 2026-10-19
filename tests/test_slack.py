@@ -69,14 +69,90 @@ def test_admin_slack_crawls_all(client, admin_h, ro_conn):
     assert crawl_slack(client, admin_h) == db_count(ro_conn, "slack")
 
 
-def test_slack_api_test_requires_no_auth(client):
-    # real Slack's api.test needs no token at all (it's a bare connectivity check); several real
-    # clients call it at construction/connect time (e.g. llama-index's SlackReader.__init__), so
-    # Backlot must answer 200 without auth rather than 404/not_authed.
-    ok = client.post("/slack/api/api.test", data={"foo": "bar"}).json()
-    assert ok == {"ok": True, "args": {"foo": "bar"}}
-    err = client.post("/slack/api/api.test", data={"error": "boom"}).json()
-    assert err == {"ok": False, "error": "boom"}
+_TOKEN = "<the token>"
+
+
+@pytest.mark.parametrize(
+    "method, query, authorization, form, want",
+    [
+        # no credential, and one that is none
+        ("get", "foo=1", None, None, {"foo": "1"}),
+        ("post", "", None, "foo=bar", {"foo": "bar"}),
+        ("get", "", "Bearer ", None, {}),
+        ("get", "foo=1", "bearer {admin}", None, {"foo": "1"}),
+        ("get", "foo=1", "Basic Zm9vOmJhcg==", None, {"foo": "1"}),
+        ("get", "token=&foo=1", None, None, {"token": "", "foo": "1"}),
+        # a credential, echoed as `token` where the body put it and last from the header
+        ("get", "foo=1", "Bearer {admin}", None, {"foo": "1", "token": _TOKEN}),
+        ("post", "foo=1", None, "token={admin}", {"foo": "1", "token": _TOKEN}),
+        ("post", "", None, "token={admin}&a=b", {"token": _TOKEN, "a": "b"}),
+        ("post", "c=d", "Bearer {admin}", "a=b", {"c": "d", "a": "b", "token": _TOKEN}),
+        ("post", "", "Bearer {admin}", "token={admin}", {"token": _TOKEN}),
+        ("post", "", "Bearer {admin}", "token=&a=b", {"token": _TOKEN, "a": "b"}),
+        ("post", "", "Bearer {admin}", ("token", ""), {"token": _TOKEN}),
+        ("post", "", None, ("token", "{admin}"), {"token": _TOKEN}),
+        ("post", "", "Bearer {admin}", ("a", "b"), {"a": "b", "token": _TOKEN}),
+        # a credential that does not resolve, and a `token` query parameter
+        ("get", "foo=1", "Bearer {bogus}", None, "invalid_auth"),
+        ("post", "foo=1", None, "token={bogus}", "invalid_auth"),
+        ("post", "", None, ("token", "{bogus}"), "invalid_auth"),
+        ("post", "", None, "token=%FF", "invalid_auth"),
+        ("post", "", "Bearer {admin}", "token=%FF", "invalid_auth"),
+        ("post", "", "Bearer {admin}", "token=%20", "invalid_auth"),
+        ("get", "token={admin}&foo=1", None, None, "invalid_auth"),
+        ("get", "token={bogus}&foo=1", None, None, "invalid_auth"),
+        ("get", "a=1&token=2", None, None, "invalid_auth"),
+        ("get", "token=&foo=1", "Bearer {admin}", None, "invalid_auth"),
+        # `error`, answered with `args`, after the credential
+        ("get", "error=x", None, None, ("x", {"error": "x"})),
+        ("post", "", None, "error=boom", ("boom", {"error": "boom"})),
+        ("get", "error=x", "Bearer {admin}", None, ("x", {"error": "x", "token": _TOKEN})),
+        ("get", "error=x&token=", None, None, ("x", {"error": "x", "token": ""})),
+        ("get", "error=y", "Bearer ", None, ("y", {"error": "y"})),
+        (
+            "post",
+            "",
+            "Bearer {admin}",
+            "error=x&a=b",
+            ("x", {"error": "x", "a": "b", "token": _TOKEN}),
+        ),
+        ("post", "error=y", "Bearer {admin}", "error=x", ("x", {"error": "x", "token": _TOKEN})),
+        ("get", "error=", None, None, {"error": ""}),
+        ("get", "error=&foo=1", "Bearer {admin}", None, {"error": "", "foo": "1", "token": _TOKEN}),
+        ("get", "error=x", "Bearer {bogus}", None, "invalid_auth"),
+        ("get", "token=x&error=y", None, None, "invalid_auth"),
+    ],
+)
+def test_slack_api_test_reads_a_credential_and_echoes_it(
+    client, tokens_yaml, method, query, authorization, form, want
+):
+    """`api.test` answers each row as slack.com/api answered it (``slack.api_test`` dates the
+    measurement): ``want`` is the `args` a served request echoes, the error a refused one is
+    answered with, or (error, `args`) for an `error` argument. ``_TOKEN`` stands for the admin
+    token the row sent, and a ``form`` that is a (name, value) pair is a multipart body's one part.
+    Real's clients call it at construction, llama-index's `SlackReader.__init__` among them."""
+    t = {"admin": tokens_yaml["admin_token"], "bogus": "xoxb-not-a-real-token"}
+    headers = {} if authorization is None else {"Authorization": authorization.format(**t)}
+    body = {}
+    if isinstance(form, tuple):
+        headers["Content-Type"] = _MULTIPART
+        body["content"] = _one_part(form[0], form[1].format(**t))
+    elif form is not None:
+        headers["Content-Type"] = _FORM
+        body["content"] = form.format(**t)
+    url = f"/slack/api/api.test?{query.format(**t)}" if query else "/slack/api/api.test"
+    r = getattr(client, method)(url, headers=headers, **body)
+
+    def echo(args):
+        return {k: t["admin"] if v == _TOKEN else v for k, v in args.items()}
+
+    if isinstance(want, str):
+        expected = {"ok": False, "error": want}
+    elif isinstance(want, tuple):
+        expected = {"ok": False, "error": want[0], "args": echo(want[1])}
+    else:
+        expected = {"ok": True, "args": echo(want)}
+    assert r.content == JSONResponse(expected).body
 
 
 def test_slack_accepts_form_field_token(client, tokens_yaml):
