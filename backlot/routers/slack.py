@@ -10,9 +10,11 @@ up — so ``_caller_or_error`` decides it once for every method here.
 
 from __future__ import annotations
 
+import json
 import math
 import re
 import urllib.parse
+from pathlib import Path
 
 from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse, Response
@@ -785,15 +787,25 @@ UNSERVED_METHODS = ("GET", "POST", "PUT", "PATCH", "DELETE")
 #: `_` and the bytes past ASCII so, but refuses `%00`, `%2F`, `%3F` and `%5C` at its front end, and
 #: `%0A` but at a name's end, where it drops `%09`, `%0A`, `%0B`, `%0D`, `%20` and `%2B`.
 _METHOD_NAME = re.compile(r"[0-9A-Za-z.]+")
-#: The methods Slack publishes and no route here serves, by name: the baseline's `missing`
-#: operations (``backlot.published``), each published for a `GET` or a `POST`, and real answers
-#: either method alike.
-_PUBLISHED_NOT_SERVED = frozenset(
+#: The methods Slack has, by name, for a path no route here matches: the baseline's `missing`
+#: operations (``backlot.published``) and the methods Slack's reference index lists, some of which
+#: the baseline's 2020 description lacks (``backlot/data/slack_methods.json``, written by
+#: ``scripts/gen_slack_methods.py``). Measured on 2026-10-20 with no token and with a bogus one, the
+#: 164 the baseline lists by `GET` and the 174 only the index lists by `GET` and by `POST`, each
+#: answered the credential's refusal (`not_authed`, `invalid_auth`) but for those
+#: :data:`_RETIRED`, :data:`_OTHER_ANSWERS` and :data:`_ANSWERED_BY_ARGUMENTS` hold.
+_PUBLISHED = frozenset(
     op.split(" ", 1)[1].removeprefix("/") for op in published.missing_operations("slack")
+) | frozenset(
+    json.loads(
+        (Path(__file__).resolve().parent.parent / "data" / "slack_methods.json").read_text(
+            encoding="utf-8"
+        )
+    )["methods"]
 )
-#: Of :data:`_PUBLISHED_NOT_SERVED`, the methods real answers `unknown_method` for, as for a name it
-#: never had. Each of the 164 the baseline lists was sent with no token and with a bogus one on
-#: 2026-10-20, and these ten were `unknown_method` both ways and with a token that resolves.
+#: Of :data:`_PUBLISHED`, the ten the baseline lists and the index does not, which real answers
+#: `unknown_method` for, as for a name it never had, whatever the credential, one that resolves
+#: included.
 _RETIRED = frozenset(
     {
         "apps.permissions.info",
@@ -807,6 +819,50 @@ _RETIRED = frozenset(
         "workflows.stepFailed",
         "workflows.updateStep",
     }
+)
+#: The answer, where it is not the credential's refusal, of a method no route here serves, and
+#: whether a credential sent that does not resolve is refused ahead of it, each also answered so to
+#: a token that resolves. The `.mark` and `.list` ones are among the names `slack_sdk` 3.45.0 calls
+#: that neither list holds, sent by `GET` with each credential and by `POST` with none; the rest of
+#: those names (`channels.list`, `im.open`) were `unknown_method`.
+_OTHER_ANSWERS: dict[str, tuple[dict, bool]] = {
+    "oauth.access": ({"ok": False, "error": "invalid_code"}, False),
+    **{
+        name: ({"ok": False, "error": "invalid_code"}, True)
+        for name in ("oauth.v2.access", "oauth.v2.user.access", "openid.connect.token")
+    },
+    **{
+        name: (
+            {
+                "ok": False,
+                "error": "method_deprecated",
+                "response_metadata": {
+                    "messages": [
+                        "[ERROR] This method is retired and can no longer be used. Please use "
+                        f"{instead} instead. Learn more: https://api.slack.com/changelog/"
+                        "2020-01-deprecating-antecedents-to-the-conversations-api."
+                    ]
+                },
+            },
+            True,
+        )
+        for name, instead in (
+            ("channels.mark", "conversations.mark"),
+            ("groups.mark", "conversations.mark"),
+            ("im.mark", "conversations.mark"),
+            ("mpim.mark", "conversations.mark"),
+            ("im.list", "conversations.list or users.conversations"),
+            ("mpim.list", "conversations.list or users.conversations"),
+        )
+    },
+}
+#: Methods whose answer to a caller with no token turns on what was sent: `invalid_arguments` naming
+#: the arguments missing (`oauth.v2.exchange` whatever the credential, `tooling.tokens.rotate`
+#: unless one is refused), and `blocks.validate`'s `unsupported_http_method` for a `GET` and
+#: `invalid_arguments` for a `POST`. They are left to the router: an answer for one set of arguments
+#: does not hold for another.
+_ANSWERED_BY_ARGUMENTS = frozenset(
+    {"blocks.validate", "oauth.v2.exchange", "tooling.tokens.rotate"}
 )
 #: Real's answer to a path that names no method, but for the bytes :data:`_METHOD_NAME` says it
 #: refuses at its front end: this page, 1736 bytes under `text/html; charset=utf-8`, the same on
@@ -872,28 +928,30 @@ def method_name(path: str) -> str | None:
 
 def unserved_answer(request: Request) -> Response | None:
     """Real's answer to a request for a path no route here matches, or None for the router's 404:
-    the method's credential refusal (``_caller_or_error``) for a method Slack publishes, ahead of
-    whatever the method would read, or `invalid_code` for the two `oauth` exchanges below;
-    `unknown_method` with the name for one it does not publish or has retired (:data:`_RETIRED`),
-    whatever the credential; and its 404 page for a path that names no method. A credential that
-    resolves, on a method Slack publishes but the two exchanges, is left to the router."""
+    the method's credential refusal (``_caller_or_error``) for a method Slack has, ahead of whatever
+    the method would read, or the answer :data:`_OTHER_ANSWERS` holds for it; `unknown_method` with
+    the name for one it has none by or has retired (:data:`_RETIRED`), whatever the credential;
+    and its 404 page for a path that names no method. A credential that resolves, on a method
+    :data:`_OTHER_ANSWERS` does not hold, and a method of :data:`_ANSWERED_BY_ARGUMENTS` are left to
+    the router."""
     path = request.scope["path"]
     if path.removeprefix("/slack/api/") in ("", ".", "..") or path.endswith("/"):
         return None
     name = method_name(path)
     if name is None:
         return Response(_NOT_FOUND_PAGE, status_code=404, media_type="text/html; charset=utf-8")
-    if name not in _PUBLISHED_NOT_SERVED or name in _RETIRED:
+    if name in _ANSWERED_BY_ARGUMENTS:
+        return None
+    other = _OTHER_ANSWERS.get(name)
+    if other is None and (name not in _PUBLISHED or name in _RETIRED):
         return JSONResponse({"ok": False, "error": "unknown_method", "req_method": name})
-    # The two the measurement under `_RETIRED` answered `invalid_code`, where the others were
-    # `not_authed` and `invalid_auth`: `oauth.access` whatever the credential, and `oauth.v2.access`
-    # but for a credential it refuses (a token that resolves is `invalid_code` too).
-    if name == "oauth.access":
-        return _err("invalid_code")
     refusal = _caller_or_error(request)[1]
-    if name == "oauth.v2.access" and (refusal is None or not _credential_sent(request)):
-        return _err("invalid_code")
-    return refusal
+    if other is None:
+        return refusal
+    answer, refused_first = other
+    if refused_first and refusal is not None and _credential_sent(request):
+        return refusal
+    return JSONResponse(answer)
 
 
 def attach_warning(payload: dict, warning: str) -> dict:

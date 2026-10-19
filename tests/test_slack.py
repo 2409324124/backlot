@@ -6,7 +6,9 @@ or call the response builder directly.
 
 from __future__ import annotations
 
+import json
 import urllib.parse
+from pathlib import Path
 
 import pytest
 import yaml
@@ -3721,6 +3723,22 @@ def test_slack_refuses_a_body_before_the_method_runs(
 _PAGE = "<real's 404 page>"
 _ROUTED = "<the route's answer>"
 _LEFT = "<the router's 404>"
+_RETIRED_MESSAGE = (
+    "[ERROR] This method is retired and can no longer be used. Please use {} instead. Learn more: "
+    "https://api.slack.com/changelog/2020-01-deprecating-antecedents-to-the-conversations-api."
+)
+_MARK_RETIRED = {
+    "ok": False,
+    "error": "method_deprecated",
+    "response_metadata": {"messages": [_RETIRED_MESSAGE.format("conversations.mark")]},
+}
+_LIST_RETIRED = {
+    "ok": False,
+    "error": "method_deprecated",
+    "response_metadata": {
+        "messages": [_RETIRED_MESSAGE.format("conversations.list or users.conversations")]
+    },
+}
 _ROUTED_ROWS = (("PUT", "api.test"), ("PATCH", "conversations.list"), ("DELETE", "auth.test"))
 _RETIRED = (
     "apps.permissions.info",
@@ -3811,11 +3829,23 @@ _RETIRED = (
         ("GET", "oauth.v2.access", "query", None, None, "invalid_auth"),
         ("GET", "oauth.v2.access", "admin", None, None, "invalid_code"),
         ("GET", "oauth.access", "admin", None, None, "invalid_code"),
+        ("GET", "oauth.v2.user.access", "admin", None, None, "invalid_code"),
+        ("GET", "openid.connect.token", "bogus", None, None, "invalid_auth"),
+        # a name `slack_sdk` calls that neither list holds (`slack._OTHER_ANSWERS`)
+        ("GET", "channels.mark", None, None, None, _MARK_RETIRED),
+        ("GET", "channels.mark", "admin", None, None, _MARK_RETIRED),
+        ("GET", "channels.mark", "bogus", None, None, "invalid_auth"),
+        ("POST", "im.list", None, _FORM, b"", _LIST_RETIRED),
+        ("GET", "channels.list", None, None, None, ("unknown_method", "channels.list")),
+        ("GET", "im.open", "bogus", None, None, ("unknown_method", "im.open")),
         # a method a route serves, for another HTTP method, is the route's to answer
         *((verb, m, None, None, None, _ROUTED) for verb, m in _ROUTED_ROWS),
         # left to the router: a token that resolves, a path ending in `/`, the dot segments, and a
         # method outside `slack.UNSERVED_METHODS`, its body unread
         ("GET", "emoji.list", "admin", None, None, _LEFT),
+        ("GET", "files.getUploadURLExternal", "admin", None, None, _LEFT),
+        ("POST", "blocks.validate", None, _FORM, b"", _LEFT),
+        ("GET", "tooling.tokens.rotate", "bogus", None, None, _LEFT),
         ("GET", "emoji.list/", None, None, None, _LEFT),
         ("GET", "%2E", None, None, None, _LEFT),
         ("GET", "%2E%2E", None, None, None, _LEFT),
@@ -3830,10 +3860,10 @@ def test_slack_answers_a_path_no_route_serves_as_real_does(
 ):
     """A path under `/slack/api/` that none of the routes serves, answered as slack.com/api answered
     each row (the comment above ``slack.UNSERVED_METHODS`` dates the measurement): ``want`` is the
-    error, (error, `req_method`) for `unknown_method`, or real's 404 page. A `POST` with a JSON body
-    carries the `missing_charset` warning, as each of real's answers to one did but the page. A
-    ``_ROUTED`` row only says this layer leaves it be: real runs the method. A ``_LEFT`` row is one
-    this layer leaves to the router."""
+    error, (error, `req_method`) for `unknown_method`, the whole answer, or real's 404 page. A
+    `POST` with a JSON body carries the `missing_charset` warning, as each of real's answers to one
+    did but the page. A ``_ROUTED`` row only says this layer leaves it be: real runs the method. A
+    ``_LEFT`` row is one this layer leaves to the router."""
     headers = {}
     url = f"/slack/api/{path}"
     if credential == "admin":
@@ -3856,7 +3886,9 @@ def test_slack_answers_a_path_no_route_serves_as_real_does(
         assert r.headers["content-type"] == "text/html; charset=utf-8"
         assert r.content == slack._NOT_FOUND_PAGE
         return
-    if isinstance(want, tuple):
+    if isinstance(want, dict):
+        expected = dict(want)
+    elif isinstance(want, tuple):
         expected = {"ok": False, "error": want[0], "req_method": want[1]}
     else:
         expected = {"ok": False, "error": want}
@@ -3872,21 +3904,44 @@ def test_slack_answers_a_path_no_route_serves_as_real_does(
 # Where real's two answers were not `not_authed` and `invalid_auth`.
 _PUBLISHED_ANSWERS = {
     "oauth.access": ("invalid_code", "invalid_code"),
-    "oauth.v2.access": ("invalid_code", "invalid_auth"),
+    **{
+        name: ("invalid_code", "invalid_auth")
+        for name in ("oauth.v2.access", "oauth.v2.user.access", "openid.connect.token")
+    },
     **{name: ("unknown_method", "unknown_method") for name in _RETIRED},
+    **{
+        name: (_LEFT, _LEFT)
+        for name in ("blocks.validate", "oauth.v2.exchange", "tooling.tokens.rotate")
+    },
 }
+_INDEX = Path(slack.__file__).resolve().parents[1] / "data" / "slack_methods.json"
 
 
 @pytest.mark.parametrize(
-    "name", sorted({op.split(" ", 1)[1][1:] for op in published.missing_operations("slack")})
+    "name",
+    sorted(
+        {op.split(" ", 1)[1][1:] for op in published.missing_operations("slack")}
+        | set(json.loads(_INDEX.read_text(encoding="utf-8"))["methods"])
+        - {route.path.removeprefix("/slack/api/") for route in slack.router.routes}
+    ),
 )
 def test_slack_answers_each_published_method_no_route_serves(client, name):
-    """Each method the baseline lists as published and not served, answered both ways as real
-    answered it (``slack._RETIRED`` dates the measurement)."""
+    """Each method the baseline lists as published and not served, and each Slack's reference index
+    lists that no route serves, answered as real answered it (``slack._PUBLISHED`` dates the
+    measurement)."""
     none, bogus = _PUBLISHED_ANSWERS.get(name, ("not_authed", "invalid_auth"))
-    for headers, error in (({}, none), ({"Authorization": "Bearer xoxb-not-a-real-token"}, bogus)):
-        expected = {"ok": False, "error": error}
-        if error == "unknown_method":
-            expected["req_method"] = name
-        r = client.get(f"/slack/api/{name}", headers=headers)
-        assert r.content == JSONResponse(expected).body, (name, headers)
+    for verb in ("GET", "POST"):
+        for headers, error in (
+            ({}, none),
+            ({"Authorization": "Bearer xoxb-not-a-real-token"}, bogus),
+        ):
+            if verb == "POST":
+                headers = {**headers, "Content-Type": _FORM}
+            r = client.request(verb, f"/slack/api/{name}", headers=headers, content=b"")
+            if error == _LEFT:
+                assert (r.status_code, r.content) == (404, b'{"detail":"Not Found"}'), (verb, name)
+                continue
+            expected = {"ok": False, "error": error}
+            if error == "unknown_method":
+                expected["req_method"] = name
+            assert r.content == JSONResponse(expected).body, (verb, name, headers)
