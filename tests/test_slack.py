@@ -12,7 +12,7 @@ import pytest
 import yaml
 from fastapi.responses import JSONResponse
 
-from backlot import store, synth
+from backlot import published, store, synth
 from backlot.routers import slack
 from tests._helpers import (
     client_for,
@@ -3839,10 +3839,12 @@ _PUBLISHED_ANSWERS = {
 }
 
 
-@pytest.mark.parametrize("name", sorted(slack._PUBLISHED_NOT_SERVED))
+@pytest.mark.parametrize(
+    "name", sorted({op.split(" ", 1)[1][1:] for op in published.missing_operations("slack")})
+)
 def test_slack_answers_each_published_method_no_route_serves(client, name):
     """Each method the baseline lists as published and not served, sent with no token and with a
-    bogus one, answered as real answered each of the 164 on 2026-10-20."""
+    bogus one, answered as real answered it (``slack._RETIRED`` dates the measurement)."""
     none, bogus = _PUBLISHED_ANSWERS.get(name, ("not_authed", "invalid_auth"))
     for headers, error in (({}, none), ({"Authorization": "Bearer xoxb-not-a-real-token"}, bogus)):
         expected = {"ok": False, "error": error}
