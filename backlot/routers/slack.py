@@ -841,14 +841,19 @@ _OTHER_ANSWERS: dict[str, tuple[dict, bool]] = {
         )
     },
 }
-#: Methods whose answer to a caller with no token turns on what was sent: `invalid_arguments` naming
-#: the arguments missing (`oauth.v2.exchange` whatever the credential, `tooling.tokens.rotate`
-#: unless one is refused), and `blocks.validate`'s `unsupported_http_method` for a `GET` and
-#: `invalid_arguments` for a `POST`. They are left to the router: an answer for one set of arguments
-#: does not hold for another.
-_ANSWERED_BY_ARGUMENTS = frozenset(
-    {"blocks.validate", "oauth.v2.exchange", "tooling.tokens.rotate"}
-)
+#: Methods whose answer to a caller real lets through turns on the arguments sent, which is left to
+#: the router, each with whether a credential sent that does not resolve is refused ahead of them
+#: (`invalid_auth`, as on any method). Real answered `oauth.v2.exchange` `invalid_arguments` naming
+#: the arguments missing whatever the credential, `tooling.tokens.rotate` `invalid_arguments`
+#: without a `refresh_token` and `invalid_refresh_token` with a bogus one, and `blocks.validate`
+#: `ok` to a `POST` of `blocks=[]` and `invalid_arguments` to a `POST`, `PUT` or `DELETE` of
+#: nothing; a `GET` of `blocks.validate` was `unsupported_http_method` whatever the credential,
+#: which :func:`unserved_answer` answers (2026-10-20).
+_ANSWERED_BY_ARGUMENTS = {
+    "blocks.validate": True,
+    "oauth.v2.exchange": False,
+    "tooling.tokens.rotate": True,
+}
 #: Real's answer to a path that names no method, where :func:`unserved_answer` gives it, but for the
 #: bytes :data:`_METHOD_NAME` says real refuses at its front end: this page, 1736 bytes under
 #: `text/html; charset=utf-8`, the same on each of the 611 answers that carried it on 2026-10-20.
@@ -917,9 +922,10 @@ def unserved_answer(request: Request) -> Response | None:
     the method would read, or the answer :data:`_OTHER_ANSWERS` holds for it; `unknown_method` with
     the name for one it has none by, whatever the credential; and its 404 page for a path that names
     no method. A credential that resolves, on a method :data:`_OTHER_ANSWERS` does not hold, and a
-    method of :data:`_ANSWERED_BY_ARGUMENTS` are left to the router, and so are an empty name, the
-    names `.` and `..`, a path ending in `/`, and a name after two or more `/`s, which real reads as
-    that name, its slashes merged (`//api.test` is `api.test`, slack.com/api, 2026-10-20)."""
+    method of :data:`_ANSWERED_BY_ARGUMENTS` past the credential it refuses and a `GET` of
+    `blocks.validate` are left to the router, and so are an empty name, the names `.` and `..`, a
+    path ending in `/`, and a name after two or more `/`s, which real reads as that name, its
+    slashes merged (`//api.test` is `api.test`, slack.com/api, 2026-10-20)."""
     path = request.scope["path"]
     rest = path.removeprefix("/slack/api/")
     if rest in ("", ".", "..") or path.endswith("/"):
@@ -930,6 +936,11 @@ def unserved_answer(request: Request) -> Response | None:
     if name is None:
         return Response(_NOT_FOUND_PAGE, status_code=404, media_type="text/html; charset=utf-8")
     if name in _ANSWERED_BY_ARGUMENTS:
+        if name == "blocks.validate" and request.method == "GET":
+            return _err("unsupported_http_method")
+        refusal = _caller_or_error(request)[1]
+        if _ANSWERED_BY_ARGUMENTS[name] and refusal is not None and _credential_sent(request):
+            return refusal
         return None
     other = _OTHER_ANSWERS.get(name)
     if other is None and name not in _PUBLISHED:

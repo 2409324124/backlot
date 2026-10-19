@@ -3843,6 +3843,11 @@ _RETIRED = (
         ("GET", "oauth.access", "admin", None, None, "invalid_code"),
         ("GET", "oauth.v2.user.access", "admin", None, None, "invalid_code"),
         ("GET", "openid.connect.token", "bogus", None, None, "invalid_auth"),
+        # a method of `slack._ANSWERED_BY_ARGUMENTS` that refuses a credential first, and the `GET`
+        # `blocks.validate` refuses whatever the credential
+        ("GET", "tooling.tokens.rotate", "bogus", None, None, "invalid_auth"),
+        ("PUT", "blocks.validate", "bogus", None, None, "invalid_auth"),
+        ("GET", "blocks.validate", "admin", None, None, "unsupported_http_method"),
         # a name `slack_sdk` calls that neither list holds (`slack._OTHER_ANSWERS`)
         *(
             ("GET", name, None, None, None, _MARK_RETIRED)
@@ -3862,7 +3867,8 @@ _RETIRED = (
         ("GET", "emoji.list", "admin", None, None, _LEFT),
         ("GET", "files.getUploadURLExternal", "admin", None, None, _LEFT),
         ("POST", "blocks.validate", None, _FORM, b"", _LEFT),
-        ("GET", "tooling.tokens.rotate", "bogus", None, None, _LEFT),
+        ("POST", "tooling.tokens.rotate", None, _FORM, b"refresh_token=xoxe-1-bogus", _LEFT),
+        ("GET", "oauth.v2.exchange", "bogus", None, None, _LEFT),
         ("GET", "emoji.list/", None, None, None, _LEFT),
         ("GET", "%2E", None, None, None, _LEFT),
         ("GET", "%2E%2E", None, None, None, _LEFT),
@@ -3930,10 +3936,12 @@ _PUBLISHED_ANSWERS = {
         for name in ("oauth.v2.access", "oauth.v2.user.access", "openid.connect.token")
     },
     **{name: ("unknown_method", "unknown_method") for name in _RETIRED},
-    **{
-        name: (_LEFT, _LEFT)
-        for name in ("blocks.validate", "oauth.v2.exchange", "tooling.tokens.rotate")
+    "blocks.validate": {
+        "GET": ("unsupported_http_method", "unsupported_http_method"),
+        "POST": (_LEFT, "invalid_auth"),
     },
+    "oauth.v2.exchange": (_LEFT, _LEFT),
+    "tooling.tokens.rotate": (_LEFT, "invalid_auth"),
 }
 _INDEX = Path(slack.__file__).resolve().parents[1] / "data" / "slack_methods.json"
 
@@ -3951,8 +3959,9 @@ def test_slack_answers_each_published_method_no_route_serves(client, name):
     lists that no route serves, answered as real answered it but those
     ``slack._ANSWERED_BY_ARGUMENTS`` leaves to the router (``slack._PUBLISHED`` dates the
     measurement)."""
-    none, bogus = _PUBLISHED_ANSWERS.get(name, ("not_authed", "invalid_auth"))
+    answers = _PUBLISHED_ANSWERS.get(name, ("not_authed", "invalid_auth"))
     for verb in ("GET", "POST"):
+        none, bogus = answers[verb] if isinstance(answers, dict) else answers
         for headers, error in (
             ({}, none),
             ({"Authorization": "Bearer xoxb-not-a-real-token"}, bogus),
