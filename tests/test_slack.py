@@ -237,7 +237,7 @@ def test_slack_reads_the_token_where_real_reads_it(
 ):
     """Real's answers to `auth.test` for where a request carries its token, the rules
     `auth.slack_token` and `auth.slack_query_token_refused` record, and `slack.read_post_body` for
-    the name and the value of a form field: ``answer`` is the `user_id` a
+    the name and the value of a form field, urlencoded or multipart: ``answer`` is the `user_id` a
     served request names, or the error a refused one answers. The rows with a person's token in
     one place and the admin's in the other tell the form field's order from the header's. A
     ``form`` that is a (name, value) pair is sent as the one part of a multipart body."""
@@ -2415,6 +2415,8 @@ def test_slack_deactivation_changes_every_slack_answer_about_a_member_and_nothin
         ("POST", "conversations.list", "application/json", b"{}", "missing_charset"),
         ("POST", "conversations.history", "application/json", b"{}", "missing_charset"),
         ("POST", "conversations.history", f"{_FORM}; charset=utf-8", b"", "superfluous_charset"),
+        # a 404 carries none, as real's HTML 404 for a path with no dot does not
+        ("POST", "nonexistent-xyz", "application/json", b"{}", None),
     ],
 )
 def test_slack_post_charset_warnings(
@@ -2505,6 +2507,12 @@ def test_slack_post_charset_warning_on_a_refusal(
         ("POST", None, b"", {}),
         ("POST", "", b"{}", "missing_post_type"),
         # The media type, as sent; a form type read as one passes
+        (
+            "POST",
+            "text/plain; boundary=b",
+            b'--b\r\nContent-Disposition: form-data; name="a"\r\n\r\nb\r\n--b--\r\n',
+            ({}, "missing_charset"),
+        ),
         ("POST", "text/html", b"{}", "invalid_post_type"),
         ("POST", "text/html", b"", {}),
         ("POST", "APPLICATION/JSON", b"{}", "invalid_post_type"),
@@ -2538,6 +2546,13 @@ def test_slack_post_charset_warning_on_a_refusal(
             "invalid_post_type",
         ),
         # The charset
+        ("POST", "application/json; charset=utf8", b"{}", {}),
+        (
+            "POST",
+            "multipart/form-data; boundary=b; charset=latin1",
+            b"",
+            ({}, "superfluous_charset"),
+        ),
         ("POST", "application/json ;charset=utf-8", b"{}", "invalid_post_type"),
         ("POST", "application/json; charset=latin1", b"{}", "invalid_charset"),
         ("POST", "application/json; charset=latin1", b"", "invalid_charset"),
@@ -2552,6 +2567,22 @@ def test_slack_post_charset_warning_on_a_refusal(
         ("POST", "foo; charset=latin1", b"", "invalid_charset"),
         ("POST", "application/json; charset=; charset=latin1", b"{}", "invalid_charset"),
         # A form body
+        ("POST", _FORM, b"9223372036854775807=c", {}),
+        ("POST", _FORM, b"9223372036854775808=c", {"9223372036854775808": "c"}),
+        pytest.param(
+            "POST",
+            _FORM,
+            b"a=" + b"x" * 1572862,
+            {"a": "x" * 1572862},
+            id="form-value-1572862-bytes",
+        ),
+        pytest.param(
+            "POST",
+            _MULTIPART,
+            _one_part("a", "x" * 1572864),
+            {"a": "x" * 1572864},
+            id="part-1572864-bytes",
+        ),
         ("POST", _FORM, b"{}", "invalid_form_data"),
         ("POST", _FORM, b"a", "invalid_form_data"),
         ("POST", _FORM, b"=b", "invalid_form_data"),
@@ -2602,6 +2633,60 @@ def test_slack_post_charset_warning_on_a_refusal(
         ("POST", _FORM, b"a%00[b]=c", {"a": "c"}),
         ("POST", _FORM, b"1[a]=b", "invalid_array_arg"),
         # A multipart body
+        (
+            "POST",
+            _MULTIPART,
+            b'--b\nContent-Disposition: form-data; name="a"\n\nb\n\n--b--\n',
+            {"a": "b\n"},
+        ),
+        (
+            "POST",
+            _MULTIPART,
+            b'--b\nContent-Disposition: form-data; name="a"\n\nb\n\n--b\nContent-Disposition: form-data; name="c"\n\nd\n--b--\n',
+            {"a": "b\n", "c": "d"},
+        ),
+        (
+            "POST",
+            _MULTIPART,
+            b'--b\r\nContent-Disposition: form-data; name="a"\r\nContent-Type: text/plain; name="zz"\r\n\r\nb\r\n--b--\r\n',
+            {"a": "b"},
+        ),
+        (
+            "POST",
+            _MULTIPART,
+            b'--b\r\nContent-Disposition: form-data; name="a"; name\r\n\r\nb\r\n--b--\r\n',
+            {"a": "b"},
+        ),
+        (
+            "POST",
+            _MULTIPART,
+            b'--b\r\nContent-Disposition: form-data; name="a"; foo="x"\r\n\r\nb\r\n--b--\r\n',
+            {"a": "b"},
+        ),
+        (
+            "POST",
+            _MULTIPART,
+            b'--b\r\nContent-Disposition: form-data; name="a"; filename\r\n\r\nb\r\n--b--\r\n',
+            {"a": "b"},
+        ),
+        (
+            "POST",
+            _MULTIPART,
+            b'--b\r\nContent-Disposition: form-data; name="a"; filename=""\r\n\r\nb\r\n--b--\r\n',
+            {},
+        ),
+        (
+            "POST",
+            _MULTIPART,
+            b'--b\r\nContent-Disposition: form-data; name="a"; FILENAME="x"\r\n\r\nb\r\n--b--\r\n',
+            {},
+        ),
+        (
+            "POST",
+            _MULTIPART,
+            b'--b\r\nContent-Disposition: form-data; NAME="a"\r\n\r\nb\r\n--b--\r\n',
+            {"a": "b"},
+        ),
         (
             "POST",
             _MULTIPART,
@@ -2871,11 +2956,11 @@ def test_slack_refuses_a_body_before_the_method_runs(
     client, tokens_yaml, method, credential, content_type, body, error
 ):
     """Each body is refused ahead of the method's credential and of its arguments, as real refused
-    it on each row, and with no `warning`: the first four on each method with the admin token and
-    no arguments and on `auth.test` with no token, a bogus one or a `token` query parameter, the
-    other four on `auth.test` with no token or a bogus one and on `conversations.history` with the
-    admin token and no `channel`. A GET with the same headers and
-    body answers what one without them does: the body of a GET is not read."""
+    it on each row, and with no `warning`: the first four on each method with the admin token and no
+    arguments and on `auth.test` with no token, a bogus one or a `token` query parameter, the other
+    four on `auth.test` with no token or a bogus one and on `conversations.history` with the admin
+    token and no `channel`. A GET with the same headers and body answers what one without them does:
+    the body of a GET is not read."""
     headers = {}
     params = {}
     if credential == "admin":

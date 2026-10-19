@@ -277,13 +277,13 @@ class Undecodable(str):
         return super().__new__(cls, "\ufffd")
 
 
-def post_content_type(request: Request) -> str | None:
+def post_content_type(request: Request) -> str:
     """A request's Content-Type as real reads it: each header's value with the spaces and tabs
     around it stripped (` application/x-www-form-urlencoded ` is a form and `application/json<TAB>`
-    JSON), and two headers joined with `, `. A form type sent ahead of `application/json` is read as
-    a form, and the other way round is `invalid_post_type`, as one header naming both is."""
-    values = [v.strip(" \t") for v in request.headers.getlist("content-type")]
-    return ", ".join(values) if values else None
+    JSON), and two headers joined with `, `, or empty when there is none. A form type sent ahead of
+    `application/json` is read as a form, and the other way round is `invalid_post_type`, as one
+    header naming both is."""
+    return ", ".join(v.strip(" \t") for v in request.headers.getlist("content-type"))
 
 
 def _named_charset(content_type: str) -> str | None:
@@ -367,17 +367,18 @@ def _unquote(raw: bytes) -> bytes:
 
 
 def _multipart_parts(content_type: str, body: bytes) -> list[tuple[bytes, bytes | None]] | None:
-    """The (name, value) of each part of a multipart body, the value None for a file's part, or None
-    for a body real cannot read.
+    """The (name, value) of each part of a multipart body, the value None for a file's part; None
+    for a body real cannot read, and no part for one with no delimiter.
 
     The boundary is the first parameter spelt `boundary`, `"` stripped; a delimiter is a line that
     is `--` and the boundary, ended by CRLF or LF alike, with nothing after it, and the text before
     the first one is skipped. A part's value is what follows its blank line, up to the line break
     before the next delimiter or the closing one, or to the end of the body, less a line break that
     ends it. Its name is the last `name` parameter of its `Content-Disposition`, quoted or not, and
-    a part with a `filename` is a file's, which is no argument. A part with no name, a boundary
-    missing or empty, and a body with no delimiter (one that is only the closing delimiter included)
-    are bodies real cannot read.
+    a part with a `filename` is a file's, which is no argument, each parameter's name read in any
+    case (`NAME="a"` names the part, and `FILENAME="x"` makes it a file's) and only with a `=`. A
+    part with no name and a boundary missing or empty are bodies real cannot read, and so, with no
+    part read, is a body with no delimiter, one that is only the closing delimiter included.
     """
     boundary = None
     for param in content_type.split(";")[1:]:
@@ -390,8 +391,6 @@ def _multipart_parts(content_type: str, body: bytes) -> list[tuple[bytes, bytes 
     delimiter = b"--" + boundary.encode("latin-1")
     lines = body.split(b"\n")
     starts = [i for i, line in enumerate(lines) if line.removesuffix(b"\r") == delimiter]
-    if not starts:
-        return None
     parts = []
     for n, start in enumerate(starts):
         end = starts[n + 1] if n + 1 < len(starts) else len(lines)
@@ -399,8 +398,7 @@ def _multipart_parts(content_type: str, body: bytes) -> list[tuple[bytes, bytes 
         closing = next(
             (i for i, line in enumerate(block) if line.startswith(delimiter + b"--")), None
         )
-        if closing is not None:
-            block = block[:closing]
+        block = block[:closing]
         if not any(block):
             continue
         try:
@@ -414,9 +412,9 @@ def _multipart_parts(content_type: str, body: bytes) -> list[tuple[bytes, bytes 
                 continue
             for param in value.split(b";")[1:]:
                 pname, eq, pvalue = param.strip().partition(b"=")
-                if eq and pname == b"name":
+                if eq and pname.lower() == b"name":
                     name = pvalue.strip(b'"')
-                elif eq and pname == b"filename":
+                elif eq and pname.lower() == b"filename":
                     filename = True
         if not name:
             return None
