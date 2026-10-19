@@ -173,9 +173,7 @@ jobs:
           fi
           exit "$status"
 
-      # backlot/data/slack_methods.json is Slack's reference index, which is how a path no route
-      # serves tells a method Slack has from a name it has none by, so a method Slack adds or
-      # retires makes it stale. 2 is an index it could not read.
+      # What this checks is scripts/gen_slack_methods.py's to say; 2 is an index it could not read.
       - name: Check the method list written from Slack's index
         if: ${{ !cancelled() && matrix.source == 'slack' }}
         run: |

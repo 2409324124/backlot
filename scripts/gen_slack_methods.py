@@ -64,7 +64,6 @@ def main() -> int:
     try:
         text = render(build())
     except Unreadable as e:
-        # 2, as `backlot diff` exits for a document it could not ask for: not a finding
         print(e, file=sys.stderr)
         return 2
     if args.check:

@@ -7,6 +7,7 @@ or call the response builder directly.
 from __future__ import annotations
 
 import json
+import runpy
 import urllib.parse
 from pathlib import Path
 
@@ -3832,7 +3833,11 @@ _RETIRED = (
         ("GET", "oauth.v2.user.access", "admin", None, None, "invalid_code"),
         ("GET", "openid.connect.token", "bogus", None, None, "invalid_auth"),
         # a name `slack_sdk` calls that neither list holds (`slack._OTHER_ANSWERS`)
-        ("GET", "channels.mark", None, None, None, _MARK_RETIRED),
+        *(
+            ("GET", name, None, None, None, _MARK_RETIRED)
+            for name in ("channels.mark", "groups.mark", "im.mark", "mpim.mark")
+        ),
+        *(("GET", name, None, None, None, _LIST_RETIRED) for name in ("im.list", "mpim.list")),
         ("GET", "channels.mark", "admin", None, None, _MARK_RETIRED),
         ("GET", "channels.mark", "bogus", None, None, "invalid_auth"),
         ("POST", "im.list", None, _FORM, b"", _LIST_RETIRED),
@@ -3945,3 +3950,68 @@ def test_slack_answers_each_published_method_no_route_serves(client, name):
             if error == "unknown_method":
                 expected["req_method"] = name
             assert r.content == JSONResponse(expected).body, (verb, name, headers)
+
+
+_INDEX_PAGE = (
+    "| Name | Description |\n|------|-------------|\n"
+    "| [users.list](https://docs.slack.dev/reference/methods/users.list.md) | Lists people. |\n"
+    "| [api.test](https://docs.slack.dev/reference/methods/api.test.md) | Checks calls. |\n"
+)
+
+
+class _IndexAnswer:
+    def __init__(self, status_code: int, text: str):
+        self.status_code, self.text = status_code, text
+
+
+@pytest.mark.parametrize(
+    "answer, want",
+    [
+        (_IndexAnswer(200, _INDEX_PAGE), 0),
+        (_IndexAnswer(503, _INDEX_PAGE), 2),
+        (_IndexAnswer(200, "| Name | Description |\n"), 2),
+        (None, 2),
+    ],
+)
+def test_the_slack_method_list_is_written_from_the_index(tmp_path, monkeypatch, answer, want):
+    """``scripts/gen_slack_methods.py`` against a stand-in for the index: the file it writes, what
+    `--check` says of the file as written, of another and of none, and 2 for an index it cannot read
+    (an `httpx` error, a status but 200, a page with no method row), with no file written."""
+    script = runpy.run_path(
+        str(Path(__file__).resolve().parents[1] / "scripts" / "gen_slack_methods.py"),
+        run_name="gen_slack_methods",
+    )["main"].__globals__
+    httpx = script["httpx"]
+
+    def get(url, **_):
+        assert url == "https://docs.slack.dev/reference/methods.md"
+        if answer is None:
+            raise httpx.ConnectError("no route to the index")
+        return answer
+
+    out = tmp_path / "slack_methods.json"
+    monkeypatch.setitem(script, "REPO", tmp_path)
+    monkeypatch.setitem(script, "OUT", out)
+    monkeypatch.setattr(httpx, "get", get)
+    monkeypatch.setattr("sys.argv", ["gen_slack_methods.py"])
+    assert script["main"].__globals__["OUT"] == out  # never the repository's file
+    assert script["main"]() == want
+    if want:
+        assert not out.exists()
+        monkeypatch.setattr("sys.argv", ["gen_slack_methods.py", "--check"])
+        assert script["main"]() == 2
+        return
+    assert json.loads(out.read_text(encoding="utf-8")) == {
+        "about": (
+            "The methods Slack's reference index lists. Written by scripts/gen_slack_methods.py; "
+            "do not edit by hand."
+        ),
+        "index": "https://docs.slack.dev/reference/methods.md",
+        "methods": ["api.test", "users.list"],
+    }
+    monkeypatch.setattr("sys.argv", ["gen_slack_methods.py", "--check"])
+    assert script["main"]() == 0
+    out.write_text(out.read_text(encoding="utf-8").replace("users.list", "users.info"))
+    assert script["main"]() == 1
+    out.unlink()
+    assert script["main"]() == 1

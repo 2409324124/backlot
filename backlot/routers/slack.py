@@ -20,7 +20,7 @@ from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse, Response
 from pydantic import BaseModel, ConfigDict
 
-from backlot import auth, published, store, synth
+from backlot import auth, store, synth
 from backlot.acl import Caller
 from backlot.config import get_settings
 from backlot.openapi import qp
@@ -787,38 +787,21 @@ UNSERVED_METHODS = ("GET", "POST", "PUT", "PATCH", "DELETE")
 #: `_` and the bytes past ASCII so, but refuses `%00`, `%2F`, `%3F` and `%5C` at its front end, and
 #: `%0A` but at a name's end, where it drops `%09`, `%0A`, `%0B`, `%0D`, `%20` and `%2B`.
 _METHOD_NAME = re.compile(r"[0-9A-Za-z.]+")
-#: The methods Slack has, by name, for a path no route here matches: the baseline's `missing`
-#: operations (``backlot.published``) and the methods Slack's reference index lists, some of which
-#: the baseline's 2020 description lacks (``backlot/data/slack_methods.json``, written by
-#: ``scripts/gen_slack_methods.py``). Measured on 2026-10-20 with no token and with a bogus one, the
-#: 164 the baseline lists by `GET` and the 174 only the index lists by `GET` and by `POST`, each
-#: answered the credential's refusal (`not_authed`, `invalid_auth`) but for those
-#: :data:`_RETIRED`, :data:`_OTHER_ANSWERS` and :data:`_ANSWERED_BY_ARGUMENTS` hold.
+#: The methods Slack has, by name, for a path no route here matches: those Slack's reference index
+#: lists (``backlot/data/slack_methods.json``, written by ``scripts/gen_slack_methods.py``). The
+#: index holds each method the baseline's 2020 description lists but ten (`oauth.token`, three
+#: `workflows` ones and six `apps.permissions` ones), which real answers `unknown_method` for, as
+#: for a name it never had, whatever the credential, one that resolves included. Measured on
+#: 2026-10-20 with no token and with a bogus one, the 164 the baseline lists by `GET` and the 174
+#: only the index lists by `GET` and by `POST`, each answered the credential's refusal
+#: (`not_authed`, `invalid_auth`) but for those ten and those :data:`_OTHER_ANSWERS` and
+#: :data:`_ANSWERED_BY_ARGUMENTS` hold.
 _PUBLISHED = frozenset(
-    op.split(" ", 1)[1].removeprefix("/") for op in published.missing_operations("slack")
-) | frozenset(
     json.loads(
         (Path(__file__).resolve().parent.parent / "data" / "slack_methods.json").read_text(
             encoding="utf-8"
         )
     )["methods"]
-)
-#: Of :data:`_PUBLISHED`, the ten the baseline lists and the index does not, which real answers
-#: `unknown_method` for, as for a name it never had, whatever the credential, one that resolves
-#: included.
-_RETIRED = frozenset(
-    {
-        "apps.permissions.info",
-        "apps.permissions.request",
-        "apps.permissions.resources.list",
-        "apps.permissions.scopes.list",
-        "apps.permissions.users.list",
-        "apps.permissions.users.request",
-        "oauth.token",
-        "workflows.stepCompleted",
-        "workflows.stepFailed",
-        "workflows.updateStep",
-    }
 )
 #: The answer, where it is not the credential's refusal, of a method no route here serves, and
 #: whether a credential sent that does not resolve is refused ahead of it, each also answered so to
@@ -930,10 +913,9 @@ def unserved_answer(request: Request) -> Response | None:
     """Real's answer to a request for a path no route here matches, or None for the router's 404:
     the method's credential refusal (``_caller_or_error``) for a method Slack has, ahead of whatever
     the method would read, or the answer :data:`_OTHER_ANSWERS` holds for it; `unknown_method` with
-    the name for one it has none by or has retired (:data:`_RETIRED`), whatever the credential;
-    and its 404 page for a path that names no method. A credential that resolves, on a method
-    :data:`_OTHER_ANSWERS` does not hold, and a method of :data:`_ANSWERED_BY_ARGUMENTS` are left to
-    the router."""
+    the name for one it has none by, whatever the credential; and its 404 page for a path that names
+    no method. A credential that resolves, on a method :data:`_OTHER_ANSWERS` does not hold, and a
+    method of :data:`_ANSWERED_BY_ARGUMENTS` are left to the router."""
     path = request.scope["path"]
     if path.removeprefix("/slack/api/") in ("", ".", "..") or path.endswith("/"):
         return None
@@ -943,7 +925,7 @@ def unserved_answer(request: Request) -> Response | None:
     if name in _ANSWERED_BY_ARGUMENTS:
         return None
     other = _OTHER_ANSWERS.get(name)
-    if other is None and (name not in _PUBLISHED or name in _RETIRED):
+    if other is None and name not in _PUBLISHED:
         return JSONResponse({"ok": False, "error": "unknown_method", "req_method": name})
     refusal = _caller_or_error(request)[1]
     if other is None:
