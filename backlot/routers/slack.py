@@ -940,7 +940,6 @@ def unserved_answer(request: Request) -> Response | None:
             return _err("unsupported_http_method")
         if not (_ANSWERED_BY_ARGUMENTS[name] and _credential_sent(request)):
             return None
-        return _caller_or_error(request)[1]
     other = _OTHER_ANSWERS.get(name)
     if other is None and name not in _PUBLISHED:
         return JSONResponse({"ok": False, "error": "unknown_method", "req_method": name})
