@@ -265,7 +265,11 @@ def _warm(url: str, timeout: float) -> bool:
 
 @contextlib.contextmanager
 def serve(
-    records: list[dict] | None = None, host: str = "127.0.0.1", *, data_dir: Path | None = None
+    records: list[dict] | None = None,
+    host: str = "127.0.0.1",
+    *,
+    data_dir: Path | None = None,
+    telemetry: bool = True,
 ):
     """Serve ``records`` (or the bundled hello-world corpus) on a free local port.
 
@@ -279,7 +283,10 @@ def serve(
     resolve to this machine — a Docker container on Linux, where ``--add-host=…:host-gateway``
     resolves to the bridge address. A single interface's address works too. ``base_url`` follows:
     loopback for a wildcard bind, otherwise the address bound, since that is where the server
-    answers."""
+    answers.
+
+    ``telemetry=False`` starts the server with usage telemetry off (docs/telemetry.md). A test
+    suite or CI job passes it: its calls are not anyone's use of Backlot."""
     if records is not None and data_dir is not None:
         raise ValueError("serve() takes records to import or a data_dir already built, not both")
     with tempfile.TemporaryDirectory() as scratch:
@@ -294,6 +301,8 @@ def serve(
         # UTF-8, and a Python before 3.15 writes a redirected stream in the platform's encoding
         # (cp1252 on a Western Windows) unless told otherwise.
         env = {**os.environ, "BACKLOT_DATA_DIR": str(data_dir), "PYTHONIOENCODING": "utf-8"}
+        if not telemetry:
+            env["BACKLOT_TELEMETRY"] = "0"
         # Read with the cwd and environment the server gets, minus keys that do not set admin_token
         # (the two above, and `_interpreter`'s `__PYVENV_LAUNCHER__` in a venv on Windows), so this
         # is the token the server enforces. A caller's BACKLOT_ADMIN_TOKEN or a .env in their cwd
@@ -369,14 +378,18 @@ def serve(
 
 @contextlib.contextmanager
 def serve_or_connect(
-    records: list[dict] | None = None, url: str | None = None, host: str = "127.0.0.1"
+    records: list[dict] | None = None,
+    url: str | None = None,
+    host: str = "127.0.0.1",
+    *,
+    telemetry: bool = True,
 ):
     """Use the server at ``url`` if reachable, else spin one up locally on ``records``.
 
     ``url`` is used only when given — this does not read ``sys.argv``. Pass
     ``url=backlot.url_from_argv()`` to honour a ``--url`` flag the way the bundled examples do.
 
-    ``host`` is ``serve``'s bind address, and so applies only when this falls back to a
+    ``host`` and ``telemetry`` are ``serve``'s, and so apply only when this falls back to a
     local server; a reachable ``url`` is already bound however its own operator bound it."""
     url = (url or "").strip()
     if url:
@@ -391,7 +404,7 @@ def serve_or_connect(
             yield Server(base_url=url.rstrip("/"), token=admin_token_for(url), data_dir=None)
             return
         print(f"--url {url!r} is not reachable — falling back to a local server", file=sys.stderr)
-    with serve(records, host=host) as s:
+    with serve(records, host=host, telemetry=telemetry) as s:
         yield s
 
 

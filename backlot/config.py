@@ -73,6 +73,11 @@ class Settings(BaseSettings):
     # has what the switch does and when to flip it.
     github_enforce_rate_limits: bool = True
 
+    # --- usage telemetry (backlot.telemetry; docs/telemetry.md says what is sent) ---
+    # `backlot serve --disable-telemetry` and `backlot.serve(telemetry=False)` set it off for the
+    # server they start.
+    telemetry: bool = True
+
     # --- sqlite read tuning (serving connection; see store.connect_ro) ---
     # Sized for the corpus most people serve — their own, or the bundled one, which is under a
     # megabyte. A multi-GB corpus wants all three raised, and a deployment that serves one says so
