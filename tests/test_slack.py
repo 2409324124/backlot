@@ -103,7 +103,7 @@ _TOKEN = "<the token>"
         ("get", "token={bogus}&foo=1", None, None, "invalid_auth"),
         ("get", "a=1&token=2", None, None, "invalid_auth"),
         ("get", "token=&foo=1", "Bearer {admin}", None, "invalid_auth"),
-        # `error`, answered with `args`, after the credential
+        # an error argument, answered after the credential
         ("get", "error=x", None, None, ("x", {"error": "x"})),
         ("post", "", None, "error=boom", ("boom", {"error": "boom"})),
         ("get", "error=x", "Bearer {admin}", None, ("x", {"error": "x", "token": _TOKEN})),
@@ -127,10 +127,9 @@ def test_slack_api_test_reads_a_credential_and_echoes_it(
     client, tokens_yaml, method, query, authorization, form, want
 ):
     """`api.test` answers each row as slack.com/api answered it (``slack.api_test`` dates the
-    measurement): ``want`` is the `args` a served request echoes, the error a refused one is
-    answered with, or (error, `args`) for an `error` argument. ``_TOKEN`` stands for the admin
-    token the row sent, and a ``form`` that is a (name, value) pair is a multipart body's one part.
-    Real's clients call it at construction, llama-index's `SlackReader.__init__` among them."""
+    measurement): ``want`` is what a served request echoes, a refused one's error, or a pair of
+    the two for an error answer. ``_TOKEN`` stands for the admin token the row sent, and a
+    ``form`` that is a (name, value) pair is a multipart body's one part."""
     t = {"admin": tokens_yaml["admin_token"], "bogus": "xoxb-not-a-real-token"}
     headers = {} if authorization is None else {"Authorization": authorization.format(**t)}
     body = {}
