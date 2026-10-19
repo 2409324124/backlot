@@ -4011,7 +4011,9 @@ def test_the_slack_method_list_is_written_from_the_index(tmp_path, monkeypatch, 
     }
     monkeypatch.setattr("sys.argv", ["gen_slack_methods.py", "--check"])
     assert script["main"]() == 0
-    out.write_text(out.read_text(encoding="utf-8").replace("users.list", "users.info"))
+    out.write_text(
+        out.read_text(encoding="utf-8").replace("users.list", "users.info"), encoding="utf-8"
+    )
     assert script["main"]() == 1
     out.unlink()
     assert script["main"]() == 1
