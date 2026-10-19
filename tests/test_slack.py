@@ -236,7 +236,8 @@ def test_slack_reads_the_token_where_real_reads_it(
     client, tokens_yaml, tokens, method, query, authorization, form, answer
 ):
     """Real's answers to `auth.test` for where a request carries its token, the rules
-    `auth.slack_token` and `auth.slack_query_token_refused` record: ``answer`` is the `user_id` a
+    `auth.slack_token` and `auth.slack_query_token_refused` record, and `slack.read_post_body` for
+    the name and the value of a form field: ``answer`` is the `user_id` a
     served request names, or the error a refused one answers. The rows with a person's token in
     one place and the admin's in the other tell the form field's order from the header's. A
     ``form`` that is a (name, value) pair is sent as the one part of a multipart body."""
@@ -1134,9 +1135,9 @@ def test_slack_reads_an_argument_from_the_body_ahead_of_the_query(
     client, admin_h, method, params, content_type, body, want
 ):
     """An argument sent in a POST body, urlencoded or as a multipart part (``body`` a (name, value)
-    pair), under the name real reads it by, as slack.com/api answered each row on 2026-10-13 and
-    2026-10-20. ``want`` is the error, the `invalid_arguments` lines, or the arguments a GET sends
-    in the query string to be answered the same."""
+    pair), under the name real reads it by, as real answered each row. ``want`` is the error, the
+    `invalid_arguments` lines, or the arguments a GET sends in the query string to be answered the
+    same."""
     cid = _a_channel_id(client, admin_h)
     own = {_OWN_CHANNEL: cid}
     if isinstance(body, tuple):
@@ -2795,10 +2796,10 @@ def test_slack_post_charset_warning_on_a_refusal(
     ],
 )
 def test_slack_reads_a_post_body_as_real_reads_it(client, verb, content_type, body, want):
-    """`api.test`, sent no token, answers each row as slack.com/api answered it from 2026-10-10 to
-    2026-10-20: ``want`` is the error a refused body is answered with, or the arguments a served one
-    echoes and the warning real adds beside them. ``content_type`` is one header's value, or the
-    headers sent when there are several."""
+    """`api.test`, sent no token, answers each row as real answered it (the POST bodies section of
+    ``backlot.routers.slack`` dates the measurement): ``want`` is the error a refused body is
+    answered with, or the arguments a served one echoes and the warning real adds beside them.
+    ``content_type`` is one header's value, or the headers sent when there are several."""
     if content_type is None:
         headers = []
     elif isinstance(content_type, str):
@@ -2832,30 +2833,48 @@ _SLACK_METHODS = [
 ]
 
 
+_FOUR_BODIES = [
+    (None, b"{}", "missing_post_type"),
+    (_FORM, b"{}", "invalid_form_data"),
+    ("text/html", b"{}", "invalid_post_type"),
+    ("application/json; charset=latin1", b"{}", "invalid_charset"),
+]
+_NAME_BODIES = [
+    (_FORM, b"a[b]=c", "invalid_array_arg"),
+    (_FORM, b"a{=b", "invalid_arg_name"),
+    (
+        _MULTIPART,
+        b"--b\r\nContent-Disposition: form-data\r\n\r\nx\r\n--b--\r\n",
+        "invalid_form_data",
+    ),
+    ("application/json; charset=latin1", b"", "invalid_charset"),
+]
+
+
 @pytest.mark.parametrize(
-    "content_type, body, error",
+    "method, credential, content_type, body, error",
     [
-        (None, b"{}", "missing_post_type"),
-        (_FORM, b"{}", "invalid_form_data"),
-        ("text/html", b"{}", "invalid_post_type"),
-        ("application/json; charset=latin1", b"{}", "invalid_charset"),
-    ],
-)
-@pytest.mark.parametrize(
-    "method, credential",
-    [
-        *((m, "admin") for m in _SLACK_METHODS),
-        ("auth.test", None),
-        ("auth.test", "bogus"),
-        ("auth.test", "query"),
+        *((m, "admin", *b) for m in _SLACK_METHODS for b in _FOUR_BODIES),
+        *(("auth.test", c, *b) for c in (None, "bogus", "query") for b in _FOUR_BODIES),
+        *(
+            (m, c, *b)
+            for m, c in (
+                ("auth.test", None),
+                ("auth.test", "bogus"),
+                ("conversations.history", "admin"),
+            )
+            for b in _NAME_BODIES
+        ),
     ],
 )
 def test_slack_refuses_a_body_before_the_method_runs(
     client, tokens_yaml, method, credential, content_type, body, error
 ):
-    """Each body is refused on each method ahead of its credential and of its arguments, sent with
-    the admin token and none (slack.com/api, 2026-10-10), with no token or a bogus one, and with a
-    `token` query parameter (2026-10-20), and with no `warning`. A GET with the same headers and
+    """Each body is refused ahead of the method's credential and of its arguments, as real refused
+    it on each row, and with no `warning`: the first four on each method with the admin token and
+    no arguments and on `auth.test` with no token, a bogus one or a `token` query parameter, the
+    other four on `auth.test` with no token or a bogus one and on `conversations.history` with the
+    admin token and no `channel`. A GET with the same headers and
     body answers what one without them does: the body of a GET is not read."""
     headers = {}
     params = {}

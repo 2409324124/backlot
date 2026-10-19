@@ -249,6 +249,11 @@ def _missing_argument(request: Request, *names: str) -> JSONResponse | None:
     return None
 
 
+# --- POST bodies -----------------------------------------------------------
+# What real reads from a POST body and what it refuses the body for, measured against slack.com/api
+# on 2026-10-07, 2026-10-10, 2026-10-13 and 2026-10-20: on `api.test` sent no token, which echoes
+# the arguments it read, and on the methods that take a token, with one and without.
+
 _FORM = "application/x-www-form-urlencoded"
 _MULTIPART = "multipart/form-data"
 #: The media types real takes a POST body under, matched as sent (before the first `;`).
@@ -258,26 +263,25 @@ _POST_CHARSETS = ("utf-8", "utf8", "iso-8859-1")
 #: An argument name real takes, as :func:`_registered_name` reads it.
 _ARG_NAME = re.compile(r"[-0-9:A-Za-z_]{1,100}")
 #: A name that is no argument: `api.test` echoes none of `1`, `-1`, `0` and `9223372036854775807`,
-#: and echoes `01`, `-0` and `9223372036854775808` (slack.com/api, 2026-10-20).
+#: and echoes `01`, `-0` and `9223372036854775808`.
 _INT_NAME = re.compile(r"0|-?[1-9][0-9]*")
 
 
 class Undecodable(str):
     """A form value whose bytes are not UTF-8. Real reads it as an argument that is there and names
-    nothing (slack.com/api, 2026-10-20): `channel=%FF` is `channel_not_found`, `limit=%FF` the
-    number refusal and `token=%FF` `invalid_auth`, beside a valid bearer header too. So it is a
-    U+FFFD to every method, and `api_test` echoes it as `null`, as real does."""
+    nothing: `channel=%FF` is `channel_not_found`, `limit=%FF` the number refusal and `token=%FF`
+    `invalid_auth`, beside a valid bearer header too. So it is a U+FFFD to every method, and
+    `api_test` echoes it as `null`, as real does."""
 
     def __new__(cls):
-        return super().__new__(cls, "�")
+        return super().__new__(cls, "\ufffd")
 
 
 def post_content_type(request: Request) -> str | None:
-    """A request's Content-Type as real reads it, measured against slack.com/api on 2026-10-20: each
-    header's value with the spaces and tabs around it stripped (` application/x-www-form-urlencoded `
-    is a form and `application/json<TAB>` JSON), and two headers joined with `, `. A form type sent
-    ahead of `application/json` is read as a form, and the other way round is `invalid_post_type`,
-    as one header naming both is."""
+    """A request's Content-Type as real reads it: each header's value with the spaces and tabs
+    around it stripped (` application/x-www-form-urlencoded ` is a form and `application/json<TAB>`
+    JSON), and two headers joined with `, `. A form type sent ahead of `application/json` is read as
+    a form, and the other way round is `invalid_post_type`, as one header naming both is."""
     values = [v.strip(" \t") for v in request.headers.getlist("content-type")]
     return ", ".join(values) if values else None
 
@@ -285,8 +289,8 @@ def post_content_type(request: Request) -> str | None:
 def _named_charset(content_type: str) -> str | None:
     """The charset a Content-Type names, or None: the first parameter spelt `charset` whose value
     does not start with a space and holds more than `"` and spaces. `CHARSET=utf-8`,
-    `charset =utf-8`, `charset= utf-8` and `charset=""` name none (slack.com/api, 2026-10-07 to
-    2026-10-20), and `charset=; charset=latin1` names `latin1`."""
+    `charset =utf-8`, `charset= utf-8` and `charset=""` name none, and `charset=; charset=latin1`
+    names `latin1`."""
     for param in content_type.split(";")[1:]:
         name, _, value = param.strip().partition("=")
         if name == "charset" and value[:1] != " " and value.strip('" '):
@@ -296,12 +300,10 @@ def _named_charset(content_type: str) -> str | None:
 
 def post_charset_warning(content_type: str | None, has_body: bool) -> str | None:
     """The warning real Slack adds to a POST's answer for the charset its Content-Type names, or
-    None: `superfluous_charset` for `application/x-www-form-urlencoded` or `multipart/form-data`
-    that names one, an empty body included, and `missing_charset` for any other media type that
-    names none and carries a body.
+    None: `superfluous_charset` for a form or multipart media type that names one, an empty body
+    included, and `missing_charset` for any other media type that names none and carries a body.
 
-    The media type is matched as sent, measured against slack.com/api from 2026-10-07 to
-    2026-10-20: `Application/x-www-form-urlencoded` with a form body and
+    The media type is matched as sent: `Application/x-www-form-urlencoded` with a form body and
     `application/x-www-form-urlencoded, text/html` both draw `missing_charset`, where the
     upper-case JSON and `text/html` bodies this would warn are refused (:func:`read_post_body`).
     """
@@ -315,28 +317,15 @@ def post_charset_warning(content_type: str | None, has_body: bool) -> str | None
 
 def read_post_body(content_type: str | None, body: bytes) -> tuple[dict[str, str], str | None]:
     """The arguments a POST body carries, and the error real answers it with instead of running the
-    method, or None.
+    method, or None. Each error comes ahead of the credential, a `token` query parameter included,
+    and of the arguments, in the order the checks here run.
 
-    Measured against slack.com/api on 2026-10-10, 2026-10-13 and 2026-10-20, on `api.test` with no
-    token (which echoes the arguments it read) and on the methods that take one, ahead of the
-    credential, a `token` query parameter included, and of the arguments. In order:
-
-        a body and no Content-Type, or an empty one          -> missing_post_type
-        a name real does not take (:data:`_ARG_NAME`)         -> invalid_arg_name
-        a name whose last value is an array, `a[b]=c`         -> invalid_array_arg
-        nothing read, a body, and a media type not one of
-        :data:`_POST_TYPES`                                   -> invalid_post_type
-        a charset (:func:`_named_charset`) not one of
-        :data:`_POST_CHARSETS`, unless the media type is a
-        form's or multipart's, an empty body included         -> invalid_charset
-        nothing read from a form or multipart body            -> invalid_form_data
-
-    A body is read as a form when its Content-Type starts with `application/x-www-form-urlencoded`
-    in any case (`APPLICATION/X-WWW-FORM-URLENCODED`, `…-urlencodedx` and
-    `…-urlencoded, text/html` are read too), and as multipart when it starts with
-    `multipart/form-data` (:func:`_multipart_parts`); what it carries passes the media-type check
-    whatever the media type. Only a form or multipart body is read for arguments. `Content-Encoding`
-    is not read: a gzipped form is `invalid_form_data`, and a plain one under `gzip` is read.
+    A body is read as a form when its Content-Type starts with the form type in any case
+    (`APPLICATION/X-WWW-FORM-URLENCODED`, `…-urlencodedx` and `…-urlencoded, text/html` are read
+    too), and as multipart when it starts with the multipart one (:func:`_multipart_parts`); what it
+    carries passes the media-type check whatever the media type is. A JSON or `text/plain` body
+    is not read here. `Content-Encoding` is not read: a gzipped form is `invalid_form_data`, and a
+    plain one under `gzip`, `bogus` or an empty value is read.
     """
     if not content_type:
         return {}, "missing_post_type" if body else None
@@ -362,9 +351,9 @@ def read_post_body(content_type: str | None, body: bytes) -> tuple[dict[str, str
 
 
 def _form_pairs(body: bytes) -> list[tuple[bytes, bytes]]:
-    """The decoded (name, value) of each `&`-separated piece of a form body that holds a `=`: a piece
-    without one is dropped (`a=b&c` reads `a` alone, and `a` alone is `invalid_form_data`). `+` is a
-    space and `%XX` a byte, and any other `%` is kept as sent (`a=%zz` is `%zz`)."""
+    """The decoded (name, value) of each `&`-separated piece of a form body that holds a `=`: a
+    piece without one is dropped (`a=b&c` reads `a` alone, and `a` alone is `invalid_form_data`).
+    `+` is a space and `%XX` a byte, and any other `%` is kept as sent (`a=%zz` is `%zz`)."""
     pairs = []
     for piece in body.split(b"&"):
         name, eq, value = piece.partition(b"=")
@@ -381,14 +370,14 @@ def _multipart_parts(content_type: str, body: bytes) -> list[tuple[bytes, bytes 
     """The (name, value) of each part of a multipart body, the value None for a file's part, or None
     for a body real cannot read.
 
-    As measured against slack.com/api on 2026-10-20: the boundary is the first parameter spelt
-    `boundary`, `"` stripped; a delimiter is a line that is `--` and the boundary, ended by CRLF or
-    LF alike, with nothing after it, and the text before the first one is skipped. A part's value is
-    what follows its blank line, up to the line break before the next delimiter or the closing one,
-    or to the end of the body, less a line break that ends it. Its name is the last `name`
-    parameter of its `Content-Disposition`, quoted or not, and a part with a `filename` is a file's,
-    which is no argument. A part with no name, a boundary missing or empty, and a body with no
-    delimiter (one that is only the closing delimiter included) are bodies real cannot read.
+    The boundary is the first parameter spelt `boundary`, `"` stripped; a delimiter is a line that
+    is `--` and the boundary, ended by CRLF or LF alike, with nothing after it, and the text before
+    the first one is skipped. A part's value is what follows its blank line, up to the line break
+    before the next delimiter or the closing one, or to the end of the body, less a line break that
+    ends it. Its name is the last `name` parameter of its `Content-Disposition`, quoted or not, and
+    a part with a `filename` is a file's, which is no argument. A part with no name, a boundary
+    missing or empty, and a body with no delimiter (one that is only the closing delimiter included)
+    are bodies real cannot read.
     """
     boundary = None
     for param in content_type.split(";")[1:]:
@@ -442,24 +431,20 @@ def _multipart_parts(content_type: str, body: bytes) -> list[tuple[bytes, bytes 
 
 def _registered_name(name: bytes) -> tuple[str, bool] | None:
     """The argument name real reads for a decoded one, and whether its value is an array, or None
-    for a name that registers nothing (slack.com/api, 2026-10-20): it ends at a NUL, leading spaces
-    are dropped, and a space or `.` is `_`. A `[` closed by a `]` later on starts an array index; a
-    `[` that is not ends in `_` and the rest is kept as sent (`a[b.c` is `a_b.c`). A name that is
-    empty before its `[` (`[a]`, ` `, `=x`) registers nothing."""
+    for a name that registers nothing: it ends at a NUL, leading spaces are dropped, and a space or
+    `.` is `_`. A `[` closed by a `]` later on starts an array index; a `[` that is not ends in `_`
+    and the rest is kept as sent (`a[b.c` is `a_b.c`). A name that is empty before its `[` (`[a]`,
+    ` `, `=x`) registers nothing."""
     text = name.split(b"\0", 1)[0].lstrip(b" ").decode("latin-1")
-    out = []
-    for i, ch in enumerate(text):
-        if ch in " .":
-            out.append("_")
-        elif ch == "[":
-            if not out:
-                return None
-            if "]" in text[i + 1 :]:
-                return "".join(out), True
-            return "".join(out) + "_" + text[i + 1 :], False
-        else:
-            out.append(ch)
-    return ("".join(out), False) if out else None
+    bracket = text.find("[")
+    base = (text if bracket == -1 else text[:bracket]).replace(" ", "_").replace(".", "_")
+    if not base:
+        return None
+    if bracket == -1:
+        return base, False
+    if text.find("]", bracket + 1) != -1:
+        return base, True
+    return base + "_" + text[bracket + 1 :], False
 
 
 _ARRAY = object()
@@ -469,7 +454,7 @@ def _register(pairs: list[tuple[bytes, bytes | None]]) -> tuple[dict | None, str
     """The arguments ``pairs`` register, the last value of a name read, or None for none at all, and
     the error real refuses them with: `invalid_arg_name` for any name :data:`_ARG_NAME` does not
     take, ahead of `invalid_array_arg` for any whose last value is an array, wherever each comes
-    in the body (slack.com/api, 2026-10-20). A file's part registers without being an argument, and
+    in the body. A file's part registers without being an argument, and
     an integer name (:data:`_INT_NAME`, within 64 bits) is no argument either. A file's name is not
     checked: `name="a{"` and `name="a[b]"` with a `filename` are served."""
     args: dict = {}
@@ -1615,8 +1600,9 @@ def _channel_name(conn, channel_id: str) -> str | None:
 
 def _param(request: Request, key: str) -> str | None:
     """An argument's value: the body's (``read_post_body``), else the query string's. Real reads the
-    body's when both send one (slack.com/api, 2026-10-20: `?limit=abc` with a form or multipart
-    `limit=5` lists the channels, and `?limit=5` with a form `limit=abc` is the number refusal)."""
+    body's when both send one (slack.com/api, 2026-10-20): on `api.test`, on `limit` on
+    `conversations.list`, `users.list` and `conversations.history`, on `count` on `search.messages`
+    and on `types` on `conversations.list`."""
     form = getattr(request.state, "_form", None)
     if form and key in form:
         return form[key]

@@ -270,11 +270,9 @@ def slack_token(request: Request) -> str | None:
     """The token real Slack reads from a request: the ``token`` form field, then the
     ``Authorization: Bearer`` header (:func:`slack_bearer_token`).
 
-    The form field is where the official slack-go SDK and Slack's own clients put the token;
-    ``routers.slack.read_post_body`` reads it from a urlencoded or a multipart body onto
-    ``request.state._form``, keeping a field's last value, and real reads the two alike
-    (slack.com/api, 2026-10-13 and 2026-10-20). Real serves a bogus header beside a valid form
-    token as the form token, and answers
+    The form field is where the official slack-go SDK and Slack's own clients put the token; the
+    urlencoded or multipart body is read by ``routers.slack.read_post_body``, keeping a field's last
+    value. Real serves a bogus header beside a valid form token as the form token, and answers
     ``invalid_auth`` to a valid header beside a bogus one. The last value is the one read
     (``token=<valid>&token=<bogus>`` is ``invalid_auth``), an empty one is no field, and a space
     is a token that resolves to nobody. A ``TOKEN`` form field is no field either. The query
