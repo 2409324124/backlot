@@ -14,6 +14,19 @@ from backlot import store, synth
 from backlot.routers import slack
 from tests._helpers import client_for, corpus_client, crawl_slack, db_count, tiny_corpus, tok
 
+_FORM = "application/x-www-form-urlencoded"
+_MULTIPART = "multipart/form-data; boundary=b"
+
+
+def _one_part(name: str, value: str) -> bytes:
+    """A multipart body under :data:`_MULTIPART` whose one part is the field ``name``."""
+    return (
+        f'--b\r\nContent-Disposition: form-data; name="{name}"\r\n\r\n{value}\r\n--b--\r\n'.encode()
+    )
+
+
+_ONE_PART = _one_part("x", "y")
+
 
 def test_admin_slack_crawls_all(client, admin_h, ro_conn):
     assert crawl_slack(client, admin_h) == db_count(ro_conn, "slack")
@@ -206,6 +219,17 @@ _AVA = synth.slack_user_id("ava@acme.com")
         ("post", "", None, "token={admin}", "USERVICE0"),
         ("post", "", None, "token=", "not_authed"),
         ("post", "", "Bearer {ava}", None, _AVA),
+        # a multipart `token` part, read as the form field is
+        ("post", "", None, ("token", "{admin}"), "USERVICE0"),
+        ("post", "", "Bearer {bogus}", ("token", "{admin}"), "USERVICE0"),
+        ("post", "", "Bearer {admin}", ("token", "{bogus}"), "invalid_auth"),
+        ("post", "", "Bearer {admin}", ("token", ""), "USERVICE0"),
+        ("post", "token=", None, ("token", "{admin}"), "invalid_auth"),
+        # a field under the name real reads it by, and a value that is not UTF-8
+        ("post", "", None, "to.ken={admin}", "not_authed"),
+        ("post", "", None, "tok%65n={admin}", "USERVICE0"),
+        ("post", "", None, "token=%FF", "invalid_auth"),
+        ("post", "", "Bearer {admin}", "token=%FF", "invalid_auth"),
     ],
 )
 def test_slack_reads_the_token_where_real_reads_it(
@@ -214,7 +238,8 @@ def test_slack_reads_the_token_where_real_reads_it(
     """Real's answers to `auth.test` for where a request carries its token, the rules
     `auth.slack_token` and `auth.slack_query_token_refused` record: ``answer`` is the `user_id` a
     served request names, or the error a refused one answers. The rows with a person's token in
-    one place and the admin's in the other tell the form field's order from the header's."""
+    one place and the admin's in the other tell the form field's order from the header's. A
+    ``form`` that is a (name, value) pair is sent as the one part of a multipart body."""
     t = {
         "admin": tokens_yaml["admin_token"],
         "ava": tokens["ava@acme.com"],
@@ -222,7 +247,11 @@ def test_slack_reads_the_token_where_real_reads_it(
     }
     headers = {} if authorization is None else {"Authorization": authorization.format(**t)}
     body = {}
-    if form is not None:
+    if isinstance(form, tuple):
+        name, value = form
+        headers["Content-Type"] = _MULTIPART
+        body["content"] = _one_part(name, value.format(**t))
+    elif form is not None:
         headers["Content-Type"] = "application/x-www-form-urlencoded"
         body["content"] = form.format(**t)
     url = f"/slack/api/auth.test?{query.format(**t)}"
@@ -1080,6 +1109,57 @@ def test_slack_numeric_arguments_are_read_as_real_reads_them(client, admin_h, me
     assert got["ok"] is True and got == same
     if key == "limit" and want == _UNSET:
         assert any(v for v in same.values() if isinstance(v, list)), same
+
+
+@pytest.mark.parametrize(
+    "method, params, content_type, body, want",
+    [
+        (
+            "conversations.history",
+            [],
+            _MULTIPART,
+            ("channel", _OWN_CHANNEL),
+            [("channel", _OWN_CHANNEL)],
+        ),
+        ("conversations.list", [], _MULTIPART, ("limit", "abc"), [_NUMBER_LINE("limit")]),
+        ("conversations.list", [("limit", "abc")], _FORM, "limit=5", [("limit", "5")]),
+        ("conversations.list", [("limit", "abc")], _MULTIPART, ("limit", "5"), [("limit", "5")]),
+        ("conversations.list", [("limit", "5")], _FORM, "limit=abc", [_NUMBER_LINE("limit")]),
+        ("search.messages", [], _FORM, "query=the&sort.dir=bogus", [_SORT_DIR_LINE]),
+        ("conversations.history", [], _FORM, "channel=%FF", "channel_not_found"),
+        ("conversations.list", [], _FORM, "limit=%FF", [_NUMBER_LINE("limit")]),
+    ],
+)
+def test_slack_reads_an_argument_from_the_body_ahead_of_the_query(
+    client, admin_h, method, params, content_type, body, want
+):
+    """An argument sent in a POST body, urlencoded or as a multipart part (``body`` a (name, value)
+    pair), under the name real reads it by, as slack.com/api answered each row on 2026-10-13 and
+    2026-10-20. ``want`` is the error, the `invalid_arguments` lines, or the arguments a GET sends
+    in the query string to be answered the same."""
+    cid = _a_channel_id(client, admin_h)
+    own = {_OWN_CHANNEL: cid}
+    if isinstance(body, tuple):
+        body = _one_part(body[0], own.get(body[1], body[1]))
+    r = client.post(
+        f"/slack/api/{method}",
+        headers={**admin_h, "content-type": content_type},
+        params=params,
+        content=body,
+    )
+    got = r.json()
+    if isinstance(want, str):
+        assert got == {"ok": False, "error": want}
+    elif isinstance(want[0], str):
+        assert got == {
+            "ok": False,
+            "error": "invalid_arguments",
+            "response_metadata": {"messages": want},
+        }
+    else:
+        query = [(k, own.get(v, v)) for k, v in want]
+        assert got["ok"] is True
+        assert got == client.get(f"/slack/api/{method}", headers=admin_h, params=query).json()
 
 
 _EVERY = "<every item, as with no limit>"
@@ -2299,11 +2379,6 @@ def test_slack_deactivation_changes_every_slack_answer_about_a_member_and_nothin
         conn.close()
 
 
-_FORM = "application/x-www-form-urlencoded"
-_MULTIPART = "multipart/form-data; boundary=b"
-_ONE_PART = b'--b\r\nContent-Disposition: form-data; name="x"\r\n\r\ny\r\n--b--\r\n'
-
-
 @pytest.mark.parametrize(
     "verb, method, content_type, body, want_warning",
     [
@@ -2321,7 +2396,6 @@ _ONE_PART = b'--b\r\nContent-Disposition: form-data; name="x"\r\n\r\ny\r\n--b--\
         ("POST", "auth.test", "application/json;charset=UTF-8", b"{}", None),
         ("POST", "auth.test", "application/json; charset=iso-8859-1", b"{}", None),
         ("POST", "auth.test", 'application/json; charset="utf-8"', b"{}", None),
-        ("POST", "auth.test", "APPLICATION/JSON", b"{}", None),
         ("POST", "auth.test", _FORM, b"", None),
         ("POST", "auth.test", f"{_FORM}; charset=utf-8", b"", "superfluous_charset"),
         ("POST", "auth.test", f"{_FORM};charset=UTF-8", b"", "superfluous_charset"),
@@ -2420,3 +2494,380 @@ def test_slack_post_charset_warning_on_a_refusal(
         headers["authorization"] = f"Bearer {token}"
     r = client.post(f"/slack/api/{method}", headers=headers, content=body)
     assert r.content == JSONResponse(want).body
+
+
+@pytest.mark.parametrize(
+    "verb, content_type, body, want",
+    [
+        # No Content-Type, or an empty one
+        ("POST", None, b"{}", "missing_post_type"),
+        ("POST", None, b"", {}),
+        ("POST", "", b"{}", "missing_post_type"),
+        # The media type, as sent; a form type read as one passes
+        ("POST", "text/html", b"{}", "invalid_post_type"),
+        ("POST", "text/html", b"", {}),
+        ("POST", "APPLICATION/JSON", b"{}", "invalid_post_type"),
+        ("POST", "MULTIPART/FORM-DATA; boundary=b", b"{}", "invalid_post_type"),
+        ("POST", "application/json; CHARSET=latin1", b"{}", ({}, "missing_charset")),
+        ("GET", "text/html", b"{}", {}),
+        (
+            "POST",
+            [("content-type", _FORM), ("content-type", "application/json")],
+            b"a=b",
+            ({"a": "b"}, "missing_charset"),
+        ),
+        (
+            "POST",
+            [("content-type", "application/json"), ("content-type", _FORM)],
+            b"a=b",
+            "invalid_post_type",
+        ),
+        ("POST", "  application/x-www-form-urlencoded  ", b"a=b", {"a": "b"}),
+        ("POST", "application/json, text/html", b"{}", "invalid_post_type"),
+        ("POST", "application/json; Charset=latin1", b"{}", ({}, "missing_charset")),
+        ("POST", "APPLICATION/X-WWW-FORM-URLENCODED", b"a=b", ({"a": "b"}, "missing_charset")),
+        ("POST", "application/x-www-form-urlencodedx", b"a=b", ({"a": "b"}, "missing_charset")),
+        ("POST", "application/x-www-form-urlencoded, text/html", b"{}", "invalid_post_type"),
+        ("POST", "application/x-www-form-urlencoded\t; charset=latin1", b"a=b", "invalid_charset"),
+        ("POST", "application/x-www-form-urlencoded, text/html", b"a{=b", "invalid_arg_name"),
+        (
+            "POST",
+            "MULTIPART/FORM-DATA; boundary=b",
+            b"--b\r\nContent-Disposition: form-data\r\n\r\nhi\r\n--b--\r\n",
+            "invalid_post_type",
+        ),
+        # The charset
+        ("POST", "application/json ;charset=utf-8", b"{}", "invalid_post_type"),
+        ("POST", "application/json; charset=latin1", b"{}", "invalid_charset"),
+        ("POST", "application/json; charset=latin1", b"", "invalid_charset"),
+        ("POST", "application/json; charset=ISO-8859-1", b"{}", {}),
+        ("POST", 'application/json; charset="latin1"', b"{}", "invalid_charset"),
+        ("POST", 'application/json; charset="utf-8"', b"{}", {}),
+        ("POST", "text/html; charset=latin1", b"", "invalid_charset"),
+        ("POST", "text/html; charset=latin1", b"{}", "invalid_post_type"),
+        ("POST", "application/json; charset=latin1; charset=utf-8", b"{}", "invalid_charset"),
+        ("POST", "application/json; charset=utf-8; charset=latin1", b"{}", {}),
+        ("POST", "application/json; charset= latin1", b"{}", ({}, "missing_charset")),
+        ("POST", "foo; charset=latin1", b"", "invalid_charset"),
+        ("POST", "application/json; charset=; charset=latin1", b"{}", "invalid_charset"),
+        # A form body
+        ("POST", _FORM, b"{}", "invalid_form_data"),
+        ("POST", _FORM, b"a", "invalid_form_data"),
+        ("POST", _FORM, b"=b", "invalid_form_data"),
+        ("POST", _FORM, b"a{=b", "invalid_arg_name"),
+        ("POST", _FORM, b"a[b]=c", "invalid_array_arg"),
+        ("POST", _FORM, b"", {}),
+        ("POST", _FORM, b"a=%zz", {"a": "%zz"}),
+        ("POST", _FORM, b"a=%E2%82", {"a": None}),
+        ("POST", "application/x-www-form-urlencoded; charset=latin1", b"{}", "invalid_form_data"),
+        (
+            "POST",
+            "application/x-www-form-urlencoded; charset=bogus",
+            b"a=b",
+            ({"a": "b"}, "superfluous_charset"),
+        ),
+        ("POST", _FORM, b"a=b&c", {"a": "b"}),
+        ("POST", _FORM, b"a==b", {"a": "=b"}),
+        ("POST", _FORM, b"a=b&a=c", {"a": "c"}),
+        ("POST", _FORM, b"a[]=c", "invalid_array_arg"),
+        ("POST", _FORM, b"a]=c", "invalid_arg_name"),
+        ("POST", _FORM, b"a[=c", {"a_": "c"}),
+        ("POST", _FORM, b"[a]=c", "invalid_form_data"),
+        ("POST", _FORM, b"a%5Bb%5D=c", "invalid_array_arg"),
+        ("POST", _FORM, b"+=c", "invalid_form_data"),
+        ("POST", _FORM, b"a+b=c", {"a_b": "c"}),
+        ("POST", _FORM, b"a.b=c", {"a_b": "c"}),
+        ("POST", _FORM, b"a-b=c", {"a-b": "c"}),
+        ("POST", _FORM, b"1=c", {}),
+        ("POST", _FORM, b"%C3%BC=c", "invalid_arg_name"),
+        ("POST", _FORM, b"a=b+c", {"a": "b c"}),
+        ("POST", _FORM, b"a=%00", {"a": "\x00"}),
+        ("POST", _FORM, b"c[d]=e&a{=b", "invalid_arg_name"),
+        ("POST", _FORM, b"=x&a[b]=c", "invalid_array_arg"),
+        ("POST", _FORM, b"a=b\nc=d", {"a": "b\nc=d"}),
+        ("POST", _FORM, b"a\x00b=c", {"a": "c"}),
+        ("POST", _FORM, b"a%2Bb=c", "invalid_arg_name"),
+        ("POST", _FORM, b" a=c", {"a": "c"}),
+        (
+            "POST",
+            _FORM,
+            b"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa=c",
+            "invalid_arg_name",
+        ),
+        ("POST", _FORM, b"a[b]=c&a=d", {"a": "d"}),
+        ("POST", _FORM, b"a=d&a[b]=c", "invalid_array_arg"),
+        ("POST", _FORM, b"a[b.c=d", "invalid_arg_name"),
+        ("POST", _FORM, b"%00=c", "invalid_form_data"),
+        ("POST", _FORM, b"a%00[b]=c", {"a": "c"}),
+        ("POST", _FORM, b"1[a]=b", "invalid_array_arg"),
+        # A multipart body
+        (
+            "POST",
+            _MULTIPART,
+            b'--b\r\nContent-Disposition: form-data; name="a"\r\n\r\nb\r\n--b--\r\n',
+            {"a": "b"},
+        ),
+        (
+            "POST",
+            _MULTIPART,
+            b'--b\r\nContent-Disposition: form-data; name="a"\r\n\r\nb\r\n--b\r\nContent-Disposition: form-data; name="a"\r\n\r\nc\r\n--b--\r\n',
+            {"a": "c"},
+        ),
+        (
+            "POST",
+            _MULTIPART,
+            b'--b\r\nContent-Disposition: form-data; name="f"; filename="x.txt"\r\nContent-Type: text/plain\r\n\r\nhello\r\n--b--\r\n',
+            {},
+        ),
+        (
+            "POST",
+            _MULTIPART,
+            b"--b\r\nContent-Disposition: form-data\r\n\r\nb\r\n--b--\r\n",
+            "invalid_form_data",
+        ),
+        (
+            "POST",
+            _MULTIPART,
+            b"--b\r\nContent-Type: text/plain\r\n\r\nb\r\n--b--\r\n",
+            "invalid_form_data",
+        ),
+        (
+            "POST",
+            _MULTIPART,
+            b'--b\r\nContent-Disposition: form-data; name="a[b]"\r\n\r\nc\r\n--b--\r\n',
+            "invalid_array_arg",
+        ),
+        (
+            "POST",
+            _MULTIPART,
+            b'--b\r\nContent-Disposition: form-data; name="a.b"\r\n\r\nc\r\n--b--\r\n',
+            {"a_b": "c"},
+        ),
+        (
+            "POST",
+            _MULTIPART,
+            b"--b\r\nContent-Disposition: form-data; name=a\r\n\r\nb\r\n--b--\r\n",
+            {"a": "b"},
+        ),
+        (
+            "POST",
+            _MULTIPART,
+            b'--b\r\ncontent-disposition: form-data; name="a"\r\n\r\nb\r\n--b--\r\n',
+            {"a": "b"},
+        ),
+        (
+            "POST",
+            'multipart/form-data; boundary="b"',
+            b'--b\r\nContent-Disposition: form-data; name="a"\r\n\r\nb\r\n--b--\r\n',
+            {"a": "b"},
+        ),
+        (
+            "POST",
+            _MULTIPART,
+            b'--b\nContent-Disposition: form-data; name="a"\n\nb\n--b--\n',
+            {"a": "b"},
+        ),
+        (
+            "POST",
+            _MULTIPART,
+            b'junk\r\n--b\r\nContent-Disposition: form-data; name="a"\r\n\r\nb\r\n--b--\r\n',
+            {"a": "b"},
+        ),
+        (
+            "POST",
+            _MULTIPART,
+            b'--b\r\nContent-Disposition: form-data; name="a"\r\n\r\nb\r\n--b--\r\ntrailing junk',
+            {"a": "b"},
+        ),
+        (
+            "POST",
+            _MULTIPART,
+            b'--b\r\nContent-Disposition: form-data; name="a"\r\n\r\nb\r\n',
+            {"a": "b"},
+        ),
+        (
+            "POST",
+            _MULTIPART,
+            b'--b\r\nContent-Disposition: form-data; name="a"\r\n\r\n\xff\r\n--b--\r\n',
+            {"a": None},
+        ),
+        (
+            "POST",
+            _MULTIPART,
+            b'--b\r\nContent-Disposition: form-data; name="a"\r\n\r\nx\r\ny\r\n--b--\r\n',
+            {"a": "x\r\ny"},
+        ),
+        (
+            "POST",
+            _MULTIPART,
+            b'--b\r\nContent-Disposition: form-data; name="a"\r\n\r\nb+c%41\r\n--b--\r\n',
+            {"a": "b+c%41"},
+        ),
+        ("POST", _MULTIPART, b"", {}),
+        ("POST", _MULTIPART, b"--b--\r\n", "invalid_form_data"),
+        (
+            "POST",
+            "multipart/form-data",
+            b'--b\r\nContent-Disposition: form-data; name="a"\r\n\r\nb\r\n--b--\r\n',
+            "invalid_form_data",
+        ),
+        (
+            "POST",
+            "multipart/form-data; boundary=",
+            b'--b\r\nContent-Disposition: form-data; name="a"\r\n\r\nb\r\n--b--\r\n',
+            "invalid_form_data",
+        ),
+        (
+            "POST",
+            "multipart/form-data; BOUNDARY=b",
+            b'--b\r\nContent-Disposition: form-data; name="a"\r\n\r\nb\r\n--b--\r\n',
+            "invalid_form_data",
+        ),
+        (
+            "POST",
+            _MULTIPART,
+            b'--b  \r\nContent-Disposition: form-data; name="a"\r\n\r\nb\r\n--b--\r\n',
+            "invalid_form_data",
+        ),
+        (
+            "POST",
+            "multipart/form-data; boundary=xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+            b'--xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\r\nContent-Disposition: form-data; name="a"\r\n\r\nb\r\n--xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx--\r\n',
+            {"a": "b"},
+        ),
+        (
+            "POST",
+            _MULTIPART,
+            b'--b\r\nContent-Disposition: form-data\r\n\r\nx\r\n--b\r\nContent-Disposition: form-data; name="a"\r\n\r\nb\r\n--b--\r\n',
+            "invalid_form_data",
+        ),
+        ("POST", "multipart/form-data", b"", {}),
+        (
+            "POST",
+            _MULTIPART,
+            b'--b\r\nContent-Disposition: form-data; name="a{"; filename="x"\r\n\r\nhi\r\n--b--\r\n',
+            {},
+        ),
+        (
+            "POST",
+            _MULTIPART,
+            b'--b\r\nContent-Disposition: form-data; name="a"\r\n\r\nb\r\n--b--',
+            {"a": "b"},
+        ),
+        (
+            "POST",
+            _MULTIPART,
+            b'--b\r\nContent-Disposition: form-data; name="a"\r\n\r\nb\r\n\r\n--b--\r\n',
+            {"a": "b\r\n"},
+        ),
+        (
+            "POST",
+            _MULTIPART,
+            b'--b\r\nContent-Disposition: form-data; name="a"\r\n\r\nb\r\n--b\r\n',
+            {"a": "b"},
+        ),
+        (
+            "POST",
+            "multipart/form-data; boundary=b; boundary=c",
+            b'--c\r\nContent-Disposition: form-data; name="a"\r\n\r\nb\r\n--c--\r\n',
+            "invalid_form_data",
+        ),
+        (
+            "POST",
+            _MULTIPART,
+            b'--b\r\nContent-Disposition: form-data; name="a"; name="c"\r\n\r\nb\r\n--b--\r\n',
+            {"c": "b"},
+        ),
+        (
+            "POST",
+            _MULTIPART,
+            b'--b\r\nContent-Disposition: attachment; name="a"\r\n\r\nb\r\n--b--\r\n',
+            {"a": "b"},
+        ),
+        # Content-Encoding is not read
+        (
+            "POST",
+            [("content-type", _FORM), ("content-encoding", "gzip")],
+            b"\x1f\x8b\x08\x00\x00\x00\x00\x00\x02\xffK\xb4M\x02\x00\xcf0\x00\x7f\x03\x00\x00\x00",
+            "invalid_form_data",
+        ),
+        ("POST", [("content-type", _FORM), ("content-encoding", "gzip")], b"a=b", {"a": "b"}),
+    ],
+)
+def test_slack_reads_a_post_body_as_real_reads_it(client, verb, content_type, body, want):
+    """`api.test`, sent no token, answers each row as slack.com/api answered it from 2026-10-10 to
+    2026-10-20: ``want`` is the error a refused body is answered with, or the arguments a served one
+    echoes and the warning real adds beside them. ``content_type`` is one header's value, or the
+    headers sent when there are several."""
+    if content_type is None:
+        headers = []
+    elif isinstance(content_type, str):
+        headers = [("content-type", content_type)]
+    else:
+        headers = content_type
+    r = client.request(verb, "/slack/api/api.test", headers=headers, content=body)
+    if isinstance(want, str):
+        expected = {"ok": False, "error": want}
+    else:
+        args, warning = want if isinstance(want, tuple) else (want, None)
+        expected = {"ok": True, "args": args}
+        if warning is not None:
+            expected |= {"warning": warning, "response_metadata": {"warnings": [warning]}}
+    assert r.content == JSONResponse(expected).body
+
+
+_SLACK_METHODS = [
+    "api.test",
+    "auth.test",
+    "conversations.list",
+    "conversations.info",
+    "conversations.history",
+    "conversations.members",
+    "conversations.replies",
+    "users.info",
+    "users.list",
+    "search.messages",
+    "search.all",
+    "search.files",
+]
+
+
+@pytest.mark.parametrize(
+    "content_type, body, error",
+    [
+        (None, b"{}", "missing_post_type"),
+        (_FORM, b"{}", "invalid_form_data"),
+        ("text/html", b"{}", "invalid_post_type"),
+        ("application/json; charset=latin1", b"{}", "invalid_charset"),
+    ],
+)
+@pytest.mark.parametrize(
+    "method, credential",
+    [
+        *((m, "admin") for m in _SLACK_METHODS),
+        ("auth.test", None),
+        ("auth.test", "bogus"),
+        ("auth.test", "query"),
+    ],
+)
+def test_slack_refuses_a_body_before_the_method_runs(
+    client, tokens_yaml, method, credential, content_type, body, error
+):
+    """Each body is refused on each method ahead of its credential and of its arguments, sent with
+    the admin token and none (slack.com/api, 2026-10-10), with no token or a bogus one, and with a
+    `token` query parameter (2026-10-20), and with no `warning`. A GET with the same headers and
+    body answers what one without them does: the body of a GET is not read."""
+    headers = {}
+    params = {}
+    if credential == "admin":
+        headers["authorization"] = f"Bearer {tokens_yaml['admin_token']}"
+    elif credential == "bogus":
+        headers["authorization"] = "Bearer xoxb-not-a-real-token"
+    elif credential == "query":
+        params["token"] = "xoxb-not-a-real-token"
+    sent = dict(headers) if content_type is None else {**headers, "content-type": content_type}
+    url = f"/slack/api/{method}"
+    r = client.post(url, headers=sent, params=params, content=body)
+    assert r.content == JSONResponse({"ok": False, "error": error}).body
+    got = client.request("GET", url, headers=sent, params=params, content=body)
+    assert got.json() == client.get(url, headers=headers, params=params).json()

@@ -740,9 +740,19 @@ answer an id that names nothing gets, so a private room's name, purpose and memb
 readable from its id alone. A required argument that was never sent is `invalid_arguments` rather
 than a `not_found` for something the caller never named.
 
-A POST with a body sent as `application/json` or `text/plain` with no charset is answered with
-real's `missing_charset` warning, and a form or multipart one that names a charset with
-`superfluous_charset`, each in `warning` and in `response_metadata.warnings`.
+A POST's body is read before the method runs, ahead of its credential and its arguments, as the real
+Web API reads it. A body with no Content-Type is `missing_post_type`, one under a media type other
+than `application/json`, `text/plain`, `application/x-www-form-urlencoded` and
+`multipart/form-data`, spelt so, is `invalid_post_type` unless its type starts with one of the two
+form types in any case and it reads as that form, a charset other than `utf-8`, `utf8` or
+`iso-8859-1` outside a form or multipart type is `invalid_charset`, and a form or multipart body
+real cannot read is `invalid_form_data`, `invalid_arg_name` or `invalid_array_arg`. A multipart
+body's fields are read as a urlencoded form's are, its `token` included, and an argument the body
+sends is read ahead of the same name in the query string.
+
+A POST whose form or multipart type names a charset is answered with real's `superfluous_charset`
+warning, and one with a body under any other type that names none with `missing_charset`, each in
+`warning` and in `response_metadata.warnings`.
 
 ## Backlot's own endpoints
 
