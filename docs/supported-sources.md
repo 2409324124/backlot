@@ -747,8 +747,9 @@ than `application/json`, `text/plain`, `application/x-www-form-urlencoded` and
 form types in any case and it reads as that form, a charset other than `utf-8`, `utf8` or
 `iso-8859-1` outside a form or multipart type is `invalid_charset`, and a form or multipart body
 real cannot read is `invalid_form_data`, `invalid_arg_name` or `invalid_array_arg`. A multipart
-body's fields are read as a urlencoded form's are, its `token` included, and an argument the body
-sends is read ahead of the same name in the query string.
+part's name follows a urlencoded form's name rules, its value is taken as sent, `+` and `%XX`
+included, and its `token` is read as a form's is; an argument the body sends is read ahead of the
+same name in the query string.
 
 A POST whose form or multipart type names a charset is answered with real's `superfluous_charset`
 warning, and one with a body under any other type that names none with `missing_charset`, each in

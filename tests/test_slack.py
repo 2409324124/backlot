@@ -918,8 +918,7 @@ _OWN_CHANNEL = "<the caller's own channel>"  # stands for an id only the test bo
         ("search.all", {"query": ""}, "no_query", []),
         ("search.files", {"query": ""}, "no_query", []),
         ("search.messages", {"query": "   "}, "no_query", []),  # whitespace is not a query either
-        # what real strips before it reads a query as none is `slack._QUERY_BLANKS`, and a query of
-        # another such character alone is searched for
+        # what real strips before it reads a query as none is `slack._QUERY_BLANKS`
         *(
             (method, {"query": query}, error, [])
             for method in ("search.messages", "search.all", "search.files")
@@ -2556,8 +2555,8 @@ def test_slack_post_charset_warning_on_a_refusal(
     client, admin_h, method, token, content_type, body, want
 ):
     """A refusal the method answers is warned as an answer is, where ``slack.attach_warning`` puts
-    the two keys; a body ``parse_slack_form`` refuses carries none. The bytes are ``want`` rendered,
-    so the order of its members is asserted as well as their values."""
+    the two keys. The bytes are ``want`` rendered, so the order of its members is asserted as well
+    as their values."""
     headers = {"content-type": content_type}
     if token == "admin":
         headers.update(admin_h)
@@ -3170,12 +3169,9 @@ def test_slack_refuses_a_body_before_the_method_runs(
     client, tokens_yaml, method, credential, content_type, body, error
 ):
     """Each body is refused ahead of the method's credential and of its arguments, as real refused
-    it on each row, and with no `warning`: the first four on each method with the admin token and no
-    arguments and on `auth.test` with no token, a bogus one or a `token` query parameter, the other
-    four on `auth.test` with no token or a bogus one and on `conversations.history` with the admin
-    token and no `channel`. A GET with the same headers and body answers what one without them does,
-    and the same POST to a path that names no method is the 404 real answered it with: neither reads
-    the body."""
+    it on each row, and with no `warning`. A GET with the same headers and body answers what one
+    without them does, and the same POST to a path that names no method is a 404, as on real:
+    neither reads the body."""
     headers = {}
     params = {}
     if credential == "admin":

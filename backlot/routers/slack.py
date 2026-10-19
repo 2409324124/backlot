@@ -1197,9 +1197,7 @@ def _messages_block(request: Request, *, empty_sort_dir_ok: bool):
     query = _param(request, "query") or ""
     if isinstance(query, Undecodable):
         return _err("internal_error"), None
-    # A query that arrived with nothing in it has its own error, measured live on all three search
-    # methods: blank or only `_QUERY_BLANKS` is `no_query`, where absent is `invalid_arguments`
-    # above.
+    # Absent is `invalid_arguments` above, and blank is `no_query` (`_QUERY_BLANKS`).
     if not query.strip(_QUERY_BLANKS):
         return _err("no_query"), None
     terms, container, phrase = _parse_slack_query(query)
