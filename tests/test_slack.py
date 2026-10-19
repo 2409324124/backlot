@@ -92,6 +92,7 @@ _TOKEN = "<the token>"
         ("post", "", "Bearer {admin}", ("token", ""), {"token": _TOKEN}),
         ("post", "", None, ("token", "{admin}"), {"token": _TOKEN}),
         ("post", "", "Bearer {admin}", ("a", "b"), {"a": "b", "token": _TOKEN}),
+        ("post", "", "Bearer {bogus}", "token={admin}", {"token": _TOKEN}),
         # a credential that does not resolve, and a `token` query parameter
         ("get", "foo=1", "Bearer {bogus}", None, "invalid_auth"),
         ("post", "foo=1", None, "token={bogus}", "invalid_auth"),
@@ -117,6 +118,7 @@ _TOKEN = "<the token>"
             ("x", {"error": "x", "a": "b", "token": _TOKEN}),
         ),
         ("post", "error=y", "Bearer {admin}", "error=x", ("x", {"error": "x", "token": _TOKEN})),
+        ("post", "", None, "error=%FF", (None, {"error": None})),
         ("get", "error=", None, None, {"error": ""}),
         ("get", "error=&foo=1", "Bearer {admin}", None, {"error": "", "foo": "1", "token": _TOKEN}),
         ("get", "error=x", "Bearer {bogus}", None, "invalid_auth"),
