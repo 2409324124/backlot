@@ -791,7 +791,7 @@ _RETIRED = frozenset(
     }
 )
 #: Real's answer to a path that is no method's name: this page, 1736 bytes under
-#: `text/html; charset=utf-8`, the same on each of the 228 such answers measured on 2026-10-20.
+#: `text/html; charset=utf-8`, the same on each of the 611 such answers measured on 2026-10-20.
 _NOT_FOUND_PAGE = (
     b"<!DOCTYPE html>\n"
     b'<html lang="en-US">\n'
