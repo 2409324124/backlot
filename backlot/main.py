@@ -860,13 +860,13 @@ def _some_slack_route_matches(scope: Scope) -> bool:
 
 @app.middleware("http")
 async def answer_an_unserved_slack_method(request: Request, call_next):
-    """A `GET`, `POST`, `PUT`, `PATCH` or `DELETE` to a `/slack/api/` path no Slack route matches is
-    answered as real answers it (``slack.unserved_answer``). Registered before ``parse_slack_form``,
-    which makes it the inner of the two: a body real refuses is refused first, as real refuses it,
-    and a token sent in the body is read here."""
+    """A request to a `/slack/api/` path no Slack route matches, by one of
+    ``slack.UNSERVED_METHODS``, is answered as real answers it (``slack.unserved_answer``).
+    Registered before ``parse_slack_form``, which makes it the inner of the two: a body real refuses
+    is refused first, as real refuses it, and a token sent in the body is read here."""
     path = request.scope["path"]
     if (
-        request.method in ("GET", "POST", "PUT", "PATCH", "DELETE")
+        request.method in slack.UNSERVED_METHODS
         and path.startswith("/slack/api/")
         and not _some_slack_route_matches(request.scope)
     ):

@@ -759,9 +759,11 @@ def _register(pairs: list[tuple[bytes, bytes | None]]) -> tuple[dict | None, str
 
 
 # --- Paths no route here serves -----------------------------------------------
-# How real answers a `GET`, `POST`, `PUT`, `PATCH` or `DELETE` to a path under `/api/` that none of
-# the methods routed below is, measured against slack.com/api on 2026-09-28 and 2026-10-20: each the
-# same, by the rules below.
+# How real answers a request for a path under `/api/` that none of the methods routed below is,
+# measured against slack.com/api on 2026-09-28 and 2026-10-20.
+
+#: The HTTP methods real answers such a path for by the rules below, each as it answers a `GET`.
+UNSERVED_METHODS = ("GET", "POST", "PUT", "PATCH", "DELETE")
 
 #: A path segment real reads as a method's name once it is decoded (`a%2Eb` is `a.b`): ASCII
 #: letters, digits and `.`. Any other byte in it, `-`, `_` and the bytes past ASCII among them, is

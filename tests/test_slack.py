@@ -3751,20 +3751,20 @@ _PAGE = "<real's 404 page>"
             ("unknown_method", "nonexistent.method"),
         ),
         ("POST", "nonexistent.method", None, _FORM, b"{}", "invalid_form_data"),
-        # a method Slack publishes and no route here serves, by its credential: a `token` query
-        # parameter, and a body, beside the two credentials the test below sends to each of them
+        # an unserved published method, with a `token` query parameter and with a body; the test
+        # below sends each one the other two credentials
         ("GET", "emoji.list", "query", None, None, "invalid_auth"),
         ("POST", "emoji.list", None, "application/json", b"{}", "not_authed"),
         ("POST", "emoji.list", None, None, b"{}", "missing_post_type"),
         ("POST", "emoji.list", None, "text/html", b"{}", "invalid_post_type"),
-        # a path that is no method's name
+        # real's 404 page
         *(
             ("GET", path, None, None, None, _PAGE)
             for path in ("nonexistent-xyz", "a-b.c", "a_b.c", "%C3%A9.x", "a.b;c", "a/b.c")
         ),
         ("POST", "nonexistent-xyz", None, "application/json", b"{}", _PAGE),
         ("POST", "nonexistent-xyz", None, None, b"{}", _PAGE),
-        # `PUT`, `PATCH` and `DELETE` alike
+        # the other methods real runs, alike
         *(
             row
             for verb in ("PUT", "PATCH", "DELETE")
@@ -3830,8 +3830,7 @@ _RETIRED = (
     "workflows.stepFailed",
     "workflows.updateStep",
 )
-# Real's answers, with no token and with a bogus one, where they were not `not_authed` and
-# `invalid_auth`.
+# Where real's two answers were not `not_authed` and `invalid_auth`.
 _PUBLISHED_ANSWERS = {
     "oauth.access": ("invalid_code", "invalid_code"),
     "oauth.v2.access": ("invalid_code", "invalid_auth"),
@@ -3843,8 +3842,8 @@ _PUBLISHED_ANSWERS = {
     "name", sorted({op.split(" ", 1)[1][1:] for op in published.missing_operations("slack")})
 )
 def test_slack_answers_each_published_method_no_route_serves(client, name):
-    """Each method the baseline lists as published and not served, sent with no token and with a
-    bogus one, answered as real answered it (``slack._RETIRED`` dates the measurement)."""
+    """Each method the baseline lists as published and not served, answered both ways as real
+    answered it (``slack._RETIRED`` dates the measurement)."""
     none, bogus = _PUBLISHED_ANSWERS.get(name, ("not_authed", "invalid_auth"))
     for headers, error in (({}, none), ({"Authorization": "Bearer xoxb-not-a-real-token"}, bogus)):
         expected = {"ok": False, "error": error}
