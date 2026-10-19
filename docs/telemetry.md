@@ -46,7 +46,7 @@ Each count carries these attributes:
 | `http.request.method` | `GET`, `POST`, … |
 | `http.response.status_code` | The status Backlot answered with |
 | `backlot.error_code` | The vendor's error identifier when the answer is an error, e.g. `channel_not_found`, `NoSuchKey`, `not_found` |
-| `backlot.error_class` | Beside an error code, what it means: `client`, `auth`, `rate_limit`, `unsupported` (Backlot does not do this yet), `internal` (a Backlot bug), or `unclassified` |
+| `backlot.error_class` | On a failure, its cause, read from the status and the support state: `unsupported` (Backlot does not do this yet), `internal` (a Backlot bug), `rate_limit`, `auth`, or `client` (the request was wrong) |
 | `backlot.auth.kind` | `bearer`, `basic`, `api_key`, `sigv4`, `sigv2`, `presigned`, `other` or `anonymous` |
 | `backlot.caller.kind` | `admin`, `user` or `anonymous` |
 | `backlot.client` | The client library the request headers name, by name and major.minor version, e.g. `slack_sdk/3.44`, `boto3/1.40`, `python-requests/2.34`, or `other` |

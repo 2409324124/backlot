@@ -31,7 +31,7 @@ STORED = {
     "backlot.operation": r"^[A-Za-z_][A-Za-z0-9_.,/+{}-]{0,127}$",
     "backlot.error_code": r"^[A-Za-z][A-Za-z0-9_.-]{0,63}$",
     "backlot.client": r"^[A-Za-z0-9@_.-]{1,48}(/[0-9]+[.][0-9]+)?$",
-    "backlot.error_class": r"^(client|auth|rate_limit|unsupported|internal|unclassified)$",
+    "backlot.error_class": r"^(client|auth|rate_limit|unsupported|internal)$",
 }
 
 
@@ -170,18 +170,21 @@ def test_client_labels_are_the_ones_measured_from_the_examples():
     assert codes.client({"user-agent": "curl/8.7.1"}) == "curl/8.7"
 
 
-def test_every_slug_backlot_writes_has_a_class():
-    tables = {"github": codes._GITHUB, "jira": codes._JIRA, "confluence": codes._CONFLUENCE}
-    tables |= {"linear": codes._GRAPHQL, "fireflies": codes._GRAPHQL}
-    unclassed = [
-        (s, slug)
-        for s, t in tables.items()
-        for _, slug in t
-        if error_class(s, slug) == "unclassified"
-    ]
-    assert unclassed == []
-    assert error_class("s3", "internal_error") == "internal"
-    assert error_class("github", "unrecognized") == "unclassified"
+@pytest.mark.parametrize(
+    "source, support, status, code, spent, expected",
+    [
+        ("github", "implemented", 403, "rate_limited", True, "rate_limit"),
+        ("github", "implemented", 403, "unrecognized", False, "auth"),
+        ("slack", "implemented", 429, "ratelimited", False, "rate_limit"),
+        ("hubspot", "implemented", 401, "INVALID_AUTHENTICATION", False, "auth"),
+        ("slack", "implemented", 200, "invalid_auth", False, "auth"),
+        ("linear", "implemented", 200, "unsupported_filter", False, "unsupported"),
+        ("gmail", "implemented", 501, "notImplemented", False, "client"),
+        ("gmail", "implemented", 503, "backendError", False, "internal"),
+    ],
+)
+def test_a_failure_is_classed_by_its_answer(source, support, status, code, spent, expected):
+    assert error_class(source, support, status, code, spent) == expected
 
 
 GITHUB = "/github/repos/acme/docs-site"
@@ -190,76 +193,88 @@ GITHUB = "/github/repos/acme/docs-site"
 @pytest.mark.parametrize(
     "method, path, kwargs, expected",
     [
-        # (source, operation, support, status, error code)
-        ("GET", GITHUB, {}, ("github", "repos/get", "implemented", 200, None)),
-        ("HEAD", GITHUB, {}, ("github", "repos/get", "implemented", 200, None)),
+        # (source, operation, support, status, error code, class)
+        ("GET", GITHUB, {}, ("github", "repos/get", "implemented", 200, None, None)),
+        ("HEAD", GITHUB, {}, ("github", "repos/get", "implemented", 200, None, None)),
         (
             "GET",
             "/github/repos/acme/nosuch",
             {},
-            ("github", "repos/get", "implemented", 404, "not_found"),
+            ("github", "repos/get", "implemented", 404, "not_found", "client"),
         ),
-        ("GET", f"{GITHUB}/commits", {}, ("github", "repos/list-commits", "missing", 307, None)),
+        (
+            "GET",
+            f"{GITHUB}/commits",
+            {},
+            ("github", "repos/list-commits", "missing", 307, None, None),
+        ),
         (
             "POST",
             f"{GITHUB}/issues",
             {"json": {"title": "t"}},
-            ("github", "issues/create", "missing", 405, None),
+            ("github", "issues/create", "missing", 405, None, "unsupported"),
         ),
         (
             "GET",
             f"{GITHUB}/actions/runs",
             {},
-            ("github", "actions/list-workflow-runs-for-repo", "missing", 404, "not_found"),
+            (
+                "github",
+                "actions/list-workflow-runs-for-repo",
+                "missing",
+                404,
+                "not_found",
+                "unsupported",
+            ),
         ),
         (
             "POST",
             "/slack/api/conversations.history",
             {"data": {"channel": "CNOPE"}},
-            ("slack", "conversations.history", "implemented", 200, "channel_not_found"),
+            ("slack", "conversations.history", "implemented", 200, "channel_not_found", "client"),
         ),
         (
             "POST",
             "/slack/api/chat.postMessage",
             {},
-            ("slack", "chat.postMessage", "missing", 404, None),
+            ("slack", "chat.postMessage", "missing", 404, None, "unsupported"),
         ),
         (
             "GET",
             "/atlassian/rest/api/3/project/ENG",
             {},
-            ("jira", "getProject", "missing", 404, "no_endpoint"),
+            ("jira", "getProject", "missing", 404, "no_endpoint", "unsupported"),
         ),
         (
             "GET",
             "/gmail/v1/users/me/messages",
             {},
-            ("gmail", "gmail.users.messages.list", "implemented", 200, None),
+            ("gmail", "gmail.users.messages.list", "implemented", 200, None, None),
         ),
         (
             "GET",
             "/gmail/v1/users/me/drafts",
             {},
-            ("gmail", "gmail.users.drafts.list", "missing", 404, None),
+            ("gmail", "gmail.users.drafts.list", "missing", 404, None, "unsupported"),
         ),
         # A bearer token is no S3 credential; real answers it InvalidArgument, and so does Backlot.
         (
             "GET",
             "/s3/acme-artifacts?list-type=2",
             {},
-            ("s3", "ListObjectsV2", "implemented", 400, "InvalidArgument"),
+            ("s3", "ListObjectsV2", "implemented", 400, "InvalidArgument", "client"),
         ),
         (
             "PUT",
             "/s3/acme-artifacts/k.txt",
             {"content": b"x"},
-            ("s3", "PutObject", "refused", 400, "InvalidArgument"),
+            ("s3", "PutObject", "refused", 400, "InvalidArgument", "unsupported"),
         ),
         (
             "GET",
             "/calendar/v3/calendars/primary/events",
             {},
-            ("other", "unmatched", "unknown", 404, None),
+            ("other", "unmatched", "unknown", 404, None, "client"),
         ),
     ],
 )
@@ -275,30 +290,31 @@ def test_a_call_is_named_by_the_baseline(client, method, path, kwargs, expected)
         c["backlot.support"],
         c["http.response.status_code"],
         c.get("backlot.error_code"),
+        c.get("backlot.error_class"),
     )
     assert got == expected
     assert c["http.request.method"] == method
-    assert c.get("backlot.error_class") == (
-        error_class(c["backlot.source"], got[4]) if got[4] else None
-    )
 
 
 @pytest.mark.parametrize(
     "query, expected",
     [
-        ("{ issues(first: 1) { nodes { id } } }", ("query.issues", "implemented", 200, None)),
+        ("{ issues(first: 1) { nodes { id } } }", ("query.issues", "implemented", 200, None, None)),
         (
             '{ issue(id: "x") { id } teams { nodes { id } } }',
-            ("query.issue,teams", "implemented", 200, "entity_not_found"),
+            ("query.issue,teams", "implemented", 200, "entity_not_found", "client"),
         ),
-        ("{ projects { nodes { id } } }", ("query.projects", "missing", 400, "graphql_validation")),
-        ("{ notAField }", ("query.unmatched", "unknown", 400, "graphql_validation")),
+        (
+            "{ projects { nodes { id } } }",
+            ("query.projects", "missing", 400, "graphql_validation", "unsupported"),
+        ),
+        ("{ notAField }", ("query.unmatched", "unknown", 400, "graphql_validation", "client")),
         (
             'mutation { issueCreate(input: {title: "x", teamId: "t"}) { success } }',
-            ("mutation", "unknown", 400, "graphql_validation"),
+            ("mutation", "unknown", 400, "graphql_validation", "client"),
         ),
-        ("{ issues {", ("unparsed", "unknown", 400, "graphql_parse")),
-        ("{ __schema { queryType { name } } }", ("query.__schema", "implemented", 200, None)),
+        ("{ issues {", ("unparsed", "unknown", 400, "graphql_parse", "client")),
+        ("{ __schema { queryType { name } } }", ("query.__schema", "implemented", 200, None, None)),
     ],
 )
 def test_a_graphql_call_is_named_by_its_root_fields(client, query, expected):
@@ -310,6 +326,7 @@ def test_a_graphql_call_is_named_by_its_root_fields(client, query, expected):
         c["backlot.support"],
         c["http.response.status_code"],
         c.get("backlot.error_code"),
+        c.get("backlot.error_class"),
     ) == expected
     assert (c["backlot.auth.kind"], c["backlot.caller.kind"]) == ("api_key", "admin")
 
@@ -360,11 +377,12 @@ def test_an_unhandled_exception_is_an_internal_error(client):
     finally:
         client.app.router.routes.pop()
     (c,) = [dict(k) for k in counts]
-    assert (c["http.response.status_code"], c["backlot.error_code"], c["backlot.support"]) == (
-        500,
-        "internal_error",
-        "extra",
-    )
+    assert (
+        c["http.response.status_code"],
+        c["backlot.error_code"],
+        c["backlot.error_class"],
+        c["backlot.support"],
+    ) == (500, "internal_error", "internal", "extra")
     assert "corpus-secret" not in json.dumps(c)
 
 

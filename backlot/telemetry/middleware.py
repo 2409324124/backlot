@@ -58,10 +58,15 @@ class TelemetryMiddleware:
             receive, request_body = await _buffered(receive)
 
         answer = {"status": 500, "body": bytearray(), "keep": False, "cap": 0, "ended": None}
+        answer["spent"] = False
 
         async def watch(message: dict) -> None:
             if message["type"] == "http.response.start":
                 answer["status"] = message["status"]
+                answer["spent"] = any(
+                    k.lower() == b"x-ratelimit-remaining" and v == b"0"
+                    for k, v in message.get("headers", [])
+                )
                 slack = source == "slack"
                 answer["keep"] = graphql or slack or message["status"] >= 400
                 answer["cap"] = _GRAPHQL_BODY_CAP if graphql else _ERROR_BODY_CAP
@@ -79,7 +84,7 @@ class TelemetryMiddleware:
         try:
             await self.app(scope, receive, watch)
         except Exception:
-            self._record(scope, headers, query, request_body, 500, "internal_error", began)
+            self._record(scope, headers, query, request_body, 500, "internal_error", False, began)
             raise
         code = (
             codes.error_code(source, answer["status"], bytes(answer["body"]))
@@ -87,10 +92,20 @@ class TelemetryMiddleware:
             else ""
         )
         self._record(
-            scope, headers, query, request_body, answer["status"], code, began, answer["ended"]
+            scope,
+            headers,
+            query,
+            request_body,
+            answer["status"],
+            code,
+            answer["spent"],
+            began,
+            answer["ended"],
         )
 
-    def _record(self, scope, headers, query, request_body, status, code, began, ended=None) -> None:
+    def _record(
+        self, scope, headers, query, request_body, status, code, spent, began, ended=None
+    ) -> None:
         try:
             named = self.namer.name(
                 method=scope["method"],
@@ -117,7 +132,10 @@ class TelemetryMiddleware:
             }
             if code:
                 attributes["backlot.error_code"] = code
-                attributes["backlot.error_class"] = error_class(named.source, code)
+            if code or status >= 400:
+                attributes["backlot.error_class"] = error_class(
+                    named.source, named.support, int(status), code, spent
+                )
             self.recorder.record(attributes, ((ended or time.perf_counter()) - began) * 1000)
         except Exception:  # noqa: BLE001 — counting a call must never change the answer to it
             pass
