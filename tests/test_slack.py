@@ -3720,6 +3720,7 @@ def test_slack_refuses_a_body_before_the_method_runs(
 
 _PAGE = "<real's 404 page>"
 _ROUTED = "<the route's answer>"
+_LEFT = "<the router's 404>"
 _ROUTED_ROWS = (("PUT", "api.test"), ("PATCH", "conversations.list"), ("DELETE", "auth.test"))
 _RETIRED = (
     "apps.permissions.info",
@@ -3812,6 +3813,16 @@ _RETIRED = (
         ("GET", "oauth.access", "admin", None, None, "invalid_code"),
         # a method a route serves, for another HTTP method, is the route's to answer
         *((verb, m, None, None, None, _ROUTED) for verb, m in _ROUTED_ROWS),
+        # left to the router: a token that resolves, a path ending in `/`, the dot segments, and a
+        # method outside `slack.UNSERVED_METHODS`, its body unread
+        ("GET", "emoji.list", "admin", None, None, _LEFT),
+        ("GET", "emoji.list/", None, None, None, _LEFT),
+        ("GET", "%2E", None, None, None, _LEFT),
+        ("GET", "%2E%2E", None, None, None, _LEFT),
+        ("POST", "%2E", None, None, b"{}", _LEFT),
+        ("POST", "%2E%2E", None, None, b"{}", _LEFT),
+        ("OPTIONS", "nonexistent.method", None, None, None, _LEFT),
+        ("OPTIONS", "nonexistent.method", None, _FORM, b"a{=b", _LEFT),
     ],
 )
 def test_slack_answers_a_path_no_route_serves_as_real_does(
@@ -3821,7 +3832,8 @@ def test_slack_answers_a_path_no_route_serves_as_real_does(
     each row (the comment above ``slack.UNSERVED_METHODS`` dates the measurement): ``want`` is the
     error, (error, `req_method`) for `unknown_method`, or real's 404 page. A `POST` with a JSON body
     carries the `missing_charset` warning, as each of real's answers to one did but the page. A
-    ``_ROUTED`` row only says this layer leaves it be: real runs the method."""
+    ``_ROUTED`` row only says this layer leaves it be: real runs the method. A ``_LEFT`` row is one
+    this layer leaves to the router."""
     headers = {}
     url = f"/slack/api/{path}"
     if credential == "admin":
@@ -3835,6 +3847,9 @@ def test_slack_answers_a_path_no_route_serves_as_real_does(
     r = client.request(verb, url, headers=headers, content=body)
     if want == _ROUTED:
         assert b"unknown_method" not in r.content
+        return
+    if want == _LEFT:
+        assert (r.status_code, r.content) == (404, b'{"detail":"Not Found"}')
         return
     if want == _PAGE:
         assert r.status_code == 404
