@@ -755,12 +755,20 @@ urlencoded form's name rules, its value is taken as sent, `+` and `%XX` included
 read as a form's is; an argument the body sends is read ahead of the same name in the query string.
 
 A `GET`, `POST`, `PUT`, `PATCH` or `DELETE` to a path under `/slack/api` that is none of the methods
-above is answered as real answers it. A method Slack publishes is refused for its credential
-(`not_authed`, `invalid_auth`), but for `oauth.access` and `oauth.v2.access`, which answer
-`invalid_code`, and ten real has retired. Those ten, and a name Slack has no method by, are
+above is answered as real answers it, but for the requests the next paragraph names. A method Slack
+publishes is refused for its credential (`not_authed`, `invalid_auth`), but for `oauth.access`,
+which answers `invalid_code`, `oauth.v2.access`, which answers it too unless the credential sent is
+refused, and ten real has retired. Those ten, and a name Slack has no method by, are
 `unknown_method` with `req_method`, whatever the credential, and a path holding a byte other than an
 ASCII letter, a digit or `.` is real's HTML 404 page. A body real refuses is refused ahead of the
-credential and of `unknown_method`, and not read on a path that names no method.
+credential and of `unknown_method`, and not read on a path that names no method. Under `PUT`,
+`PATCH` and `DELETE` a body is refused only for a name (`invalid_arg_name`, `invalid_array_arg`).
+
+Real answers these otherwise. A caller whose token resolves is left to the router's
+`{"detail": "Not Found"}` 404 on a published method, `oauth.access` and `oauth.v2.access` aside,
+where real checks the token's scopes. A path ending in `/` and the names `.` and `..` are left to
+the router too. A name holding one of the five escaped bytes real's front end answers itself, or
+ending in one of the six real drops from a name's end, gets real's 404 page.
 
 A POST whose form or multipart type names a charset is answered with real's `superfluous_charset`
 warning, and one with a body under any other type that names none with `missing_charset`, each in

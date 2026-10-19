@@ -356,6 +356,20 @@ def read_post_body(content_type: str | None, body: bytes) -> tuple[dict[str, str
     return args or {}, None
 
 
+def read_body(
+    method: str, content_type: str | None, body: bytes
+) -> tuple[dict[str, str], str | None]:
+    """:func:`read_post_body` for a request's method: a `PUT`, `PATCH` or `DELETE` body is read as a
+    `POST`'s and refused only for a name, `invalid_arg_name` or `invalid_array_arg`. Measured
+    against slack.com/api on 2026-10-20: a form `token=<bogus>` under each of them is
+    `invalid_auth`, and a form `{}`, a body with no Content-Type and one under `text/html` are read
+    as no body."""
+    args, error = read_post_body(content_type, body)
+    if method != "POST" and error not in ("invalid_arg_name", "invalid_array_arg"):
+        return args, None
+    return args, error
+
+
 def _form_pairs(body: bytes) -> list[tuple[bytes, bytes]]:
     """The decoded (name, value) of each `&`-separated piece of a form body that holds a `=`: a
     piece without one is dropped (`a=b&c` reads `a` alone, and `a` alone is `invalid_form_data`).
@@ -762,12 +776,14 @@ def _register(pairs: list[tuple[bytes, bytes | None]]) -> tuple[dict | None, str
 # How real answers a request for a path under `/api/` that none of the methods routed below is,
 # measured against slack.com/api on 2026-09-28 and 2026-10-20.
 
-#: The HTTP methods real answers such a path for by the rules below, each as it answers a `GET`.
+#: The HTTP methods real answers such a path for by the rules below, each as it answers a `GET`
+#: once its body is read (:func:`read_body`).
 UNSERVED_METHODS = ("GET", "POST", "PUT", "PATCH", "DELETE")
 
-#: A path segment real reads as a method's name once it is decoded (`a%2Eb` is `a.b`): ASCII
-#: letters, digits and `.`. Any other byte in it, `-`, `_` and the bytes past ASCII among them, is
-#: real's 404 page.
+#: A path segment this server reads as a method's name once it is decoded (`a%2Eb` is `a.b`): ASCII
+#: letters, digits and `.`; any other byte in it is answered with real's 404 page. Real answers `-`,
+#: `_` and the bytes past ASCII so, but refuses `%00`, `%2F`, `%3F` and `%5C` at its front end, and
+#: `%0A` but at a name's end, where it drops `%09`, `%0A`, `%0B`, `%0D`, `%20` and `%2B`.
 _METHOD_NAME = re.compile(r"[0-9A-Za-z.]+")
 #: The methods Slack publishes and no route here serves, by name: the baseline's `missing`
 #: operations (``backlot.published``), each published for a `GET` or a `POST`, and real answers
@@ -777,7 +793,7 @@ _PUBLISHED_NOT_SERVED = frozenset(
 )
 #: Of :data:`_PUBLISHED_NOT_SERVED`, the methods real answers `unknown_method` for, as for a name it
 #: never had. Each of the 164 the baseline lists was sent with no token and with a bogus one on
-#: 2026-10-20, and these ten were `unknown_method` both ways.
+#: 2026-10-20, and these ten were `unknown_method` both ways and with a token that resolves.
 _RETIRED = frozenset(
     {
         "apps.permissions.info",
@@ -792,8 +808,9 @@ _RETIRED = frozenset(
         "workflows.updateStep",
     }
 )
-#: Real's answer to a path that is no method's name: this page, 1736 bytes under
-#: `text/html; charset=utf-8`, the same on each of the 611 such answers measured on 2026-10-20.
+#: Real's answer to a path that names no method, but for the bytes :data:`_METHOD_NAME` says it
+#: refuses at its front end: this page, 1736 bytes under `text/html; charset=utf-8`, the same on
+#: each of the 611 answers that carried it on 2026-10-20.
 _NOT_FOUND_PAGE = (
     b"<!DOCTYPE html>\n"
     b'<html lang="en-US">\n'
@@ -856,9 +873,10 @@ def method_name(path: str) -> str | None:
 def unserved_answer(request: Request) -> Response | None:
     """Real's answer to a request for a path no route here matches, or None for the router's 404:
     the method's credential refusal (``_caller_or_error``) for a method Slack publishes, ahead of
-    whatever the method would read, `unknown_method` with the name for one it does not, whatever
-    the credential, and its 404 page for a path that names no method. A credential that resolves,
-    on a method Slack publishes, is left to the router."""
+    whatever the method would read, or `invalid_code` for the two `oauth` exchanges below;
+    `unknown_method` with the name for one it does not publish or has retired (:data:`_RETIRED`),
+    whatever the credential; and its 404 page for a path that names no method. A credential that
+    resolves, on a method Slack publishes but the two exchanges, is left to the router."""
     path = request.scope["path"]
     if path.removeprefix("/slack/api/") in ("", ".", "..") or path.endswith("/"):
         return None
@@ -867,11 +885,15 @@ def unserved_answer(request: Request) -> Response | None:
         return Response(_NOT_FOUND_PAGE, status_code=404, media_type="text/html; charset=utf-8")
     if name not in _PUBLISHED_NOT_SERVED or name in _RETIRED:
         return JSONResponse({"ok": False, "error": "unknown_method", "req_method": name})
-    # The two the same measurement answered `invalid_code`, where the others were `not_authed` and
-    # `invalid_auth`: `oauth.access` both ways, `oauth.v2.access` with no token alone.
-    if name == "oauth.access" or (name == "oauth.v2.access" and not _credential_sent(request)):
+    # The two the measurement under `_RETIRED` answered `invalid_code`, where the others were
+    # `not_authed` and `invalid_auth`: `oauth.access` whatever the credential, and `oauth.v2.access`
+    # but for a credential it refuses (a token that resolves is `invalid_code` too).
+    if name == "oauth.access":
         return _err("invalid_code")
-    return _caller_or_error(request)[1]
+    refusal = _caller_or_error(request)[1]
+    if name == "oauth.v2.access" and (refusal is None or not _credential_sent(request)):
+        return _err("invalid_code")
+    return refusal
 
 
 def attach_warning(payload: dict, warning: str) -> dict:
