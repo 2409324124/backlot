@@ -785,8 +785,9 @@ UNSERVED_METHODS = ("GET", "POST", "PUT", "PATCH", "DELETE")
 #: A path segment this server reads as a method's name once it is decoded (`a%2Eb` is `a.b`): ASCII
 #: letters, digits and `.`; any other byte in it, but a `/` at its end or before a name
 #: (:func:`unserved_answer`), is answered with real's 404 page. Real answers `-`, `_` and the bytes
-#: past ASCII so, but refuses `%00`, `%2F`, `%3F` and `%5C` at its front end, and `%0A` but at a
-#: name's end, where it drops `%09`, `%0A`, `%0B`, `%0D`, `%20` and `%2B`.
+#: past ASCII so, but refuses `%00`, `%2F`, `%3F`, `%5C` and a `%` that starts no escape at its
+#: front end, and `%0A` but at a name's end, where it drops `%09`, `%0A`, `%0B`, `%0D`, `%20` and
+#: `%2B`.
 _METHOD_NAME = re.compile(r"[0-9A-Za-z.]+")
 #: The methods Slack has, by name, for a path no route here matches: those Slack's reference index
 #: lists (``backlot/data/slack_methods.json``, written by ``scripts/gen_slack_methods.py``). The
