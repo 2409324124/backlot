@@ -3764,6 +3764,24 @@ _PAGE = "<real's 404 page>"
         ),
         ("POST", "nonexistent-xyz", None, "application/json", b"{}", _PAGE),
         ("POST", "nonexistent-xyz", None, None, b"{}", _PAGE),
+        # `PUT`, `PATCH` and `DELETE` alike
+        *(
+            row
+            for verb in ("PUT", "PATCH", "DELETE")
+            for row in (
+                (
+                    verb,
+                    "nonexistent.method",
+                    None,
+                    None,
+                    None,
+                    ("unknown_method", "nonexistent.method"),
+                ),
+                (verb, "emoji.list", None, None, None, "not_authed"),
+                (verb, "emoji.list", "bogus", None, None, "invalid_auth"),
+                (verb, "nonexistent-xyz", None, None, None, _PAGE),
+            )
+        ),
     ],
 )
 def test_slack_answers_a_path_no_route_serves_as_real_does(

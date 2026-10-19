@@ -759,8 +759,9 @@ def _register(pairs: list[tuple[bytes, bytes | None]]) -> tuple[dict | None, str
 
 
 # --- Paths no route here serves -----------------------------------------------
-# How real answers a `GET` or a `POST` to a path under `/api/` that none of the methods routed
-# below is, measured against slack.com/api on 2026-09-28 and 2026-10-20.
+# How real answers a `GET`, `POST`, `PUT`, `PATCH` or `DELETE` to a path under `/api/` that none of
+# the methods routed below is, measured against slack.com/api on 2026-09-28 and 2026-10-20: each the
+# same, by the rules below.
 
 #: A path segment real reads as a method's name once it is decoded (`a%2Eb` is `a.b`): ASCII
 #: letters, digits and `.`. Any other byte in it, `-`, `_` and the bytes past ASCII among them, is
@@ -842,7 +843,8 @@ _NOT_FOUND_PAGE = (
 
 
 def method_name(path: str) -> str | None:
-    """The method a `/slack/api/` path names, as real reads it, or None for one it reads as none."""
+    """The method a `/slack/api/` path names, as real reads it, or None for one it reads as none and
+    for a path elsewhere."""
     name = path.removeprefix("/slack/api/")
     if name in (".", "..") or not _METHOD_NAME.fullmatch(name):
         return None

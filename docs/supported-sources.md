@@ -754,13 +754,13 @@ multipart body is read as HHVM reads one, which is how real reads it: a part's n
 urlencoded form's name rules, its value is taken as sent, `+` and `%XX` included, and its `token` is
 read as a form's is; an argument the body sends is read ahead of the same name in the query string.
 
-A `GET` or a `POST` to a path under `/slack/api` that is none of the methods above is answered as
-real answers it. A method Slack publishes is refused for its credential (`not_authed`,
-`invalid_auth`), but for `oauth.access` and `oauth.v2.access`, which answer `invalid_code`, and
-ten real has retired. Those ten, and a name Slack has no method by, are `unknown_method` with
-`req_method`, whatever the credential, and a path holding a byte other than an ASCII letter, a
-digit or `.` is real's HTML 404 page. A body real refuses is refused ahead of the credential and of
-`unknown_method`, and not read on a path that names no method.
+A `GET`, `POST`, `PUT`, `PATCH` or `DELETE` to a path under `/slack/api` that is none of the methods
+above is answered as real answers it. A method Slack publishes is refused for its credential
+(`not_authed`, `invalid_auth`), but for `oauth.access` and `oauth.v2.access`, which answer
+`invalid_code`, and ten real has retired. Those ten, and a name Slack has no method by, are
+`unknown_method` with `req_method`, whatever the credential, and a path holding a byte other than an
+ASCII letter, a digit or `.` is real's HTML 404 page. A body real refuses is refused ahead of the
+credential and of `unknown_method`, and not read on a path that names no method.
 
 A POST whose form or multipart type names a charset is answered with real's `superfluous_charset`
 warning, and one with a body under any other type that names none with `missing_charset`, each in

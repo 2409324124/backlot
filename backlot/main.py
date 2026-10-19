@@ -860,13 +860,13 @@ def _some_slack_route_matches(scope: Scope) -> bool:
 
 @app.middleware("http")
 async def answer_an_unserved_slack_method(request: Request, call_next):
-    """A `GET` or a `POST` to a `/slack/api/` path no Slack route matches is answered as real
-    answers it (``slack.unserved_answer``). Registered before ``parse_slack_form``, which makes it
-    the inner of the two: a body real refuses is refused first, as real refuses it, and a token
-    sent in the body is read here."""
+    """A `GET`, `POST`, `PUT`, `PATCH` or `DELETE` to a `/slack/api/` path no Slack route matches is
+    answered as real answers it (``slack.unserved_answer``). Registered before ``parse_slack_form``,
+    which makes it the inner of the two: a body real refuses is refused first, as real refuses it,
+    and a token sent in the body is read here."""
     path = request.scope["path"]
     if (
-        request.method in ("GET", "POST")
+        request.method in ("GET", "POST", "PUT", "PATCH", "DELETE")
         and path.startswith("/slack/api/")
         and not _some_slack_route_matches(request.scope)
     ):
@@ -884,7 +884,7 @@ async def parse_slack_form(request: Request, call_next):
     carries for the router's param lookup and the token's (``slack._param``,
     ``auth.slack_token``)."""
     path = request.scope["path"]
-    if request.method == "POST" and path.startswith("/slack/api/") and slack.method_name(path):
+    if request.method == "POST" and slack.method_name(path):
         args, error = slack.read_post_body(slack.post_content_type(request), await request.body())
         if error is not None:
             request.state.slack_body_refused = True
