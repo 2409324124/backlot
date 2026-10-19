@@ -6,6 +6,8 @@ or call the response builder directly.
 
 from __future__ import annotations
 
+import urllib.parse
+
 import pytest
 import yaml
 from fastapi.responses import JSONResponse
@@ -19,11 +21,19 @@ _FORM = "application/x-www-form-urlencoded"
 _MULTIPART = "multipart/form-data; boundary=b"
 
 
-def _one_part(name: str, value: str) -> bytes:
-    """A multipart body under :data:`_MULTIPART` whose one part is the field ``name``."""
-    return (
-        f'--b\r\nContent-Disposition: form-data; name="{name}"\r\n\r\n{value}\r\n--b--\r\n'.encode()
+def _parts(fields) -> bytes:
+    """A multipart body under :data:`_MULTIPART` with a part for each (name, value) of ``fields``,
+    or an empty one for none: the closing delimiter alone is `invalid_form_data`."""
+    parts = "".join(
+        f'--b\r\nContent-Disposition: form-data; name="{name}"\r\n\r\n{value}\r\n'
+        for name, value in fields
     )
+    return (parts + "--b--\r\n").encode() if parts else b""
+
+
+def _one_part(name: str, value: str) -> bytes:
+    """:func:`_parts` with the one field ``name``."""
+    return _parts([(name, value)])
 
 
 _ONE_PART = _one_part("x", "y")
@@ -541,12 +551,8 @@ def test_slack_by_id_methods_refuse_a_channel_the_caller_cannot_see(
             return client.get(f"/slack/api/{method}", headers=headers, params=params).json()
         if sent_as == "form":
             return client.post(f"/slack/api/{method}", headers=headers, data=params).json()
-        parts = b"".join(
-            f'--b\r\nContent-Disposition: form-data; name="{k}"\r\n\r\n{v}\r\n'.encode()
-            for k, v in params.items()
-        )
         h = {**headers, "Content-Type": _MULTIPART}
-        return client.post(f"/slack/api/{method}", headers=h, content=parts + b"--b--\r\n").json()
+        return client.post(f"/slack/api/{method}", headers=h, content=_parts(params.items())).json()
 
     hidden_and_made_up = ({"channel": private["id"]}, {"channel": "C0000000000"})
     for email in ("ava@acme.com", "bob@acme.com"):
@@ -1096,17 +1102,29 @@ def _number_rows():
         ),
     ],
 )
-def test_slack_numeric_arguments_are_read_as_real_reads_them(client, admin_h, method, params, want):
+@pytest.mark.parametrize("sent_as", ["query", "form", "multipart"])
+def test_slack_numeric_arguments_are_read_as_real_reads_them(
+    client, admin_h, method, params, want, sent_as
+):
     """The rule on `_SLACK_INTEGER` and the order `_limit` and `_numbers` answer in, every row as
-    slack.com/api answered it. A row answered as a number is compared with the request that sends
-    that number in its place, and an `_UNSET` row with the request that leaves the argument out,
-    whose page is not empty: an empty page whose cursor names itself would keep a client that
-    follows cursors on that page forever."""
+    slack.com/api answered it, in each place ``sent_as`` puts the arguments. A row answered as a
+    number is compared with the request that sends that number in its place, and an `_UNSET` row
+    with the request that leaves the argument out, whose page is not empty: an empty page whose
+    cursor names itself would keep a client that follows cursors on that page forever."""
     cid = _a_channel_id(client, admin_h)
 
     def get(ps):
         ps = [(k, cid if v == _OWN_CHANNEL else v) for k, v in ps]
-        r = client.get(f"/slack/api/{method}", headers=admin_h, params=ps)
+        url = f"/slack/api/{method}"
+        if sent_as == "query":
+            r = client.get(url, headers=admin_h, params=ps)
+        elif sent_as == "form":
+            h = {**admin_h, "Content-Type": _FORM}
+            r = client.post(url, headers=h, content=urllib.parse.urlencode(ps))
+        else:
+            r = client.post(
+                url, headers={**admin_h, "Content-Type": _MULTIPART}, content=_parts(ps)
+            )
         assert r.status_code == 200
         return r.json()
 
@@ -1126,42 +1144,61 @@ def test_slack_numeric_arguments_are_read_as_real_reads_them(client, admin_h, me
         assert any(v for v in same.values() if isinstance(v, list)), same
 
 
+_QUERY_FF_PART = b'--b\r\nContent-Disposition: form-data; name="query"\r\n\r\n\xff\r\n--b--\r\n'
+
+
 @pytest.mark.parametrize(
-    "method, params, content_type, body, want",
+    "method, params, content_type, body, credential, want",
     [
+        # the body's value for a name ahead of the query string's
+        ("conversations.list", [("limit", "abc")], _FORM, "limit=5", "admin", [("limit", "5")]),
         (
-            "conversations.history",
-            [],
+            "conversations.list",
+            [("limit", "abc")],
             _MULTIPART,
-            ("channel", _OWN_CHANNEL),
-            [("channel", _OWN_CHANNEL)],
+            ("limit", "5"),
+            "admin",
+            [("limit", "5")],
         ),
-        ("conversations.list", [], _MULTIPART, ("limit", "abc"), [_NUMBER_LINE("limit")]),
-        ("conversations.list", [("limit", "abc")], _FORM, "limit=5", [("limit", "5")]),
-        ("conversations.list", [("limit", "abc")], _MULTIPART, ("limit", "5"), [("limit", "5")]),
-        ("conversations.list", [("limit", "5")], _FORM, "limit=abc", [_NUMBER_LINE("limit")]),
-        ("search.messages", [], _FORM, "query=the&sort.dir=bogus", [_SORT_DIR_LINE]),
-        ("conversations.history", [], _FORM, "channel=%FF", "channel_not_found"),
-        ("conversations.list", [], _FORM, "limit=%FF", [_NUMBER_LINE("limit")]),
+        (
+            "conversations.list",
+            [("limit", "5")],
+            _FORM,
+            "limit=abc",
+            "admin",
+            [_NUMBER_LINE("limit")],
+        ),
+        # a name read as real reads it
+        ("search.messages", [], _FORM, "query=the&sort.dir=bogus", "admin", [_SORT_DIR_LINE]),
+        # a value that is not UTF-8
+        ("conversations.history", [], _FORM, "channel=%FF", "admin", "channel_not_found"),
+        ("conversations.list", [], _FORM, "limit=%FF", "admin", [_NUMBER_LINE("limit")]),
+        ("users.info", [], _FORM, "user=%FF", "admin", "user_not_found"),
+        *((m, [], _FORM, "query=%FF", "admin", "internal_error") for m in _SEARCH_METHODS),
+        ("search.messages", [], _MULTIPART, _QUERY_FF_PART, "admin", "internal_error"),
+        ("search.messages", [], _FORM, "query=%FF&count=abc", "admin", [_NUMBER_LINE("count")]),
+        ("search.messages", [], _FORM, "query=%FF&sort_dir=bogus", "admin", [_SORT_DIR_LINE]),
+        ("search.messages", [], _FORM, "query=%FF", None, "not_authed"),
+        ("search.messages", [], _FORM, "query=%FF", "bogus", "invalid_auth"),
     ],
 )
 def test_slack_reads_an_argument_from_the_body_ahead_of_the_query(
-    client, admin_h, method, params, content_type, body, want
+    client, admin_h, method, params, content_type, body, credential, want
 ):
     """An argument sent in a POST body, urlencoded or as a multipart part (``body`` a (name, value)
-    pair), under the name real reads it by, as real answered each row. ``want`` is the error, the
-    `invalid_arguments` lines, or the arguments a GET sends in the query string to be answered the
-    same."""
+    pair, or the body's bytes), under the name real reads it by, as real answered each row. ``want``
+    is the error, the `invalid_arguments` lines, or the arguments a GET sends in the query string to
+    be answered the same."""
     cid = _a_channel_id(client, admin_h)
     own = {_OWN_CHANNEL: cid}
     if isinstance(body, tuple):
         body = _one_part(body[0], own.get(body[1], body[1]))
-    r = client.post(
-        f"/slack/api/{method}",
-        headers={**admin_h, "content-type": content_type},
-        params=params,
-        content=body,
-    )
+    headers = {"content-type": content_type}
+    if credential == "admin":
+        headers.update(admin_h)
+    elif credential == "bogus":
+        headers["authorization"] = "Bearer xoxb-not-a-real-token"
+    r = client.post(f"/slack/api/{method}", headers=headers, params=params, content=body)
     got = r.json()
     if isinstance(want, str):
         assert got == {"ok": False, "error": want}
@@ -2502,8 +2539,9 @@ def test_slack_post_charset_warnings(
 def test_slack_post_charset_warning_on_a_refusal(
     client, admin_h, method, token, content_type, body, want
 ):
-    """A refusal is warned as an answer is, where ``slack.attach_warning`` puts the two keys. The
-    bytes are ``want`` rendered, so the order of its members is asserted as well as their values."""
+    """A refusal the method answers is warned as an answer is, where ``slack.attach_warning`` puts
+    the two keys; a body ``parse_slack_form`` refuses carries none. The bytes are ``want`` rendered,
+    so the order of its members is asserted as well as their values."""
     headers = {"content-type": content_type}
     if token == "admin":
         headers.update(admin_h)
@@ -3066,8 +3104,9 @@ def test_slack_refuses_a_body_before_the_method_runs(
     it on each row, and with no `warning`: the first four on each method with the admin token and no
     arguments and on `auth.test` with no token, a bogus one or a `token` query parameter, the other
     four on `auth.test` with no token or a bogus one and on `conversations.history` with the admin
-    token and no `channel`. A GET with the same headers and body answers what one without them does:
-    the body of a GET is not read."""
+    token and no `channel`. A GET with the same headers and body answers what one without them does,
+    and the same POST to a path that names no method is the 404 real answered it with: neither reads
+    the body."""
     headers = {}
     params = {}
     if credential == "admin":
@@ -3082,3 +3121,5 @@ def test_slack_refuses_a_body_before_the_method_runs(
     assert r.content == JSONResponse({"ok": False, "error": error}).body
     got = client.request("GET", url, headers=sent, params=params, content=body)
     assert got.json() == client.get(url, headers=headers, params=params).json()
+    elsewhere = client.post("/slack/api/nonexistent-xyz", headers=sent, params=params, content=body)
+    assert elsewhere.status_code == 404

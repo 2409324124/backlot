@@ -262,16 +262,18 @@ _POST_TYPES = ("application/json", "text/plain", _FORM, _MULTIPART)
 _POST_CHARSETS = ("utf-8", "utf8", "iso-8859-1")
 #: An argument name real takes, as :func:`_registered_name` reads it.
 _ARG_NAME = re.compile(r"[-0-9:A-Za-z_]{1,100}")
-#: A name that is no argument: `api.test` echoes none of `1`, `-1`, `0` and `9223372036854775807`,
-#: and echoes `01`, `-0` and `9223372036854775808`.
+#: An integer name, which is no argument within 64 bits (:func:`_register`): `api.test` echoes none
+#: of `1`, `-1`, `0` and `9223372036854775807`, and echoes `01`, `-0` and `9223372036854775808`.
 _INT_NAME = re.compile(r"0|-?[1-9][0-9]*")
 
 
 class Undecodable(str):
     """A form value whose bytes are not UTF-8. Real reads it as an argument that is there and names
     nothing: `channel=%FF` is `channel_not_found`, `limit=%FF` the number refusal and `token=%FF`
-    `invalid_auth`, beside a valid bearer header too. So it is a U+FFFD to every method, and
-    `api_test` echoes it as `null`, as real does."""
+    `invalid_auth`, beside a valid bearer header too. So it is a U+FFFD to the methods, and
+    `api_test` echoes it as `null`, as real does. A search's `query` is the exception: real answers
+    `internal_error` for one on each search method, after the credential and the number and
+    `sort_dir` refusals."""
 
     def __new__(cls):
         return super().__new__(cls, "\ufffd")
@@ -368,7 +370,8 @@ def _unquote(raw: bytes) -> bytes:
 
 def _multipart_parts(content_type: str, body: bytes) -> list[tuple[bytes, bytes | None]] | None:
     """The (name, value) of each part of a multipart body, the value None for a file's part; None
-    for a body real cannot read, and no part for one with no delimiter.
+    for a body real cannot read and for a part whose headers end without a blank line, which real
+    reads as more of the header above and this does not; no part for a body with no delimiter.
 
     The boundary is what follows the first `=` after the first `boundary` in the Content-Type, in
     that case, wherever it is (`xboundary=b` and `boundary =b` are `b`): up to the next `"` if it
@@ -1189,6 +1192,8 @@ def _messages_block(request: Request, *, empty_sort_dir_ok: bool):
     if err is not None:
         return err, None
     query = _param(request, "query") or ""
+    if isinstance(query, Undecodable):
+        return _err("internal_error"), None
     # A query that arrived with nothing in it has its own error, measured live on all three search
     # methods: blank or whitespace-only is `no_query`, where absent is `invalid_arguments` above.
     if not query.strip():
@@ -1268,6 +1273,8 @@ async def search_files(request: Request):
     if err is not None:
         return err
     query = _param(request, "query") or ""
+    if isinstance(query, Undecodable):
+        return _err("internal_error")
     if not query.strip():
         return _err("no_query")
     count = counts["count"]

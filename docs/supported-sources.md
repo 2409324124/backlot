@@ -752,7 +752,7 @@ sends is read ahead of the same name in the query string.
 
 A POST whose form or multipart type names a charset is answered with real's `superfluous_charset`
 warning, and one with a body under any other type that names none with `missing_charset`, each in
-`warning` and in `response_metadata.warnings`.
+`warning` and in `response_metadata.warnings`. A body refused as above carries neither.
 
 ## Backlot's own endpoints
 
