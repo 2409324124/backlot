@@ -35,7 +35,11 @@ STORED = {
 
 @pytest.fixture(scope="module")
 def hello(tmp_path_factory):
-    records = [json.loads(line) for line in HELLO_CORPUS.read_text().splitlines() if line.strip()]
+    records = [
+        json.loads(line)
+        for line in HELLO_CORPUS.read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
     return build_corpus(tmp_path_factory.mktemp("hello"), records, raw=True)
 
 
@@ -157,7 +161,9 @@ def test_each_way_to_start_a_server_can_turn_it_off(monkeypatch, hello):
 
 
 def test_client_labels_are_the_ones_measured_from_the_examples():
-    cases = json.loads((Path(__file__).parent / "telemetry_clients.json").read_text())["cases"]
+    cases = json.loads(
+        (Path(__file__).parent / "telemetry_clients.json").read_text(encoding="utf-8")
+    )["cases"]
     assert [codes.client(c["headers"]) for c in cases] == [c["client"] for c in cases]
     assert codes.client({"user-agent": "curl/8.7.1"}) == "curl/8.7"
 
@@ -290,7 +296,7 @@ def test_a_graphql_call_is_named_by_its_root_fields(client, query, expected):
 
 
 def test_how_a_call_authenticated_is_counted_without_its_credential(client, hello):
-    tokens = __import__("yaml").safe_load(hello.tokens_path.read_text())
+    tokens = __import__("yaml").safe_load(hello.tokens_path.read_text(encoding="utf-8"))
     user = tokens["users"][0]["token"]
     sigv4 = "AWS4-HMAC-SHA256 Credential=AKIAEXAMPLE/20261019/us-east-1/s3/aws4_request, SignedHeaders=host, Signature=00"
     cases = [
