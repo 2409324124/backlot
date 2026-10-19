@@ -3770,8 +3770,7 @@ _RETIRED = (
             )
             for cred in (None, "bogus", "query", "admin")
         ),
-        # a name real has retired, with a token that resolves; the test below sends the other two
-        *(("GET", name, "admin", None, None, ("unknown_method", name)) for name in _RETIRED),
+        # names of each shape, with no token
         *(
             ("GET", name, None, None, None, ("unknown_method", name))
             for name in ("a.b", "A.B", "1.2", "a", "a..b", "api.test.x")
@@ -3787,6 +3786,8 @@ _RETIRED = (
             ("unknown_method", "nonexistent.method"),
         ),
         ("POST", "nonexistent.method", None, _FORM, b"{}", "invalid_form_data"),
+        # a name real has retired, with a token that resolves; the test below sends the other two
+        *(("GET", name, "admin", None, None, ("unknown_method", name)) for name in _RETIRED),
         # an unserved published method, with a `token` query parameter and with a body; the test
         # below sends each one the other two credentials
         ("GET", "emoji.list", "query", None, None, "invalid_auth"),
@@ -3826,7 +3827,8 @@ _RETIRED = (
         ("PUT", "emoji.list", None, _FORM, b"a[b]=c", "invalid_array_arg"),
         ("PUT", "nonexistent.method", None, _FORM, b"a{=b", "invalid_arg_name"),
         ("PUT", "oauth.v2.access", None, _FORM, b"token=xoxb-not-a-real-token", "invalid_auth"),
-        # `oauth.v2.access` by its credential: a refused one, and one that resolves
+        # the methods that answer `invalid_code`, by their credential: a refused one, and one that
+        # resolves
         ("GET", "oauth.v2.access", "query", None, None, "invalid_auth"),
         ("GET", "oauth.v2.access", "admin", None, None, "invalid_code"),
         ("GET", "oauth.access", "admin", None, None, "invalid_code"),
@@ -3845,8 +3847,9 @@ _RETIRED = (
         ("GET", "im.open", "bogus", None, None, ("unknown_method", "im.open")),
         # a method a route serves, for another HTTP method, is the route's to answer
         *((verb, m, None, None, None, _ROUTED) for verb, m in _ROUTED_ROWS),
-        # left to the router: a token that resolves, a path ending in `/`, the dot segments, and a
-        # method outside `slack.UNSERVED_METHODS`, its body unread
+        # left to the router: a token that resolves, a method of `slack._ANSWERED_BY_ARGUMENTS`, a
+        # path ending in `/`, the dot segments, and a method outside `slack.UNSERVED_METHODS`, its
+        # body unread
         ("GET", "emoji.list", "admin", None, None, _LEFT),
         ("GET", "files.getUploadURLExternal", "admin", None, None, _LEFT),
         ("POST", "blocks.validate", None, _FORM, b"", _LEFT),
@@ -3864,11 +3867,12 @@ def test_slack_answers_a_path_no_route_serves_as_real_does(
     client, admin_h, verb, path, credential, content_type, body, want
 ):
     """A path under `/slack/api/` that none of the routes serves, answered as slack.com/api answered
-    each row (the comment above ``slack.UNSERVED_METHODS`` dates the measurement): ``want`` is the
-    error, (error, `req_method`) for `unknown_method`, the whole answer, or real's 404 page. A
-    `POST` with a JSON body carries the `missing_charset` warning, as each of real's answers to one
-    did but the page. A ``_ROUTED`` row only says this layer leaves it be: real runs the method. A
-    ``_LEFT`` row is one this layer leaves to the router."""
+    each row but a ``_LEFT`` one (the comment above ``slack.UNSERVED_METHODS`` dates the
+    measurement): ``want`` is the error, (error, `req_method`) for `unknown_method`, the whole
+    answer, or real's 404 page. A `POST` with a JSON body carries the `missing_charset` warning, as
+    each of real's answers to one did but the page. A ``_ROUTED`` row only says this layer leaves it
+    be: real runs the method. A ``_LEFT`` row is one this layer leaves to the router, which real
+    answers otherwise."""
     headers = {}
     url = f"/slack/api/{path}"
     if credential == "admin":
@@ -3906,7 +3910,8 @@ def test_slack_answers_a_path_no_route_serves_as_real_does(
     assert r.content == JSONResponse(expected).body
 
 
-# Where real's two answers were not `not_authed` and `invalid_auth`.
+# The two answers here where they are not `not_authed` and `invalid_auth`: real's, or `_LEFT` for
+# those `slack._ANSWERED_BY_ARGUMENTS` leaves to the router.
 _PUBLISHED_ANSWERS = {
     "oauth.access": ("invalid_code", "invalid_code"),
     **{
@@ -3932,7 +3937,8 @@ _INDEX = Path(slack.__file__).resolve().parents[1] / "data" / "slack_methods.jso
 )
 def test_slack_answers_each_published_method_no_route_serves(client, name):
     """Each method the baseline lists as published and not served, and each Slack's reference index
-    lists that no route serves, answered as real answered it (``slack._PUBLISHED`` dates the
+    lists that no route serves, answered as real answered it but those
+    ``slack._ANSWERED_BY_ARGUMENTS`` leaves to the router (``slack._PUBLISHED`` dates the
     measurement)."""
     none, bogus = _PUBLISHED_ANSWERS.get(name, ("not_authed", "invalid_auth"))
     for verb in ("GET", "POST"):

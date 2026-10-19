@@ -774,7 +774,7 @@ where real checks the token's scopes. `blocks.validate`, `oauth.v2.exchange` and
 `tooling.tokens.rotate`, whose answer turns on the arguments sent, are left to the router whatever
 the credential, and so are a path ending in `/` and the names `.` and `..`. A name holding one of
 the five escaped bytes real's front end answers itself, or ending in one of the six real drops from
-a name's end, gets real's 404 page.
+a name's end, gets real's 404 page, but for a `%2F` at its end, which ends the path in `/`.
 
 A POST whose form or multipart type names a charset is answered with real's `superfluous_charset`
 warning, and one with a body under any other type that names none with `missing_charset`, each in

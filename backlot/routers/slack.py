@@ -783,18 +783,19 @@ def _register(pairs: list[tuple[bytes, bytes | None]]) -> tuple[dict | None, str
 UNSERVED_METHODS = ("GET", "POST", "PUT", "PATCH", "DELETE")
 
 #: A path segment this server reads as a method's name once it is decoded (`a%2Eb` is `a.b`): ASCII
-#: letters, digits and `.`; any other byte in it is answered with real's 404 page. Real answers `-`,
-#: `_` and the bytes past ASCII so, but refuses `%00`, `%2F`, `%3F` and `%5C` at its front end, and
-#: `%0A` but at a name's end, where it drops `%09`, `%0A`, `%0B`, `%0D`, `%20` and `%2B`.
+#: letters, digits and `.`; any other byte in it, but a `/` at its end, is answered with real's 404
+#: page. Real answers `-`, `_` and the bytes past ASCII so, but refuses `%00`, `%2F`, `%3F` and
+#: `%5C` at its front end, and `%0A` but at a name's end, where it drops `%09`, `%0A`, `%0B`, `%0D`,
+#: `%20` and `%2B`.
 _METHOD_NAME = re.compile(r"[0-9A-Za-z.]+")
 #: The methods Slack has, by name, for a path no route here matches: those Slack's reference index
 #: lists (``backlot/data/slack_methods.json``, written by ``scripts/gen_slack_methods.py``). The
 #: index holds each method the baseline's 2020 description lists but ten (`oauth.token`, three
 #: `workflows` ones and six `apps.permissions` ones), which real answers `unknown_method` for, as
 #: for a name it never had, whatever the credential, one that resolves included. Measured on
-#: 2026-10-20 with no token and with a bogus one, the 164 the baseline lists by `GET` and the 174
-#: only the index lists by `GET` and by `POST`, each answered the credential's refusal
-#: (`not_authed`, `invalid_auth`) but for those ten and those :data:`_OTHER_ANSWERS` and
+#: 2026-10-20 with no token and with a bogus one, the 164 the baseline lists and the 174 only the
+#: index lists, by `GET` and by `POST`, answered the credential's refusal (`not_authed`,
+#: `invalid_auth`) but for those ten and those :data:`_OTHER_ANSWERS` and
 #: :data:`_ANSWERED_BY_ARGUMENTS` hold.
 _PUBLISHED = frozenset(
     json.loads(
@@ -807,7 +808,7 @@ _PUBLISHED = frozenset(
 #: whether a credential sent that does not resolve is refused ahead of it, each also answered so to
 #: a token that resolves. The `.mark` and `.list` ones are among the names `slack_sdk` 3.45.0 calls
 #: that neither list holds, sent by `GET` with each credential and by `POST` with none; the rest of
-#: those names (`channels.list`, `im.open`) were `unknown_method`.
+#: those names, `channels.list` and `im.open` among them, were `unknown_method`.
 _OTHER_ANSWERS: dict[str, tuple[dict, bool]] = {
     "oauth.access": ({"ok": False, "error": "invalid_code"}, False),
     **{
@@ -847,9 +848,9 @@ _OTHER_ANSWERS: dict[str, tuple[dict, bool]] = {
 _ANSWERED_BY_ARGUMENTS = frozenset(
     {"blocks.validate", "oauth.v2.exchange", "tooling.tokens.rotate"}
 )
-#: Real's answer to a path that names no method, but for the bytes :data:`_METHOD_NAME` says it
-#: refuses at its front end: this page, 1736 bytes under `text/html; charset=utf-8`, the same on
-#: each of the 611 answers that carried it on 2026-10-20.
+#: Real's answer to a path that names no method, where :func:`unserved_answer` gives it, but for the
+#: bytes :data:`_METHOD_NAME` says real refuses at its front end: this page, 1736 bytes under
+#: `text/html; charset=utf-8`, the same on each of the 611 answers that carried it on 2026-10-20.
 _NOT_FOUND_PAGE = (
     b"<!DOCTYPE html>\n"
     b'<html lang="en-US">\n'
@@ -901,8 +902,8 @@ _NOT_FOUND_PAGE = (
 
 
 def method_name(path: str) -> str | None:
-    """The method a `/slack/api/` path names, as real reads it, or None for one it reads as none and
-    for a path elsewhere."""
+    """The method a `/slack/api/` path names, as :data:`_METHOD_NAME` reads it, or None for one it
+    reads as none and for a path elsewhere."""
     name = path.removeprefix("/slack/api/")
     if name in (".", "..") or not _METHOD_NAME.fullmatch(name):
         return None
@@ -915,7 +916,8 @@ def unserved_answer(request: Request) -> Response | None:
     the method would read, or the answer :data:`_OTHER_ANSWERS` holds for it; `unknown_method` with
     the name for one it has none by, whatever the credential; and its 404 page for a path that names
     no method. A credential that resolves, on a method :data:`_OTHER_ANSWERS` does not hold, and a
-    method of :data:`_ANSWERED_BY_ARGUMENTS` are left to the router."""
+    method of :data:`_ANSWERED_BY_ARGUMENTS` are left to the router, and so are an empty name, the
+    names `.` and `..` and a path ending in `/`."""
     path = request.scope["path"]
     if path.removeprefix("/slack/api/") in ("", ".", "..") or path.endswith("/"):
         return None
