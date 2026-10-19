@@ -2429,7 +2429,7 @@ def test_slack_deactivation_changes_every_slack_answer_about_a_member_and_nothin
         ("POST", "conversations.list", "application/json", b"{}", "missing_charset"),
         ("POST", "conversations.history", "application/json", b"{}", "missing_charset"),
         ("POST", "conversations.history", f"{_FORM}; charset=utf-8", b"", "superfluous_charset"),
-        # a 404 carries none, as real's HTML 404 for a path with no dot does not
+        # a 404 carries none, as real's HTML 404 for a path that names no method does not
         ("POST", "nonexistent-xyz", "application/json", b"{}", None),
     ],
 )
