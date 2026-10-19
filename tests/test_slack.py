@@ -31,6 +31,11 @@ def _parts(fields) -> bytes:
     return (parts + "--b--\r\n").encode() if parts else b""
 
 
+# A part's lines after its delimiter, for a body that spells its delimiters itself.
+_PART_A = b'Content-Disposition: form-data; name="a"\r\n\r\nb\r\n'
+_PART_C = b'Content-Disposition: form-data; name="c"\r\n\r\nd\r\n'
+
+
 def _one_part(name: str, value: str) -> bytes:
     """:func:`_parts` with the one field ``name``."""
     return _parts([(name, value)])
@@ -2943,6 +2948,35 @@ def test_slack_post_charset_warning_on_a_refusal(
             "multipart/form-data; boundary=",
             b'--b\r\nContent-Disposition: form-data; name="a"\r\n\r\nb\r\n--b--\r\n',
             "invalid_form_data",
+        ),
+        *(
+            ("POST", content_type, body, want)
+            for content_type, body, want in (
+                ("multipart/form-data; boundary=", b"--\r\n" + _PART_A + b"----\r\n", {"a": "b"}),
+                ('multipart/form-data; boundary=""', b"--\r\n" + _PART_A + b"----\r\n", {"a": "b"}),
+                (
+                    "multipart/form-data; boundary=; x=y",
+                    b"--\r\n" + _PART_A + b"----\r\n",
+                    {"a": "b"},
+                ),
+                (
+                    "multipart/form-data; boundary=",
+                    b'--\nContent-Disposition: form-data; name="a"\n\nb\n----\n',
+                    {"a": "b"},
+                ),
+                ("multipart/form-data; boundary=", b"--\r\n" + _PART_A, {"a": "b"}),
+                (
+                    "multipart/form-data; boundary=",
+                    b"--\r\n" + _PART_A + b"--\r\n" + _PART_C + b"----\r\n",
+                    {"a": "b", "c": "d"},
+                ),
+                (
+                    "multipart/form-data",
+                    b"--multipart/form-data\r\n" + _PART_A + b"--multipart/form-data--\r\n",
+                    "invalid_form_data",
+                ),
+                ("multipart/form-data; x=", b"--\r\n" + _PART_A + b"----\r\n", "invalid_form_data"),
+            )
         ),
         (
             "POST",

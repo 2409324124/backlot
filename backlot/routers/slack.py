@@ -382,8 +382,9 @@ def _multipart_parts(content_type: str, body: bytes) -> list[tuple[bytes, bytes 
     break that ends it. Its name is the last `name` parameter of its `Content-Disposition`, quoted
     or not, and a part with a `filename` is a file's, which is no argument, each parameter's name
     read in any case (`NAME="a"` names the part, and `FILENAME="x"` makes it a file's) and only with
-    a `=`. A part with no name and a boundary missing or empty are bodies real cannot read, and so,
-    with no part read, is a body with no delimiter, one that is only the closing delimiter included.
+    a `=`. A part with no name and a missing boundary are bodies real cannot read, and so, with no
+    part read, is a body with no delimiter, one that is only the closing delimiter included. An
+    empty boundary (`boundary=`, `boundary=""`) is read, its delimiter `--`.
     """
     at = content_type.find("boundary")
     eq = content_type.find("=", at) if at != -1 else -1
@@ -394,8 +395,6 @@ def _multipart_parts(content_type: str, body: bytes) -> list[tuple[bytes, bytes 
         boundary = boundary[1:].partition('"')[0]
     else:
         boundary = re.split("[,;]", boundary, maxsplit=1)[0]
-    if not boundary:
-        return None
     delimiter = b"--" + boundary.encode("latin-1")
     lines = body.split(b"\n")
     starts = [i for i, line in enumerate(lines) if line.removesuffix(b"\r") == delimiter]
@@ -460,9 +459,9 @@ def _register(pairs: list[tuple[bytes, bytes | None]]) -> tuple[dict | None, str
     """The arguments ``pairs`` register, the last value of a name read, or None for none at all, and
     the error real refuses them with: `invalid_arg_name` for any name :data:`_ARG_NAME` does not
     take, ahead of `invalid_array_arg` for any whose last value is an array, wherever each comes
-    in the body. A file's part registers without being an argument, and
-    an integer name (:data:`_INT_NAME`, within 64 bits) is no argument either. A file's name is not
-    checked: `name="a{"` and `name="a[b]"` with a `filename` are served."""
+    in the body. A file's part registers without being an argument, and an integer name
+    (:data:`_INT_NAME`, within 64 bits) is no argument either. A file's name is not checked:
+    `name="a{"` and `name="a[b]"` with a `filename` are served."""
     args: dict = {}
     registered = False
     for raw_name, raw_value in pairs:
