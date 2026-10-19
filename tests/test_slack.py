@@ -1015,7 +1015,7 @@ _SORT_DIR_LINE = "[ERROR] must be a valid enum value [json-pointer:/sort_dir]"
 # Of the four `limit` methods, users.list alone holds more than three items in the bundled corpus,
 # so it is where 1, 2 and 3 differ from the page served without `limit`.
 _LIMIT_VALUES = [
-    *((v, _UNSET) for v in ("0", "00", "-0", ".5", "0.0", "1e-1", "1e400")),
+    *((v, _UNSET) for v in ("0", "00", "-0", ".5", "0.0", "1e-1", "1e400", "9" * 4301)),
     *((v, 2) for v in ("02", "002", "2.0", "2.9", "2e0", "2E0", "20e-1", "0.2e1", "2.5e0", "2\n")),
     ("1.5", 1),
     ("3.99999", 3),
@@ -1031,7 +1031,7 @@ _INTEGER_VALUES = [
         (v, None)
         for v in ("abc", "", "5abc", "0x10", " 2", "2 ", "\t2", "+2", "-0", "-00", "-01", "2\n")
         + ("1_0", "\u0662", "\uff12", "2.0", "2.", "1.5", "1e1", "2e0", "9223372036854775808")
-        + ("-9223372036854775809",)
+        + ("-9223372036854775809", "9" * 4301)
     ),
 ]
 _PAGE_VALUES = [
@@ -3010,6 +3010,42 @@ def test_slack_post_charset_warning_on_a_refusal(
                 (b"--bx\r\n", b"--b\r\n" + _PART_E + b"--b--\r\n", {"a": "b", "e": "f"}),
                 (b"--b  \r\n", b"--b\r\n" + _PART_E + b"--b--\r\n", {"a": "b", "e": "f"}),
                 (b"--bx\r\n", b"--b--\r\n", {"a": "b"}),
+            )
+        ),
+        # a part with no headers is no part, a value's first line is the value's whatever it holds,
+        # and a value that runs to the end of the body keeps a lone CR
+        *(
+            ("POST", _MULTIPART, body, want)
+            for body, want in (
+                (b"--b\r\n\r\n--b\r\n" + _PART_A + b"--b--\r\n", {"a": "b"}),
+                (b"--b\r\n\r\nvalue\r\n--b\r\n" + _PART_A + b"--b--\r\n", {"a": "b"}),
+                (b"--b\r\n" + _PART_A + b"--b\r\n\r\n", {"a": "b"}),
+                (
+                    b'--b\r\nContent-Disposition: form-data; name="a"\r\n\r\n--bz\r\n--b--\r\n',
+                    {"a": "--bz"},
+                ),
+                (
+                    b'--b\r\nContent-Disposition: form-data; name="a"\r\n\r\n--b--\r\n',
+                    {"a": "--b--"},
+                ),
+                (b'--b\r\nContent-Disposition: form-data; name="a"\r\n\r\nv\r', {"a": "v\r"}),
+            )
+        ),
+        # the `Content-Disposition` rules ``slack._multipart_parts`` names, and the file rule
+        # ``slack._register`` does
+        *(
+            ("POST", _MULTIPART, body, want)
+            for body, want in (
+                (b'--b\r\nContent-Disposition: name="a"\r\n\r\nv\r\n--b--\r\n', {"a": "v"}),
+                (
+                    b'--b\r\nContent-Disposition: form-data; name="a;b"\r\n\r\nv\r\n--b--\r\n',
+                    "invalid_arg_name",
+                ),
+                (
+                    b'--b\r\nContent-Disposition: form-data; name="c"; filename="x"\r\n\r\nf\r\n'
+                    b'--b\r\nContent-Disposition: form-data; name="c"\r\n\r\nw\r\n--b--\r\n',
+                    {},
+                ),
             )
         ),
         (

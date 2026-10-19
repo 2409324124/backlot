@@ -378,16 +378,18 @@ def _multipart_parts(content_type: str, body: bytes) -> list[tuple[bytes, bytes 
     that case, wherever it is (`xboundary=b` and `boundary =b` are `b`): up to the next `"` if it
     starts with one, else up to a `,` or a `;`, a space after the `=` included. A delimiter is a
     line that is `--` and the boundary, ended by CRLF or LF alike, with nothing after it, and the
-    text before the first one is skipped. A part's value is what follows its blank line, up to the
-    line break before the next line that starts with the delimiter, or to the end of the body, less
-    a line break that ends it; such a line with more after the delimiter (`--bx`, `--b  `, the
-    closing `--b--`) ends the part, and what follows it up to the next delimiter is no part. Its
-    name is the last `name` parameter of its `Content-Disposition`, quoted or not, and a part with a
-    `filename` is a file's, which is no argument, each parameter's name read in any case (`NAME="a"`
-    names the part, and `FILENAME="x"` makes it a file's) and only with a `=`. A part with no name
-    and a missing boundary are bodies real cannot read, and so, with no part read, is a body with no
-    delimiter, one that is only the closing delimiter included. An empty boundary (`boundary=`,
-    `boundary=""`) is read, its delimiter `--`.
+    text before the first one is skipped. A part whose first line is blank has no headers and is no
+    part. A part's value is what follows its blank line: its first line whatever it holds, then up
+    to the line break before the next line that starts with the delimiter, less the CR before it, or
+    to the end of the body, less a CRLF or LF that ends it there. Such a line with more after the
+    delimiter (`--bx`, `--b  `, the closing `--b--`) ends the part, and what follows it up to the
+    next delimiter is no part. Its name is the last `name` parameter of its `Content-Disposition`,
+    quoted or not, its first parameter read as the others are and a `;` inside quotes kept in the
+    value, and a part with a `filename` is a file's, which is no argument, each parameter's name
+    read in any case (`NAME="a"` names the part, and `FILENAME="x"` makes it a file's) and only with
+    a `=`. A part with no name and a missing boundary are bodies real cannot read, and so, with no
+    part read, is a body with no delimiter, one that is only the closing delimiter included. An
+    empty boundary (`boundary=`, `boundary=""`) is read, its delimiter `--`.
     """
     at = content_type.find("boundary")
     eq = content_type.find("=", at) if at != -1 else -1
@@ -400,25 +402,32 @@ def _multipart_parts(content_type: str, body: bytes) -> list[tuple[bytes, bytes 
         boundary = re.split("[,;]", boundary, maxsplit=1)[0]
     delimiter = b"--" + boundary.encode("latin-1")
     lines = body.split(b"\n")
-    starts = [i for i, line in enumerate(lines) if line.removesuffix(b"\r") == delimiter]
+
+    def next_delimiter(at: int) -> int | None:
+        return next(
+            (i for i in range(at, len(lines)) if lines[i].removesuffix(b"\r") == delimiter), None
+        )
+
     parts = []
-    for n, start in enumerate(starts):
-        end = starts[n + 1] if n + 1 < len(starts) else len(lines)
-        block = lines[start + 1 : end]
-        cut = next((i for i, line in enumerate(block) if line.startswith(delimiter)), None)
-        block = block[:cut]
-        if not any(block):
+    at = next_delimiter(0)
+    while at is not None:
+        head = at + 1
+        if head == len(lines) or lines[head].removesuffix(b"\r") == b"":
+            at = next_delimiter(head + 1)
             continue
-        try:
-            blank = next(i for i, line in enumerate(block) if line.removesuffix(b"\r") == b"")
-        except StopIteration:
+        blank = head
+        while blank < len(lines) and lines[blank].removesuffix(b"\r") != b"":
+            if lines[blank].startswith(delimiter):
+                return None
+            blank += 1
+        if blank == len(lines):
             return None
         name, filename = None, False
-        for header in block[:blank]:
+        for header in lines[head:blank]:
             key, _, value = header.removesuffix(b"\r").partition(b":")
             if key.strip().lower() != b"content-disposition":
                 continue
-            for param in value.split(b";")[1:]:
+            for param in _CD_PARAM.findall(value):
                 pname, eq, pvalue = param.strip().partition(b"=")
                 if eq and pname.lower() == b"name":
                     name = pvalue.strip(b'"')
@@ -426,13 +435,22 @@ def _multipart_parts(content_type: str, body: bytes) -> list[tuple[bytes, bytes 
                     filename = True
         if not name:
             return None
-        value = b"\n".join(block[blank + 1 :])
-        if cut is not None or n + 1 < len(starts):
-            value = value.removesuffix(b"\r")
+        end = next(
+            (i for i in range(blank + 2, len(lines)) if lines[i].startswith(delimiter)), None
+        )
+        value = b"\n".join(lines[blank + 1 : end])
+        if end is None:
+            value = value[:-2] if value.endswith(b"\r\n") else value.removesuffix(b"\n")
+            at = None
         else:
-            value = value.removesuffix(b"\n").removesuffix(b"\r")
+            value = value.removesuffix(b"\r")
+            at = end if lines[end].removesuffix(b"\r") == delimiter else next_delimiter(end + 1)
         parts.append((name, None if filename else value))
     return parts
+
+
+#: A header parameter, as :func:`_multipart_parts` splits them.
+_CD_PARAM = re.compile(rb'(?:"[^"]*"?|[^;"])+')
 
 
 def _registered_name(name: bytes) -> tuple[str, bool] | None:
@@ -460,10 +478,11 @@ def _register(pairs: list[tuple[bytes, bytes | None]]) -> tuple[dict | None, str
     """The arguments ``pairs`` register, the last value of a name read, or None for none at all, and
     the error real refuses them with: `invalid_arg_name` for any name :data:`_ARG_NAME` does not
     take, ahead of `invalid_array_arg` for any whose last value is an array, wherever each comes
-    in the body. A file's part registers without being an argument, and an integer name
-    (:data:`_INT_NAME`, within 64 bits) is no argument either. A file's name is not checked:
-    `name="a{"` and `name="a[b]"` with a `filename` are served."""
+    in the body. A file's part registers without being an argument, and so does a later value of the
+    same name, and an integer name (:data:`_INT_NAME`, within 64 bits) is no argument either. A
+    file's name is not checked: `name="a{"` and `name="a[b]"` with a `filename` are served."""
     args: dict = {}
+    files: set[str] = set()
     registered = False
     for raw_name, raw_value in pairs:
         reg = _registered_name(raw_name)
@@ -472,6 +491,9 @@ def _register(pairs: list[tuple[bytes, bytes | None]]) -> tuple[dict | None, str
         registered = True
         name, is_array = reg
         if raw_value is None:
+            files.add(name)
+            continue
+        if name in files:
             continue
         if is_array:
             args[name] = _ARRAY
@@ -1644,8 +1666,8 @@ def _slack_number(key: str, raw: str) -> int | None:
     if key == "limit":
         if not _SLACK_NUMBER.fullmatch(raw):
             return None
-        if _SLACK_INTEGER.fullmatch(raw) and -(2**63) <= int(raw) < 2**63:
-            return int(raw)
+        if _SLACK_INTEGER.fullmatch(raw) and (n := _within_64_bits(raw)) is not None:
+            return n
         x = float(raw)
         if not math.isfinite(x):
             return 0
@@ -1653,7 +1675,18 @@ def _slack_number(key: str, raw: str) -> int | None:
         return (n + 2**63) % 2**64 - 2**63 if n >= 2**63 else n
     if not _SLACK_INTEGER.fullmatch(raw):
         return None
-    n = int(raw)
+    return _within_64_bits(raw)
+
+
+def _within_64_bits(raw: str) -> int | None:
+    """``raw``, which `_SLACK_INTEGER` matches, as an int within the signed 64-bit range, or None.
+    Its digits, its zeros in front dropped, are counted before `int` sees them, which raises past
+    4300 of them; real refuses a `count` of 4301 nines as one past 2**63 and serves such a `limit`
+    as one too large for a float (slack.com/api, 2026-10-20)."""
+    digits = raw.lstrip("-").lstrip("0") or "0"
+    if len(digits) > 19:
+        return None
+    n = -int(digits) if raw.startswith("-") else int(digits)
     return n if -(2**63) <= n < 2**63 else None
 
 
