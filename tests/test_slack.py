@@ -3020,6 +3020,9 @@ def test_slack_post_charset_warning_on_a_refusal(
                 (b"--b\r\n\r\n--b\r\n" + _PART_A + b"--b--\r\n", {"a": "b"}),
                 (b"--b\r\n\r\nvalue\r\n--b\r\n" + _PART_A + b"--b--\r\n", {"a": "b"}),
                 (b"--b\r\n" + _PART_A + b"--b\r\n\r\n", {"a": "b"}),
+                (b"--b\r\n" + _PART_A + b"--b", {"a": "b"}),
+                (b"--b\r\n" + _PART_A + b"--b\n", {"a": "b"}),
+                (b"--b", "invalid_form_data"),
                 (
                     b'--b\r\nContent-Disposition: form-data; name="a"\r\n\r\n--bz\r\n--b--\r\n',
                     {"a": "--bz"},
