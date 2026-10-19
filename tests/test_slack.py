@@ -34,6 +34,7 @@ def _parts(fields) -> bytes:
 # A part's lines after its delimiter, for a body that spells its delimiters itself.
 _PART_A = b'Content-Disposition: form-data; name="a"\r\n\r\nb\r\n'
 _PART_C = b'Content-Disposition: form-data; name="c"\r\n\r\nd\r\n'
+_PART_E = b'Content-Disposition: form-data; name="e"\r\n\r\nf\r\n'
 
 
 def _one_part(name: str, value: str) -> bytes:
@@ -2601,6 +2602,21 @@ def test_slack_post_charset_warning_on_a_refusal(
             b"a=b",
             "invalid_post_type",
         ),
+        # a header left empty or blank is dropped before the two are joined
+        *(
+            ("POST", [("content-type", first), ("content-type", second)], body, want)
+            for first, second, body, want in (
+                ("", _FORM, b"a=b", {"a": "b"}),
+                (_FORM, "", b"a=b", {"a": "b"}),
+                ("\t", _FORM, b"a=b", {"a": "b"}),
+                ("   ", _FORM, b"a=b", {"a": "b"}),
+                ("", "application/json", b"{}", ({}, "missing_charset")),
+                ("application/json", "", b"{}", ({}, "missing_charset")),
+                ("", _MULTIPART, _one_part("a", "b"), {"a": "b"}),
+                ("", "", b"{}", "missing_post_type"),
+            )
+        ),
+        ("POST", ", " + _FORM, b"a=b", "invalid_post_type"),
         ("POST", "  application/x-www-form-urlencoded  ", b"a=b", {"a": "b"}),
         ("POST", "application/json, text/html", b"{}", "invalid_post_type"),
         ("POST", "application/json; Charset=latin1", b"{}", ({}, "missing_charset")),
@@ -2986,6 +3002,15 @@ def test_slack_post_charset_warning_on_a_refusal(
                     "invalid_form_data",
                 ),
                 ("multipart/form-data; x=", b"--\r\n" + _PART_A + b"----\r\n", "invalid_form_data"),
+            )
+        ),
+        # a line that starts with the delimiter and holds more (:func:`slack._multipart_parts`)
+        *(
+            ("POST", _MULTIPART, b"--b\r\n" + _PART_A + line + _PART_C + tail, want)
+            for line, tail, want in (
+                (b"--bx\r\n", b"--b\r\n" + _PART_E + b"--b--\r\n", {"a": "b", "e": "f"}),
+                (b"--b  \r\n", b"--b\r\n" + _PART_E + b"--b--\r\n", {"a": "b", "e": "f"}),
+                (b"--bx\r\n", b"--b--\r\n", {"a": "b"}),
             )
         ),
         (

@@ -282,10 +282,11 @@ class Undecodable(str):
 def post_content_type(request: Request) -> str:
     """A request's Content-Type as real reads it: each header's value with the spaces and tabs
     around it stripped (` application/x-www-form-urlencoded ` is a form and `application/json<TAB>`
-    JSON), and two headers joined with `, `, or empty when there is none. A form type sent ahead of
-    `application/json` is read as a form, and the other way round is `invalid_post_type`, as one
-    header naming both is."""
-    return ", ".join(v.strip(" \t") for v in request.headers.getlist("content-type"))
+    JSON), a header left empty dropped, and two headers joined with `, `, or empty when there is
+    none. A form type sent ahead of `application/json` is read as a form, and the other way round is
+    `invalid_post_type`, as one header naming both is."""
+    values = (v.strip(" \t") for v in request.headers.getlist("content-type"))
+    return ", ".join(v for v in values if v)
 
 
 def _named_charset(content_type: str) -> str | None:
@@ -326,8 +327,8 @@ def read_post_body(content_type: str | None, body: bytes) -> tuple[dict[str, str
     (`APPLICATION/X-WWW-FORM-URLENCODED`, `…-urlencodedx` and `…-urlencoded, text/html` are read
     too), and as multipart when it starts with the multipart one (:func:`_multipart_parts`); what it
     carries passes the media-type check whatever the media type is. A JSON or `text/plain` body
-    is not read here. `Content-Encoding` is not read: a gzipped form is `invalid_form_data`, and a
-    plain one under `gzip`, `bogus` or an empty value is read.
+    is not read here. `Content-Encoding` is not read: a gzipped body is read as the bytes it is, and
+    a plain one under `gzip`, `bogus` or an empty value is read as itself.
     """
     if not content_type:
         return {}, "missing_post_type" if body else None
@@ -378,13 +379,15 @@ def _multipart_parts(content_type: str, body: bytes) -> list[tuple[bytes, bytes 
     starts with one, else up to a `,` or a `;`, a space after the `=` included. A delimiter is a
     line that is `--` and the boundary, ended by CRLF or LF alike, with nothing after it, and the
     text before the first one is skipped. A part's value is what follows its blank line, up to the
-    line break before the next delimiter or the closing one, or to the end of the body, less a line
-    break that ends it. Its name is the last `name` parameter of its `Content-Disposition`, quoted
-    or not, and a part with a `filename` is a file's, which is no argument, each parameter's name
-    read in any case (`NAME="a"` names the part, and `FILENAME="x"` makes it a file's) and only with
-    a `=`. A part with no name and a missing boundary are bodies real cannot read, and so, with no
-    part read, is a body with no delimiter, one that is only the closing delimiter included. An
-    empty boundary (`boundary=`, `boundary=""`) is read, its delimiter `--`.
+    line break before the next line that starts with the delimiter, or to the end of the body, less
+    a line break that ends it; such a line with more after the delimiter (`--bx`, `--b  `, the
+    closing `--b--`) ends the part, and what follows it up to the next delimiter is no part. Its
+    name is the last `name` parameter of its `Content-Disposition`, quoted or not, and a part with a
+    `filename` is a file's, which is no argument, each parameter's name read in any case (`NAME="a"`
+    names the part, and `FILENAME="x"` makes it a file's) and only with a `=`. A part with no name
+    and a missing boundary are bodies real cannot read, and so, with no part read, is a body with no
+    delimiter, one that is only the closing delimiter included. An empty boundary (`boundary=`,
+    `boundary=""`) is read, its delimiter `--`.
     """
     at = content_type.find("boundary")
     eq = content_type.find("=", at) if at != -1 else -1
@@ -402,10 +405,8 @@ def _multipart_parts(content_type: str, body: bytes) -> list[tuple[bytes, bytes 
     for n, start in enumerate(starts):
         end = starts[n + 1] if n + 1 < len(starts) else len(lines)
         block = lines[start + 1 : end]
-        closing = next(
-            (i for i, line in enumerate(block) if line.startswith(delimiter + b"--")), None
-        )
-        block = block[:closing]
+        cut = next((i for i, line in enumerate(block) if line.startswith(delimiter)), None)
+        block = block[:cut]
         if not any(block):
             continue
         try:
@@ -426,7 +427,7 @@ def _multipart_parts(content_type: str, body: bytes) -> list[tuple[bytes, bytes 
         if not name:
             return None
         value = b"\n".join(block[blank + 1 :])
-        if closing is not None or n + 1 < len(starts):
+        if cut is not None or n + 1 < len(starts):
             value = value.removesuffix(b"\r")
         else:
             value = value.removesuffix(b"\n").removesuffix(b"\r")
