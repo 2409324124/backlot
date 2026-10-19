@@ -879,9 +879,9 @@ async def answer_an_unserved_slack_method(request: Request, call_next):
 @app.middleware("http")
 async def parse_slack_form(request: Request, call_next):
     """Read the body of a Slack request with one, any of ``slack.UNSERVED_METHODS`` but `GET`, to a
-    path real reads as a method's name (``slack.method_name``), served here or not, before the
-    method runs, as real does (``slack.read_body``): answer one real refuses with its error, or
-    stash the arguments it carries for the router's param lookup and the token's (``slack._param``,
+    path ``slack.method_name`` reads as a method's name, served here or not, before the method runs,
+    as real does (``slack.read_body``): answer one real refuses with its error, or stash the
+    arguments it carries for the router's param lookup and the token's (``slack._param``,
     ``auth.slack_token``)."""
     path = request.scope["path"]
     if (

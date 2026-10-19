@@ -778,16 +778,16 @@ def _register(pairs: list[tuple[bytes, bytes | None]]) -> tuple[dict | None, str
 # How real answers a request for a path under `/api/` that none of the methods routed below is,
 # measured against slack.com/api on 2026-09-28 and 2026-10-20.
 
-#: The HTTP methods real answers such a path for by the rules below, each as it answers a `GET`
-#: once its body is read (:func:`read_body`).
+#: The HTTP methods real answers such a path for by the rules below, each as it answers a `GET` once
+#: its body is read (:func:`read_body`), but for `blocks.validate` (:data:`_ANSWERED_BY_ARGUMENTS`).
 UNSERVED_METHODS = ("GET", "POST", "PUT", "PATCH", "DELETE")
 
 #: A path segment this server reads as a method's name once it is decoded (`a%2Eb` is `a.b`): ASCII
-#: letters, digits and `.`; any other byte in it, but a `/` at its end or before a name
-#: (:func:`unserved_answer`), is answered with real's 404 page. Real answers `-`, `_` and the bytes
-#: past ASCII so, but refuses `%00`, `%2F`, `%3F`, `%5C` and a `%` that starts no escape at its
-#: front end, and `%0A` but at a name's end, where it drops `%09`, `%0A`, `%0B`, `%0D`, `%20` and
-#: `%2B`.
+#: letters, digits and `.`, but not `.` or `..` alone (:func:`method_name`); any other byte in it,
+#: but a `/` at its end or before a name (:func:`unserved_answer`), is answered with real's 404
+#: page. Real answers `-`, `_` and the bytes past ASCII so, but refuses `%00`, `%2F`, `%3F`, `%5C`
+#: and a `%` that starts no escape at its front end, and `%0A` but at a name's end, where it drops
+#: `%09`, `%0A`, `%0B`, `%0D`, `%20` and `%2B`.
 _METHOD_NAME = re.compile(r"[0-9A-Za-z.]+")
 #: The methods Slack has, by name, for a path no route here matches: those Slack's reference index
 #: lists (``backlot/data/slack_methods.json``, written by ``scripts/gen_slack_methods.py``). The
@@ -848,7 +848,8 @@ _OTHER_ANSWERS: dict[str, tuple[dict, bool]] = {
 #: without a `refresh_token` and `invalid_refresh_token` with a bogus one, and `blocks.validate`
 #: `ok` to a `POST` of `blocks=[]` and `invalid_arguments` to a `POST`, `PUT` or `DELETE` of
 #: nothing; a `GET` of `blocks.validate` was `unsupported_http_method` whatever the credential,
-#: which :func:`unserved_answer` answers (2026-10-20).
+#: which :func:`unserved_answer` answers (2026-10-20). The rest is left to the router: an answer
+#: for one set of arguments does not hold for another.
 _ANSWERED_BY_ARGUMENTS = {
     "blocks.validate": True,
     "oauth.v2.exchange": False,
@@ -909,7 +910,7 @@ _NOT_FOUND_PAGE = (
 
 def method_name(path: str) -> str | None:
     """The method a `/slack/api/` path names, as :data:`_METHOD_NAME` reads it, or None for one it
-    reads as none and for a path elsewhere."""
+    reads as none, for `.` and `..`, and for a path elsewhere."""
     name = path.removeprefix("/slack/api/")
     if name in (".", "..") or not _METHOD_NAME.fullmatch(name):
         return None
@@ -921,9 +922,9 @@ def unserved_answer(request: Request) -> Response | None:
     the method's credential refusal (``_caller_or_error``) for a method Slack has, ahead of whatever
     the method would read, or the answer :data:`_OTHER_ANSWERS` holds for it; `unknown_method` with
     the name for one it has none by, whatever the credential; and its 404 page for a path that names
-    no method. A credential that resolves, on a method :data:`_OTHER_ANSWERS` does not hold, and a
-    method of :data:`_ANSWERED_BY_ARGUMENTS` past the credential it refuses and a `GET` of
-    `blocks.validate` are left to the router, and so are an empty name, the names `.` and `..`, a
+    no method. A credential that resolves, on a method :data:`_OTHER_ANSWERS` does not hold, is left
+    to the router, and so is a method of :data:`_ANSWERED_BY_ARGUMENTS` but for a credential it
+    refuses and a `GET` of `blocks.validate`, and so are an empty name, the names `.` and `..`, a
     path ending in `/`, and a name after two or more `/`s, which real reads as that name, its
     slashes merged (`//api.test` is `api.test`, slack.com/api, 2026-10-20)."""
     path = request.scope["path"]

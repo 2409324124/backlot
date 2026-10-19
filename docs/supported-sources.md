@@ -769,15 +769,15 @@ method. Under `PUT`, `PATCH` and `DELETE` a body is refused only for a name (`in
 `invalid_array_arg`).
 
 Real answers these otherwise. A caller whose token resolves is left to the router's
-`{"detail": "Not Found"}` 404 on a method the index lists, but for those that answer `invalid_code`,
-where real checks the token's scopes. `blocks.validate`, `oauth.v2.exchange` and
+`{"detail": "Not Found"}` 404 on a method the index lists, where real checks the token's scopes, but
+for those that answer `invalid_code`. `blocks.validate`, `oauth.v2.exchange` and
 `tooling.tokens.rotate`, whose answer turns on the arguments sent, are left to the router, but for a
 credential sent that does not resolve, which the first and last refuse as any method does, and a
 `GET` of `blocks.validate`, which is `unsupported_http_method`; so are a path ending in `/`, the
-names `.` and `..`, and a name after two `/`s, which real reads as that name. A name holding one of
-the five escaped bytes, or a `%` that starts no escape, which real's front end answers itself, or
-ending in one of the six real drops from a name's end, gets real's 404 page, but for a `%2F` at its
-end, which ends the path in `/`.
+names `.` and `..`, and a name after two `/`s, which real reads as that name. A name holding `%00`,
+`%0A`, `%2F`, `%3F`, `%5C` or a `%` that starts no escape, which real's front end answers itself, or
+ending in `%09`, `%0A`, `%0B`, `%0D`, `%20` or `%2B`, which real drops from a name's end, gets
+real's 404 page, but for a `%2F` at its end, which ends the path in `/`.
 
 A POST whose form or multipart type names a charset is answered with real's `superfluous_charset`
 warning, and one with a body under any other type that names none with `missing_charset`, each in
