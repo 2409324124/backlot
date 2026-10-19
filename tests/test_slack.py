@@ -13,6 +13,7 @@ from fastapi.responses import JSONResponse
 from backlot import store, synth
 from backlot.routers import slack
 from tests._helpers import client_for, corpus_client, crawl_slack, db_count, tiny_corpus, tok
+from tests.test_atlassian import _sent_as
 
 _FORM = "application/x-www-form-urlencoded"
 _MULTIPART = "multipart/form-data; boundary=b"
@@ -514,8 +515,9 @@ def test_slack_info_answers_one_shape_whoever_asks(client, admin_h, tokens):
         ("conversations.replies", {"ts": "1700000000.000100"}, "thread_not_found"),
     ],
 )
+@pytest.mark.parametrize("sent_as", ["query", "form", "multipart"])
 def test_slack_by_id_methods_refuse_a_channel_the_caller_cannot_see(
-    client, admin_h, tokens, method, extra, when_visible
+    client, admin_h, tokens, method, extra, when_visible, sent_as
 ):
     """`conversations.list` scopes by ACL; the methods that resolve a channel by id did not, so an
     id was enough for any authenticated principal to confirm a private room, read its name, topic,
@@ -530,19 +532,31 @@ def test_slack_by_id_methods_refuse_a_channel_the_caller_cannot_see(
     channel at all — every one of the eight answers is `channel_not_found`. NOT the `not_in_channel`
     that `conversations.history` also documents: that is the case where the token can SEE the
     channel and has not joined it, which is a public channel here and never refused, and the other
-    three methods do not document the error at all."""
+    three methods do not document the error at all. The arguments go in the query string, a form
+    body or a multipart one (``sent_as``), and each answers the same."""
     private = _private_channel(client, admin_h)
+
+    def ask(headers, params):
+        if sent_as == "query":
+            return client.get(f"/slack/api/{method}", headers=headers, params=params).json()
+        if sent_as == "form":
+            return client.post(f"/slack/api/{method}", headers=headers, data=params).json()
+        parts = b"".join(
+            f'--b\r\nContent-Disposition: form-data; name="{k}"\r\n\r\n{v}\r\n'.encode()
+            for k, v in params.items()
+        )
+        h = {**headers, "Content-Type": _MULTIPART}
+        return client.post(f"/slack/api/{method}", headers=h, content=parts + b"--b--\r\n").json()
+
     hidden_and_made_up = ({"channel": private["id"]}, {"channel": "C0000000000"})
     for email in ("ava@acme.com", "bob@acme.com"):
         h = {"Authorization": f"Bearer {tokens[email]}"}
         for params in hidden_and_made_up:
-            j = client.get(f"/slack/api/{method}", headers=h, params={**params, **extra}).json()
+            j = ask(h, {**params, **extra})
             assert j == {"ok": False, "error": "channel_not_found"}, (email, params)
 
     def answer(headers, channel):
-        j = client.get(
-            f"/slack/api/{method}", headers=headers, params={"channel": channel, **extra}
-        ).json()
+        j = ask(headers, {"channel": channel, **extra})
         return j.get("error") if not j["ok"] else None
 
     # The test is visibility, NOT membership: the one person who may read it is answered on the
@@ -2507,6 +2521,9 @@ def test_slack_post_charset_warning_on_a_refusal(
         ("POST", None, b"", {}),
         ("POST", "", b"{}", "missing_post_type"),
         # The media type, as sent; a form type read as one passes
+        ("POST", "application/x-www-form-urlencoded\xa0", b"a=b", ({"a": "b"}, "missing_charset")),
+        ("POST", "application/x-www-form-urlencoded\x85", b"a=b", ({"a": "b"}, "missing_charset")),
+        ("POST", "\xa0application/x-www-form-urlencoded", b"a=b", "invalid_post_type"),
         (
             "POST",
             "text/plain; boundary=b",
@@ -2546,6 +2563,8 @@ def test_slack_post_charset_warning_on_a_refusal(
             "invalid_post_type",
         ),
         # The charset
+        ("POST", "application/json;\xa0charset=latin1", b"{}", ({}, "missing_charset")),
+        ("POST", "application/json;\tcharset=latin1", b"{}", ({}, "missing_charset")),
         ("POST", "application/json; charset=utf8", b"{}", {}),
         (
             "POST",
@@ -2633,6 +2652,90 @@ def test_slack_post_charset_warning_on_a_refusal(
         ("POST", _FORM, b"a%00[b]=c", {"a": "c"}),
         ("POST", _FORM, b"1[a]=b", "invalid_array_arg"),
         # A multipart body
+        (
+            "POST",
+            "multipart/form-data;\xa0boundary=b",
+            b'--b\r\nContent-Disposition: form-data; name="a"\r\n\r\nb\r\n--b--\r\n',
+            {"a": "b"},
+        ),
+        (
+            "POST",
+            "multipart/form-data;\tboundary=b",
+            b'--b\r\nContent-Disposition: form-data; name="a"\r\n\r\nb\r\n--b--\r\n',
+            {"a": "b"},
+        ),
+        (
+            "POST",
+            "multipart/form-data; xboundary=b",
+            b'--b\r\nContent-Disposition: form-data; name="a"\r\n\r\nb\r\n--b--\r\n',
+            {"a": "b"},
+        ),
+        (
+            "POST",
+            "multipart/form-data; foo=1boundary=b",
+            b'--b\r\nContent-Disposition: form-data; name="a"\r\n\r\nb\r\n--b--\r\n',
+            {"a": "b"},
+        ),
+        (
+            "POST",
+            "multipart/form-data; boundary=b; boundary=c",
+            b'--b\r\nContent-Disposition: form-data; name="a"\r\n\r\nb\r\n--b--\r\n',
+            {"a": "b"},
+        ),
+        (
+            "POST",
+            "multipart/form-data; boundary =b",
+            b'--b\r\nContent-Disposition: form-data; name="a"\r\n\r\nb\r\n--b--\r\n',
+            {"a": "b"},
+        ),
+        (
+            "POST",
+            "multipart/form-data; boundary= b",
+            b'--b\r\nContent-Disposition: form-data; name="a"\r\n\r\nb\r\n--b--\r\n',
+            "invalid_form_data",
+        ),
+        (
+            "POST",
+            "multipart/form-data; boundary=b c",
+            b'--b c\r\nContent-Disposition: form-data; name="a"\r\n\r\nb\r\n--b c--\r\n',
+            {"a": "b"},
+        ),
+        (
+            "POST",
+            "multipart/form-data; boundary=b c",
+            b'--b\r\nContent-Disposition: form-data; name="a"\r\n\r\nb\r\n--b--\r\n',
+            "invalid_form_data",
+        ),
+        (
+            "POST",
+            "multipart/form-data; boundary=b,c",
+            b'--b\r\nContent-Disposition: form-data; name="a"\r\n\r\nb\r\n--b--\r\n',
+            {"a": "b"},
+        ),
+        (
+            "POST",
+            "multipart/form-data; boundary=b,c",
+            b'--b,c\r\nContent-Disposition: form-data; name="a"\r\n\r\nb\r\n--b,c--\r\n',
+            "invalid_form_data",
+        ),
+        (
+            "POST",
+            "multipart/form-data; boundary=b;c",
+            b'--b\r\nContent-Disposition: form-data; name="a"\r\n\r\nb\r\n--b--\r\n',
+            {"a": "b"},
+        ),
+        (
+            "POST",
+            'multipart/form-data; boundary="b;c"',
+            b'--b;c\r\nContent-Disposition: form-data; name="a"\r\n\r\nb\r\n--b;c--\r\n',
+            {"a": "b"},
+        ),
+        (
+            "POST",
+            "multipart/form-data; Boundary=b",
+            b'--b\r\nContent-Disposition: form-data; name="a"\r\n\r\nb\r\n--b--\r\n',
+            "invalid_form_data",
+        ),
         (
             "POST",
             _MULTIPART,
@@ -2884,14 +2987,18 @@ def test_slack_reads_a_post_body_as_real_reads_it(client, verb, content_type, bo
     """`api.test`, sent no token, answers each row as real answered it (the POST bodies section of
     ``backlot.routers.slack`` dates the measurement): ``want`` is the error a refused body is
     answered with, or the arguments a served one echoes and the warning real adds beside them.
-    ``content_type`` is one header's value, or the headers sent when there are several."""
+    ``content_type`` is one header's value, or the headers sent when there are several; one with a
+    byte past ASCII goes as its latin-1 bytes (:func:`tests.test_atlassian._sent_as`)."""
     if content_type is None:
         headers = []
     elif isinstance(content_type, str):
         headers = [("content-type", content_type)]
     else:
         headers = content_type
-    r = client.request(verb, "/slack/api/api.test", headers=headers, content=body)
+    if any(ord(c) > 0x7F for _, value in headers for c in value):
+        r = _sent_as(client, verb, "/slack/api/api.test", dict(headers), body)
+    else:
+        r = client.request(verb, "/slack/api/api.test", headers=headers, content=body)
     if isinstance(want, str):
         expected = {"ok": False, "error": want}
     else:

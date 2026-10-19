@@ -287,12 +287,12 @@ def post_content_type(request: Request) -> str:
 
 
 def _named_charset(content_type: str) -> str | None:
-    """The charset a Content-Type names, or None: the first parameter spelt `charset` whose value
-    does not start with a space and holds more than `"` and spaces. `CHARSET=utf-8`,
-    `charset =utf-8`, `charset= utf-8` and `charset=""` name none, and `charset=; charset=latin1`
-    names `latin1`."""
+    """The charset a Content-Type names, or None: the first parameter spelt `charset`, once the
+    spaces around it are stripped, whose value does not start with a space and holds more than `"`
+    and spaces. `CHARSET=utf-8`, `charset =utf-8`, `charset= utf-8`, `charset=""` and a tab or a
+    U+00A0 byte before `charset` name none, and `charset=; charset=latin1` names `latin1`."""
     for param in content_type.split(";")[1:]:
-        name, _, value = param.strip().partition("=")
+        name, _, value = param.strip(" ").partition("=")
         if name == "charset" and value[:1] != " " and value.strip('" '):
             return value
     return None
@@ -370,22 +370,27 @@ def _multipart_parts(content_type: str, body: bytes) -> list[tuple[bytes, bytes 
     """The (name, value) of each part of a multipart body, the value None for a file's part; None
     for a body real cannot read, and no part for one with no delimiter.
 
-    The boundary is the first parameter spelt `boundary`, `"` stripped; a delimiter is a line that
-    is `--` and the boundary, ended by CRLF or LF alike, with nothing after it, and the text before
-    the first one is skipped. A part's value is what follows its blank line, up to the line break
-    before the next delimiter or the closing one, or to the end of the body, less a line break that
-    ends it. Its name is the last `name` parameter of its `Content-Disposition`, quoted or not, and
-    a part with a `filename` is a file's, which is no argument, each parameter's name read in any
-    case (`NAME="a"` names the part, and `FILENAME="x"` makes it a file's) and only with a `=`. A
-    part with no name and a boundary missing or empty are bodies real cannot read, and so, with no
-    part read, is a body with no delimiter, one that is only the closing delimiter included.
+    The boundary is what follows the first `=` after the first `boundary` in the Content-Type, in
+    that case, wherever it is (`xboundary=b` and `boundary =b` are `b`): up to the next `"` if it
+    starts with one, else up to a `,` or a `;`, a space after the `=` included. A delimiter is a
+    line that is `--` and the boundary, ended by CRLF or LF alike, with nothing after it, and the
+    text before the first one is skipped. A part's value is what follows its blank line, up to the
+    line break before the next delimiter or the closing one, or to the end of the body, less a line
+    break that ends it. Its name is the last `name` parameter of its `Content-Disposition`, quoted
+    or not, and a part with a `filename` is a file's, which is no argument, each parameter's name
+    read in any case (`NAME="a"` names the part, and `FILENAME="x"` makes it a file's) and only with
+    a `=`. A part with no name and a boundary missing or empty are bodies real cannot read, and so,
+    with no part read, is a body with no delimiter, one that is only the closing delimiter included.
     """
-    boundary = None
-    for param in content_type.split(";")[1:]:
-        name, _, value = param.strip().partition("=")
-        if name == "boundary":
-            boundary = value.strip('"')
-            break
+    at = content_type.find("boundary")
+    eq = content_type.find("=", at) if at != -1 else -1
+    if eq == -1:
+        return None
+    boundary = content_type[eq + 1 :]
+    if boundary.startswith('"'):
+        boundary = boundary[1:].partition('"')[0]
+    else:
+        boundary = re.split("[,;]", boundary, maxsplit=1)[0]
     if not boundary:
         return None
     delimiter = b"--" + boundary.encode("latin-1")
