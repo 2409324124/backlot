@@ -3806,6 +3806,7 @@ _RETIRED = (
                 "a/b.c",
                 "/a/b.c",
                 "/a-b",
+                "a\\b.c",
             )
         ),
         ("POST", "nonexistent-xyz", None, "application/json", b"{}", _PAGE),
@@ -3874,6 +3875,7 @@ _RETIRED = (
         ("GET", "%2E%2E", None, None, None, _LEFT),
         ("GET", "/api.test", None, None, None, _LEFT),
         ("GET", "//emoji.list", "bogus", None, None, _LEFT),
+        ("GET", "\\api.test", None, None, None, _LEFT),
         ("POST", "%2E", None, None, b"{}", _LEFT),
         ("POST", "%2E%2E", None, None, b"{}", _LEFT),
         ("OPTIONS", "nonexistent.method", None, None, None, _LEFT),

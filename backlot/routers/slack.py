@@ -784,10 +784,10 @@ UNSERVED_METHODS = ("GET", "POST", "PUT", "PATCH", "DELETE")
 
 #: A path segment this server reads as a method's name once it is decoded (`a%2Eb` is `a.b`): ASCII
 #: letters, digits and `.`, but not `.` or `..` alone (:func:`method_name`); any other byte in it,
-#: but a `/` at its end or before a name (:func:`unserved_answer`), is answered with real's 404
-#: page. Real answers `-`, `_` and the bytes past ASCII so, but refuses `%00`, `%2F`, `%3F`, `%5C`
-#: and a `%` that starts no escape at its front end, and `%0A` but at a name's end, where it drops
-#: `%09`, `%0A`, `%0B`, `%0D`, `%20` and `%2B`.
+#: but a `/` at its end, or a `/` or `\` before a name (:func:`unserved_answer`), is answered with
+#: real's 404 page. Real answers `-`, `_` and the bytes past ASCII so, but refuses `%00`, `%2F`,
+#: `%3F`, `%5C` and a `%` that starts no escape at its front end, and `%0A` but at a name's end,
+#: where it drops `%09`, `%0A`, `%0B`, `%0D`, `%20` and `%2B`.
 _METHOD_NAME = re.compile(r"[0-9A-Za-z.]+")
 #: The methods Slack has, by name, for a path no route here matches: those Slack's reference index
 #: lists (``backlot/data/slack_methods.json``, written by ``scripts/gen_slack_methods.py``). The
@@ -925,13 +925,14 @@ def unserved_answer(request: Request) -> Response | None:
     no method. A credential that resolves, on a method :data:`_OTHER_ANSWERS` does not hold, is left
     to the router, and so is a method of :data:`_ANSWERED_BY_ARGUMENTS` but for a credential it
     refuses and a `GET` of `blocks.validate`, and so are an empty name, the names `.` and `..`, a
-    path ending in `/`, and a name after two or more `/`s, which real reads as that name, its
-    slashes merged (`//api.test` is `api.test`, slack.com/api, 2026-10-20)."""
+    path ending in `/`, and a name after two or more `/`s or a backslash, which real reads as that
+    name (`//api.test` and `\\api.test` are its `api.test`, slack.com/api, 2026-10-20)."""
     path = request.scope["path"]
     rest = path.removeprefix("/slack/api/")
     if rest in ("", ".", "..") or path.endswith("/"):
         return None
-    if rest.startswith("/") and _METHOD_NAME.fullmatch(rest.lstrip("/")):
+    lead = rest.replace("\\", "/")
+    if lead.startswith("/") and _METHOD_NAME.fullmatch(lead.lstrip("/")):
         return None
     name = method_name(path)
     if name is None:
