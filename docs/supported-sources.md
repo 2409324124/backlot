@@ -777,8 +777,8 @@ credential sent that does not resolve, which the first and last refuse as any me
 names `.` and `..`, and a name after two `/`s or a `\`, which real reads as that name. A name
 holding `%00`, `%0A`, `%2F`, `%3F`, `%5C` or a `%` that starts no escape, which real's front end
 answers itself, or ending in `%09`, `%0A`, `%0B`, `%0D`, `%20` or `%2B`, which real drops from a
-name's end, gets real's 404 page, but for a `%2F` at its end or before a method's name, which leave
-the path to the router.
+name's end, gets real's 404 page, but for a `%2F` or `%5C` before a method's name, and a `%2F` at
+its end, which leave the path to the router.
 
 A POST whose form or multipart type names a charset is answered with real's `superfluous_charset`
 warning, and one with a body under any other type that names none with `missing_charset`, each in

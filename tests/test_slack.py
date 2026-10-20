@@ -3863,8 +3863,8 @@ _RETIRED = (
         # a method a route serves, for another HTTP method, is the route's to answer
         *((verb, m, None, None, None, _ROUTED) for verb, m in _ROUTED_ROWS),
         # left to the router: a token that resolves, a method of `slack._ANSWERED_BY_ARGUMENTS`, a
-        # path ending in `/`, the dot segments, a name after two `/`s, and a method outside
-        # `slack.UNSERVED_METHODS`, its body unread
+        # path ending in `/`, the dot segments, a name after two `/`s or a `\\`, and a method
+        # outside `slack.UNSERVED_METHODS`, its body unread
         ("GET", "emoji.list", "admin", None, None, _LEFT),
         ("GET", "files.getUploadURLExternal", "admin", None, None, _LEFT),
         ("POST", "blocks.validate", None, _FORM, b"", _LEFT),

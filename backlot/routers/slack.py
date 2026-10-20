@@ -794,9 +794,9 @@ _METHOD_NAME = re.compile(r"[0-9A-Za-z.]+")
 #: index holds each method the baseline's 2020 description lists but ten (`oauth.token`, three
 #: `workflows` ones and six `apps.permissions` ones), which real answers `unknown_method` for, as
 #: for a name it never had, whatever the credential, one that resolves included. Measured on
-#: 2026-10-20 with no token and with a bogus one, the 164 the baseline lists and the 174 only the
-#: index lists, by `GET` and by `POST`, answered the credential's refusal (`not_authed`,
-#: `invalid_auth`) but for those ten and those :data:`_OTHER_ANSWERS` and
+#: 2026-10-20 with no token and with a bogus one, the 164 the baseline lists and no route here
+#: serves and the 174 only the index lists, by `GET` and by `POST`, answered the credential's
+#: refusal (`not_authed`, `invalid_auth`) but for those ten and those :data:`_OTHER_ANSWERS` and
 #: :data:`_ANSWERED_BY_ARGUMENTS` hold.
 _PUBLISHED = frozenset(
     json.loads(
