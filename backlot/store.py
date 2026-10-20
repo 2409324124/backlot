@@ -1152,11 +1152,13 @@ def list_documents(
     exclude_trashed=False,
     title=None,
     subtype=None,
+    exclude_ids=(),
 ) -> list[sqlite3.Row]:
     # state: only valid for source_type="github" — it's the only items table with a `state`
     # column; passing it for any other source_type raises sqlite3.OperationalError. Likewise
-    # exclude_trashed, which only gdrive_files has a column for. title matches the whole title,
-    # ignoring ASCII case. subtype is Confluence's content type, where a row with none is a page.
+    # exclude_trashed, which only gdrive_files has a column for, and exclude_ids, which names rows
+    # by an `id` column. title matches the whole title, ignoring ASCII case. subtype is
+    # Confluence's content type, where a row with none is a page.
     tbl = table(source_type)
     sql = f"SELECT * FROM {tbl} WHERE 1=1"
     params: list = []
@@ -1166,6 +1168,7 @@ def list_documents(
         params.append(state)
     if exclude_trashed:
         sql += " AND COALESCE(trashed, 0) = 0"
+    sql = _exclude_ids(sql, params, exclude_ids)
     if title is not None:
         sql += " AND title = ? COLLATE NOCASE"
         params.append(title)
@@ -1905,6 +1908,22 @@ def drive_folder_has_visible(conn, folder, visible_ids=None) -> bool:
     return conn.execute(sql, [folder, *params]).fetchone() is not None
 
 
+def _exclude_ids(sql: str, params: list, ids) -> str:
+    """``sql`` with the rows whose ``id`` is one of ``ids`` left out."""
+    ids = list(ids)
+    if not ids:
+        return sql
+    params.extend(ids)
+    return sql + f" AND id NOT IN ({','.join('?' for _ in ids)})"
+
+
+def drive_trashed(conn, visible_ids=None) -> list[sqlite3.Row]:
+    """The id and author of each trashed Drive file this caller can see."""
+    clause, params = _acl_clause("google_drive", visible_ids=visible_ids)
+    sql = f"SELECT id, author_email FROM gdrive_files WHERE COALESCE(trashed, 0) = 1{clause}"
+    return conn.execute(sql, params).fetchall()
+
+
 def drive_usage_bytes(conn, visible_ids=None) -> tuple[int, int]:
     """``(bytes stored, bytes in the trash)`` over the Drive files this caller can see — what
     ``about.get`` serves as ``storageQuota``. One query, so the quota costs a single scan.
@@ -1997,6 +2016,7 @@ def count_documents(
     roots_only=False,
     title=None,
     subtype=None,
+    exclude_ids=(),
 ) -> int:
     # state: only valid for source_type="github" — it's the only items table with a `state`
     # column; passing it for any other source_type raises sqlite3.OperationalError. Likewise
@@ -2012,6 +2032,7 @@ def count_documents(
         params.append(state)
     if exclude_trashed:
         sql += " AND COALESCE(trashed, 0) = 0"
+    sql = _exclude_ids(sql, params, exclude_ids)
     if roots_only:
         sql += _GMAIL_ROOT
     if title is not None:
