@@ -454,19 +454,20 @@ class _Rfc1867Buffer:
         if not self.find_boundary():
             return None
         headers: list[tuple[bytes, bytes]] = []
-        key = value = b""
+        key, pieces = b"", []
         while line := self.get_line():
             colon = line.find(b":") if line[0] not in _C_SPACE else -1
             if colon != -1:
-                if value and key:
-                    headers.append((key, value))
-                    value = b""
+                if pieces and key:
+                    headers.append((key, b"".join(pieces)))
+                    pieces = []
                 key = line[:colon]
-                value += line[colon + 1 :].lstrip(_C_SPACE)
-            elif value:
-                value += line
-        if value and key:
-            headers.append((key, value))
+                if rest := line[colon + 1 :].lstrip(_C_SPACE):
+                    pieces.append(rest)
+            elif pieces:
+                pieces.append(line)
+        if pieces and key:
+            headers.append((key, b"".join(pieces)))
         return headers
 
     def read_body(self) -> bytes:
@@ -499,11 +500,11 @@ class _Rfc1867Buffer:
         return value
 
 
-def _getword(text: bytes, stop: int) -> tuple[bytes, bytes]:
-    """`php_ap_getword`: the text up to the first ``stop`` byte outside quotes, and what follows the
-    run of ``stop`` bytes there. A `"` or `'` opens a quote its own kind closes, a `\\` before
-    that quote excepted."""
-    pos = 0
+def _getword(text: bytes, stop: int, start: int = 0) -> tuple[bytes, int]:
+    """`php_ap_getword`: the text from ``start`` up to the first ``stop`` byte outside quotes, and
+    the offset past the run of ``stop`` bytes there. A `"` or `'` opens a quote its own kind
+    closes, a `\\` before that quote excepted."""
+    pos = start
     while pos < len(text) and text[pos] != stop:
         quote = text[pos]
         if quote in (0x22, 0x27):
@@ -517,11 +518,11 @@ def _getword(text: bytes, stop: int) -> tuple[bytes, bytes]:
         else:
             pos += 1
     if pos >= len(text):
-        return text, b""
-    word = text[:pos]
+        return text[start:], len(text)
+    word = text[start:pos]
     while pos < len(text) and text[pos] == stop:
         pos += 1
-    return word, text[pos:]
+    return word, pos
 
 
 def _getword_conf(text: bytes) -> bytes:
@@ -595,16 +596,17 @@ def _multipart_parts(content_type: str, body: bytes) -> list[tuple[bytes, bytes 
         if disposition is None:
             continue
         name = filename = None
-        rest = disposition.lstrip(_C_SPACE)
-        while rest:
-            pair, rest = _getword(rest, 0x3B)
-            rest = rest.lstrip(_C_SPACE)
+        at = len(disposition) - len(disposition.lstrip(_C_SPACE))
+        while at < len(disposition):
+            pair, at = _getword(disposition, 0x3B, at)
+            while at < len(disposition) and disposition[at] in _C_SPACE:
+                at += 1
             if b"=" in pair:
-                key, value = _getword(pair, 0x3D)
+                key, eq = _getword(pair, 0x3D)
                 if key.lower() == b"name":
-                    name = _getword_conf(value)
+                    name = _getword_conf(pair[eq:])
                 elif key.lower() == b"filename":
-                    filename = _getword_conf(value)
+                    filename = _getword_conf(pair[eq:])
         if filename is None and name is not None:
             parts.append((name, buffer.read_body()))
             continue
