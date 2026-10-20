@@ -2275,10 +2275,11 @@ _DRIVE_DRIVE_FIELDS = frozenset(
 )
 # What a name in a `fields` mask is made of, as real read each character between `id,b` and `x` on
 # 2026-10-20: the ASCII below, and past ASCII the name characters of XML 1.0's fourth edition
-# (Appendix B), whose table expat's is. None of the 1,345 code points past ASCII it was sent, each
-# from U+0080 to U+02FF and the rest chosen by category and where that table and `str.isalnum` part
-# (`ª` and `²` are not in it, `·` and U+0308 are), was read otherwise. Every other character, white
-# space other than a space or a tab among them, made the whole mask the 400's subject.
+# (Appendix B), whose table expat's is. None of the 1,345 code points past ASCII it was sent, every
+# one from U+0080 to U+02FF and the rest chosen by category and where that table and `str.isalnum`
+# part (`ª` and `²` are not in it, `·` and U+0308 are), was read otherwise. Every other character it
+# was sent, white space other than a space or a tab among them, made the whole mask the 400's
+# subject.
 _MASK_NAME = frozenset("$+-.:_" + string.ascii_letters + string.digits)
 # The last name of a path an empty group, `owners()`, ends.
 _MASK_EMPTY = "()"
@@ -2383,6 +2384,19 @@ def _mask_keys(paths, under: str | None = None) -> set[str] | None:
             return None
     keys = {p[0] for p in paths if not (len(p) > 1 and p[1] == _MASK_EMPTY)}
     return None if "*" in keys else keys
+
+
+def _drive_refuse_a_trailing_comma(request: Request) -> None:
+    """Refuse a `fields` mask whose last character but white space (`string.whitespace`) is a comma,
+    with the 400 naming the whole mask, on a metadata read. Real answered it after the typed and
+    range refusals and ahead of the rest, measured 2026-10-20 beside a bad `pageToken`, `q` and
+    `orderBy`, an `orderBy` naming a key twice or `starred` after another, `fullText` beside an
+    `orderBy`, `includeItemsFromAllDrives` alone, `acknowledgeAbuse`, `useDomainAdminAccess`, a
+    repeated `pageSize` and a file that does not exist. Any other mask that is not one, and a name a
+    resource does not have, came after each of those, and a download read no mask."""
+    mask = gerr.first_repeat(request.query_params, "fields")
+    if mask is not None and mask.rstrip(string.whitespace).endswith(","):
+        raise gerr.invalid_parameter("fields", f"Invalid field selection {mask}")
 
 
 def _drive_mask(fields: str | None) -> list[tuple[str, ...]] | None:
@@ -2843,6 +2857,7 @@ async def drive_shared_drives(request: Request):
     _drive_page_size_in_range(
         _drive_typed(request, "useDomainAdminAccess", page_size=True)["pageSize"], 100
     )
+    _drive_refuse_a_trailing_comma(request)
     # A `q` it does not take comes after the typed and range refusals and ahead of a bad
     # `pageToken` and the 403 below, measured 2026-10-20 by sending one of each beside it.
     _drive_q_parse(gerr.first_repeat(request.query_params, "q") or "", _DRIVES_Q)
@@ -2853,7 +2868,8 @@ async def drive_shared_drives(request: Request):
     if _drive_true(request, "useDomainAdminAccess"):
         raise gerr.domain_admin_privilege_required()
     body = {"kind": "drive#driveList", "drives": []}
-    # The mask last, after `q`, `pageToken` and the 403, as `drive_files_permissions` reads it.
+    # The rest of the mask's refusals last: real answered a name a drive does not have after a bad
+    # `q`, a bad `pageToken` and the 403, each sent beside it, measured 2026-10-20.
     mask = gerr.first_repeat(request.query_params, "fields")
     projected = _drive_project_listing(body, mask, "drives", _DRIVE_DRIVE_FIELDS)
     return body if projected is None else projected
@@ -2877,7 +2893,8 @@ async def drive_files_list(request: Request):
     # 403 between `orderBy` and `q`, measured 2026-10-04, the 403 for an `orderBy` on a `q` with a
     # `fullText` term between `q` and `pageToken`, measured 2026-10-05 and 2026-10-07, and the 500
     # for `starred` after another key between `pageToken` and `fields`, measured 2026-10-04 and
-    # 2026-10-07.
+    # 2026-10-07. A `fields` ending in a comma comes right after `pageSize`, as
+    # `_drive_refuse_a_trailing_comma` says.
     params = request.query_params
     typed = _drive_typed(
         request,
@@ -2888,6 +2905,7 @@ async def drive_files_list(request: Request):
         page_size=True,
     )
     limit = _drive_page_size(typed["pageSize"])
+    _drive_refuse_a_trailing_comma(request)
     # 400 on an unusable key, 403 on a key named twice
     order = _drive_order_specs(gerr.first_repeat(params, "orderBy"))
     shared_items = _drive_true(request, "includeItemsFromAllDrives") or _drive_true(
@@ -3011,6 +3029,8 @@ async def drive_files_get(file_id: str, request: Request):
     _drive_typed(request, "acknowledgeAbuse", "supportsAllDrives", "supportsTeamDrives")
     if download:
         caller = _require(request, download=True)
+    else:
+        _drive_refuse_a_trailing_comma(request)
     # Measured 2026-10-04: before the lookup, so a file that does not exist is refused alike, and
     # before `fields`. Inside a batch real checks a part's own flag only when the part is the
     # batch's one part that is not a download, measured 2026-10-05 beside downloads, other reads and
@@ -3131,6 +3151,7 @@ async def drive_files_permissions(file_id: str, request: Request):
         request, "supportsAllDrives", "supportsTeamDrives", "useDomainAdminAccess", page_size=True
     )["pageSize"]
     _drive_page_size_in_range(sizes, 100)
+    _drive_refuse_a_trailing_comma(request)
     # Refused in real's order, measured by sending two bad values at once: the `pageToken`
     # refusals, a repeated `pageSize`'s 500, the domain-administrator refusal and the file lookup
     # below, and a token issued for another file last, in `_drive_permission_page`. The places of
@@ -3156,9 +3177,8 @@ async def drive_files_permissions(file_id: str, request: Request):
     else:
         permissions = _drive_permissions(conn, row["id"])
     body = _drive_permission_page(permissions, file_id, size, token)
-    # The mask is read last: real answered a bad one after the typed, range and `pageToken`
-    # refusals, the domain-administrator 404 and the file lookup, each sent beside it, measured
-    # 2026-10-20.
+    # Real answered a name a permission does not have after the `pageToken` refusals, the
+    # domain-administrator 404 and the file lookup, each sent beside it, measured 2026-10-20.
     mask = gerr.first_repeat(request.query_params, "fields")
     projected = _drive_project_listing(body, mask, "permissions", _DRIVE_PERMISSION_FIELDS)
     return body if projected is None else JSONResponse(projected)

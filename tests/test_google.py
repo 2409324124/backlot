@@ -1951,9 +1951,9 @@ def _mask_refused(subject: str) -> tuple:
 
 _DOC = "/drive/v3/files/{doc}"
 _PERMS_OF_DOC = "/drive/v3/files/{doc}/permissions"
-# Masks real refused, measured 2026-10-20 against a Google Workspace member's file, its permissions
-# and its `drives.list`: a mask that is not one is named whole, an unknown name alone, the first in
-# the mask's order.
+# Masks real refused, sent for a Google Workspace member's file, its permissions and its
+# `drives.list`: a mask that is not one is named whole, an unknown name alone, the first in the
+# mask's order.
 _MASKS_REFUSED = (
     [
         (_DOC, mask, mask)
@@ -2006,7 +2006,69 @@ _FIELDS_REQUIRED = (
     "fields",
     "The 'fields' parameter is required for this method.",
 )
-# Masks `about` answered with its missing-mask 400, measured 2026-10-20 beside `_MASKS_REFUSED`.
+_NOT_FOUND = (404, "notFound", "fileId", None)
+_FULLTEXT = "q=" + quote("fullText contains 'a'")
+# Where real answered a mask ending in a comma among a route's other refusals, each sent beside it,
+# and, as controls, where it answered a mask that is not one in another way.
+_MASK_ORDER = (
+    [("/drive/v3/files", "files(id),", "pageSize=NOPE", _TYPED)]
+    + [("/drive/v3/files", "files(id),", "pageSize=0", _RANGE)]
+    + [
+        ("/drive/v3/files", mask, extra, _mask_refused(mask))
+        for mask in ["files(id),", "files(id),\t"]
+        for extra in ["pageToken=bad", "q=bogus", "orderBy=bogus", "orderBy=name,name"]
+        + ["orderBy=name,starred", f"{_FULLTEXT}&orderBy=name", "includeItemsFromAllDrives=true"]
+        + ["pageSize=1&pageSize=2"]
+    ]
+    + [
+        ("/drive/v3/files", mask, "q=bogus", _Q_REFUSED)
+        for mask in ["files(id,,name)", "files(id,)", "files(", "\n", "bogus"]
+    ]
+    + [("/drive/v3/files", "bogus", "orderBy=bogus", (400, "invalid", "orderBy", "Invalid Value"))]
+    + [
+        (
+            "/drive/v3/files",
+            "bogus",
+            "pageToken=bad",
+            (400, "invalid", "pageToken", "Invalid Value"),
+        )
+    ]
+    + [
+        ("/drive/v3/files/{nope}", mask, "", _mask_refused(mask))
+        for mask in ["id,", "id, ", "id,\t", "id,\n", "id," + chr(0x0B), ",", "id,,", "bogus,"]
+        + ["owners(kind,"]
+    ]
+    + [
+        ("/drive/v3/files/{nope}", mask, "", _NOT_FOUND)
+        for mask in ["id,,name", "owners(", "id)", "\n", "id name", ",id", "bogus", "files(id,)"]
+        + ["id," + chr(0x1C), "id," + chr(0xA0)]
+    ]
+    + [(_DOC, "id,", "acknowledgeAbuse=true", _mask_refused("id,"))]
+    + [(_DOC, "id,", "supportsAllDrives=NOPE", _TYPED)]
+    + [("/drive/v3/files/{nope}/permissions", "kind,", "", _mask_refused("kind,"))]
+    + [
+        ("/drive/v3/files/{nope}/permissions", mask, "", _NOT_FOUND)
+        for mask in ["kind,,permissions", "permissions(", "\n"]
+    ]
+    + [
+        (path, "kind,", extra, expected)
+        for path in (_PERMS_OF_DOC, "/drive/v3/drives")
+        for extra, expected in [("pageSize=NOPE", _TYPED), ("useDomainAdminAccess=NOPE", _TYPED)]
+        + [("pageSize=0", _RANGE), ("pageSize=1&pageSize=2", _mask_refused("kind,"))]
+        + [("useDomainAdminAccess=true", _mask_refused("kind,"))]
+    ]
+    + [(_PERMS_OF_DOC, "kind,", "supportsAllDrives=NOPE", _TYPED)]
+    + [(_PERMS_OF_DOC, "kind,", "pageToken=bad", _mask_refused("kind,"))]
+    + [
+        ("/drive/v3/drives", "kind,", extra, _mask_refused("kind,"))
+        for extra in ["pageToken=x", "q=bogus"]
+    ]
+    + [("/drive/v3/drives", mask, "q=bogus", _Q_REFUSED) for mask in ["kind,,drives", "\n"]]
+    + [(_PERMS_OF_DOC, "kind,", "fields=kind", _mask_refused("kind,"))]
+    + [(_PERMS_OF_DOC, "kind", "fields=" + quote("kind,"), _SERVED)]
+    + [(_DOC, "id", "fields=" + quote("id,"), _SERVED)]
+)
+# Masks `about` answered with the missing-mask 400 `_drive_about_field_keys` describes.
 _ABOUT_MASKS_REQUIRED = ["\n", chr(0x1C), chr(0x3000), "user()", "user( )", "kind()"]
 # What a member's `drives.list` answered each `q` with, as `_DRIVES_Q` records.
 _DRIVES_Q_TAKEN = [
@@ -2157,6 +2219,7 @@ _DRIVE_CHECK_ROWS = [
     # a mask, and where its refusal falls among the others
     *[(path, f"fields={quote(mask)}", "admin", _mask_refused(subject)) for path, mask, subject in _MASKS_REFUSED],
     *[("/drive/v3/about", f"fields={quote(mask)}", "admin", _FIELDS_REQUIRED) for mask in _ABOUT_MASKS_REQUIRED],
+    *[(path, f"fields={quote(mask)}" + (extra and f"&{extra}"), "admin", expected) for path, mask, extra, expected in _MASK_ORDER],
     *[(path, "fields=bogus&fields=kind", "admin", _mask_refused("bogus")) for path in (_PERMS_OF_DOC, "/drive/v3/drives")],
     *[(path, "fields=kind&fields=bogus", "admin", _SERVED) for path in (_PERMS_OF_DOC, "/drive/v3/drives")],
     *[(path, f"fields=bogus&{query}", "admin", _TYPED) for path in (_PERMS_OF_DOC, "/drive/v3/drives") for query in ("pageSize=NOPE", "useDomainAdminAccess=NOPE")],
@@ -2377,10 +2440,10 @@ def test_drive_a_blank_fields_mask_selects_nothing(client, admin_h, mask):
     assert about["message"] == "The 'fields' parameter is required for this method."
 
 
-# What real answered each mask with, measured 2026-10-20 beside the refusals in `_MASKS_REFUSED`:
-# the top-level keys and, for a listing, each entry's keys (an empty list where every entry was left
-# with none). `None` is the default object; a documented field the file has no value for leaves it
-# out of the answer here, where real answers it.
+# What real answered each mask with, sent beside the refusals in `_MASKS_REFUSED`: the top-level
+# keys and, for a listing, each entry's keys (an empty list where every entry was left with none).
+# `None` is the default object; a documented field the file has no value for leaves it out of the
+# answer here, where real answers it.
 _MASKS_SERVED = [
     (_DOC, "id , name", {"id", "name"}, None),
     (_DOC, "id,\tname", {"id", "name"}, None),
