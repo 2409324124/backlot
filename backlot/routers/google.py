@@ -11,11 +11,13 @@ from __future__ import annotations
 
 import base64
 import datetime
+import functools
 import hashlib
 import json
 import quopri
 import re
 import string
+import xml.parsers.expat
 from contextvars import ContextVar
 from email.parser import BytesParser
 from email.utils import formataddr, getaddresses
@@ -2241,8 +2243,9 @@ def _drive_folder_name_by_id(conn, file_id: str) -> str | None:
 # Validating against it is what makes a Backlot-backed test able to catch a typo'd or stale mask.
 _DRIVE_FILE_FIELDS = frozenset(
     """
-    appProperties capabilities contentHints contentRestrictions copyRequiresWriterPermission
-    createdTime description driveId explicitlyTrashed exportLinks fileExtension folderColorRgb
+    appProperties capabilities clientEncryptionDetails contentHints contentRestrictions
+    copyRequiresWriterPermission createdTime description downloadRestrictions driveId
+    explicitlyTrashed exportLinks fileExtension folderColorRgb
     fullFileExtension hasAugmentedPermissions hasThumbnail headRevisionId iconLink id
     imageMediaMetadata inheritedPermissionsDisabled isAppAuthorized kind labelInfo
     lastModifyingUser linkShareMetadata md5Checksum mimeType modifiedByMe modifiedByMeTime
@@ -2256,64 +2259,156 @@ _DRIVE_FILE_FIELDS = frozenset(
 _DRIVE_LIST_FIELDS = frozenset({"kind", "nextPageToken", "incompleteSearch", "files"})
 
 
-def _split_mask(mask: str) -> list[str]:
-    """Split a `fields` mask on its top-level commas, so a nested group stays whole
-    (``files(id,name),nextPageToken`` -> ``['files(id,name)', 'nextPageToken']``)."""
-    out, depth, cur = [], 0, ""
-    for ch in mask:
-        if ch == "," and depth == 0:
-            out.append(cur)
-            cur = ""
-            continue
-        depth += (ch == "(") - (ch == ")")
-        depth = max(depth, 0)
-        cur += ch
-    out.append(cur)
-    return [t.strip() for t in out if t.strip()]
+# `permissions.list`'s and `drives.list`'s entries, each field the reference lists for them.
+_DRIVE_PERMISSION_FIELDS = frozenset(
+    """
+    allowFileDiscovery deleted displayName domain emailAddress expirationTime id
+    inheritedPermissionsDisabled kind pendingOwner permissionDetails photoLink role
+    teamDrivePermissionDetails type view
+""".split()
+)
+_DRIVE_DRIVE_FIELDS = frozenset(
+    """
+    backgroundImageFile backgroundImageLink capabilities colorRgb createdTime hidden id kind name
+    orgUnitId restrictions themeId
+""".split()
+)
+# What a name in a `fields` mask is made of, as real read each character between `id,b` and `x` on
+# 2026-10-20: the ASCII below, and past ASCII the name characters of XML 1.0's fourth edition
+# (Appendix B), whose table expat's is. None of the 1,345 code points past ASCII it was sent, each
+# from U+0080 to U+02FF and the rest chosen by category and where that table and `str.isalnum` part
+# (`ª` and `²` are not in it, `·` and U+0308 are), was read otherwise. Every other character, white
+# space other than a space or a tab among them, made the whole mask the 400's subject.
+_MASK_NAME = frozenset("$+-.:_" + string.ascii_letters + string.digits)
+# The last name of a path an empty group, `owners()`, ends.
+_MASK_EMPTY = "()"
 
 
-def _mask_names(mask: str) -> set[str]:
-    """The leading key of each comma-separated entry: a nested mask (``capabilities/canEdit``,
-    ``owners(emailAddress)``) selects — and is validated as — its parent key."""
-    return {t.split("/")[0].split("(")[0].strip() for t in _split_mask(mask)}
+def _mask_paths(mask: str) -> list[tuple[str, ...]]:
+    """The paths a `fields` mask selects, in its order: ``files(id,owners(kind)),kind`` is
+    ``files/id``, ``files/owners/kind`` and ``kind``, and ``files()`` is ``files`` then
+    ``_MASK_EMPTY``. A space or a tab may stand beside a name, a ``/`` or a parenthesis. A mask
+    that is not one — an empty entry, a name holding a character outside ``_MASK_NAME``, a group
+    never opened or never closed — is the 400 naming the whole mask, as real answered
+    ``id,,name``, ``files(id,)``, ``id,`` and ``owners(``; that refusal comes before any name's.
+
+    Read without recursion: real answered a group nested a thousand deep with the name it did not
+    take, not a refusal of the mask."""
+    paths: list[tuple[str, ...]] = []
+    prefixes: list[tuple[str, ...]] = [()]
+    i = 0
+
+    def refused() -> gerr.GoogleError:
+        return gerr.invalid_parameter("fields", f"Invalid field selection {mask}")
+
+    def blank() -> None:
+        nonlocal i
+        while i < len(mask) and mask[i] in " \t":
+            i += 1
+
+    def name() -> str:
+        nonlocal i
+        blank()
+        start = i
+        if mask.startswith("*", i):
+            i += 1
+        while i < len(mask) and mask[start] != "*" and _mask_name_char(mask[i]):
+            i += 1
+        end = i
+        if end == start:
+            raise refused()
+        blank()
+        return mask[start:end]
+
+    while True:
+        path = [name()]
+        while mask.startswith("/", i):
+            i += 1
+            path.append(name())
+        full = prefixes[-1] + tuple(path)
+        if mask.startswith("(", i):
+            i += 1
+            blank()
+            if not mask.startswith(")", i):
+                prefixes.append(full)
+                continue
+            i += 1
+            paths.append((*full, _MASK_EMPTY))
+        else:
+            paths.append(full)
+        blank()
+        while mask.startswith(")", i) and len(prefixes) > 1:
+            i += 1
+            prefixes.pop()
+            blank()
+        if i == len(mask) and len(prefixes) == 1:
+            return paths
+        if not mask.startswith(",", i):
+            raise refused()
+        i += 1
 
 
-def _check_mask(names, allowed: frozenset) -> None:
-    """Reject an unknown field name the way real Drive does. Without this a bogus name simply
-    matched nothing and vanished, so the response was a 200 full of empty objects and no
-    Backlot-backed test could catch a mask that 400s in production."""
-    for n in sorted(names):
-        if n != "*" and n not in allowed:
-            raise gerr.invalid_parameter("fields", f"Invalid field selection {n}")
+@functools.lru_cache(maxsize=4096)
+def _mask_name_char(ch: str) -> bool:
+    if ch.isascii():
+        return ch in _MASK_NAME
+    parser = xml.parsers.expat.ParserCreate()
+    try:
+        parser.Parse(f"<a{ch}/>", True)
+    except (xml.parsers.expat.ExpatError, ValueError):
+        return False
+    return True
+
+
+def _check_mask(paths, top: frozenset, under: str | None = None, entries: frozenset = frozenset()):
+    """Refuse the first name, in the mask's order, the resource does not have, as real names it:
+    a top-level name outside ``top`` or, under the list ``under``, an entry's name outside
+    ``entries``. A name deeper than that is not checked."""
+    for path in paths:
+        checks = [(path[0], top)]
+        if under is not None and path[0] == under and len(path) > 1:
+            checks.append((path[1], entries))
+        for name, allowed in checks:
+            if name not in ("*", _MASK_EMPTY) and name not in allowed:
+                raise gerr.invalid_parameter("fields", f"Invalid field selection {name}")
+
+
+def _mask_keys(paths, under: str | None = None) -> set[str] | None:
+    """The names a mask selects at the top level, or of each entry of the list ``under``; ``None``
+    selects every one. A key selected only by an empty group is not selected, as real left an
+    ``owners()`` out of the file it answered."""
+    if under is not None:
+        paths = [p[1:] for p in paths if p[0] == under]
+        if any(not p for p in paths):
+            return None
+    keys = {p[0] for p in paths if not (len(p) > 1 and p[1] == _MASK_EMPTY)}
+    return None if "*" in keys else keys
+
+
+def _drive_mask(fields: str | None) -> list[tuple[str, ...]] | None:
+    """A mask's paths; ``None`` for an absent one, and none for one of spaces and tabs alone, which
+    real answered with ``{}``."""
+    if fields is None:
+        return None
+    return _mask_paths(fields) if fields.strip(" \t") else []
 
 
 def _drive_file_field_keys(fields: str | None) -> set[str] | None:
     """File keys a ``files.list`` caller selected — so the response carries only those, not the
     full ~30-field object. Google accepts both the group form (``files(id,name)``) and the path
-    form (``files/id``); both are honored. ``None`` = no projection (an absent mask, or one that
-    asks for everything with ``*``).
+    form (``files/id``); both are honored. ``None`` = no projection (an absent mask, one that asks
+    for everything with ``*``, or one that names no ``files``).
 
     Top-level names are validated but not projected: Backlot always returns ``kind`` and
     ``incompleteSearch``, because its typed response model (``DriveFileList``, which the OpenAPI
     schema is built from) declares them."""
-    if not (fields or "").strip():
+    paths = _drive_mask(fields)
+    if not paths:
         return None
-    top, keys = set(), set()
-    for tok in _split_mask(fields):
-        if tok == "*":
-            return None
-        group = re.fullmatch(r"files\s*\((.*)\)", tok, re.DOTALL)
-        if group:
-            top.add("files")
-            keys |= _mask_names(group.group(1))
-        elif tok.startswith("files/"):
-            top.add("files")
-            keys |= _mask_names(tok[len("files/") :])
-        else:
-            top.add(tok.split("/")[0].split("(")[0])
-    _check_mask(top, _DRIVE_LIST_FIELDS)
-    _check_mask(keys, _DRIVE_FILE_FIELDS)
-    return None if "*" in keys else (keys or None)
+    _check_mask(paths, _DRIVE_LIST_FIELDS, "files", _DRIVE_FILE_FIELDS)
+    if _mask_keys(paths) is None or not any(p[0] == "files" for p in paths):
+        return None
+    return _mask_keys(paths, "files")
 
 
 def _drive_get_field_keys(fields: str | None) -> set[str] | None:
@@ -2324,13 +2419,38 @@ def _drive_get_field_keys(fields: str | None) -> set[str] | None:
     A mask that is empty or blank selects nothing, which is not the same as no mask: measured
     2026-09-23, `fields=` and `fields=%20` answer ``{}`` where an absent `fields` answers the
     default object. So an absent mask is ``None`` and a blank one the empty set."""
-    if fields is None:
+    paths = _drive_mask(fields)
+    if paths is None:
         return None
-    if not fields.strip():
-        return set()
-    keys = _mask_names(fields)
-    _check_mask(keys, _DRIVE_FILE_FIELDS)
-    return None if "*" in keys else (keys or None)
+    _check_mask(paths, _DRIVE_FILE_FIELDS)
+    return _mask_keys(paths)
+
+
+def _drive_project_listing(body: dict, fields: str | None, under: str, entries: frozenset):
+    """``permissions.list`` or ``drives.list`` trimmed to its mask: the top-level keys it names,
+    and the entries of the list ``under`` trimmed to theirs, an entry left with none dropped, as
+    real dropped them. The list stays when only its entries are emptied. ``None`` for no mask."""
+    paths = _drive_mask(fields)
+    if paths is None:
+        return None
+    _check_mask(paths, frozenset({"kind", "nextPageToken", under}), under, entries)
+    tops = _mask_keys(paths)
+    if tops is None:
+        return body
+    if any(p[:2] == (under, _MASK_EMPTY) for p in paths):
+        tops.add(under)
+    out = {k: v for k, v in body.items() if k in tops}
+    if under in out:
+        keys = _mask_keys(paths, under)
+        out[under] = _drive_project_entries(out[under], keys)
+    return out
+
+
+def _drive_project_entries(entries: list[dict], keys: set[str] | None) -> list[dict]:
+    """A list's entries trimmed to ``keys``, an entry left with none dropped: real answered
+    `files(trashingUser)` and `permissions(teamDrivePermissionDetails)` with an empty list on
+    listings none of whose entries had the field, measured 2026-10-20."""
+    return [e for e in _drive_project(entries, keys) if e]
 
 
 def _drive_project(files: list[dict], keys: set[str] | None) -> list[dict]:
@@ -2554,16 +2674,15 @@ def _drive_about_field_keys(fields: str | None) -> set[str] | None:
     """``about.get`` is the one Drive read whose ``fields`` mask is MANDATORY — the resource has no
     default projection, and real Drive 400s without one. ``None`` = serve everything (``*``).
 
-    A mask that parses to no names at all (``fields=,``) 400s rather than falling through to "no
-    projection": on a resource where the mask is required, answering a request for nothing with
-    everything is the one outcome the caller certainly did not ask for."""
-    if not (fields or "").strip():
+    A mask that selects nothing is that 400 too: real answered it to white space alone, any one of
+    the 29 code points `str.isspace` takes, and to `user()`, `user( )` and `kind()`, measured
+    2026-10-20."""
+    paths = _mask_paths(fields) if (fields or "").strip() else []
+    _check_mask(paths, _DRIVE_ABOUT_FIELDS)
+    keys = _mask_keys(paths)
+    if keys is not None and not keys:
         raise gerr.required("fields", "The 'fields' parameter is required for this method.")
-    keys = _mask_names(fields)
-    _check_mask(keys, _DRIVE_ABOUT_FIELDS)
-    if not keys:
-        raise gerr.invalid_parameter("fields", f"Invalid field selection {fields}")
-    return None if "*" in keys else keys
+    return keys
 
 
 # The conversion tables below describe the *API's* capabilities, not this account's, so they carry
@@ -2733,7 +2852,11 @@ async def drive_shared_drives(request: Request):
     # Real answers a domain administrator 200 and a consumer account 400 at `q`.
     if _drive_true(request, "useDomainAdminAccess"):
         raise gerr.domain_admin_privilege_required()
-    return {"kind": "drive#driveList", "drives": []}
+    body = {"kind": "drive#driveList", "drives": []}
+    # The mask last, after `q`, `pageToken` and the 403, as `drive_files_permissions` reads it.
+    mask = gerr.first_repeat(request.query_params, "fields")
+    projected = _drive_project_listing(body, mask, "drives", _DRIVE_DRIVE_FIELDS)
+    return body if projected is None else projected
 
 
 @router.get(
@@ -2786,7 +2909,7 @@ async def drive_files_list(request: Request):
     if _drive_starred_after_another_key(gerr.first_repeat(params, "orderBy")):
         raise gerr.drive_internal_error()
     mask = gerr.first_repeat(params, "fields")
-    if mask is not None and not mask.strip():
+    if mask is not None and not mask.strip(" \t"):
         # The blank mask `_drive_get_field_keys` describes; on a listing it drops `kind` and
         # `files` too, so the typed response model is bypassed.
         return JSONResponse({})
@@ -2860,7 +2983,7 @@ async def drive_files_list(request: Request):
     body = {
         "kind": "drive#fileList",
         "incompleteSearch": False,
-        "files": _drive_project(files, keys),
+        "files": _drive_project_entries(files, keys),
     }
     token = next_page_token(offset, len(files), total)
     if token:
@@ -3032,7 +3155,13 @@ async def drive_files_permissions(file_id: str, request: Request):
         permissions = _drive_permissions(conn, file_id, folder=name)
     else:
         permissions = _drive_permissions(conn, row["id"])
-    return _drive_permission_page(permissions, file_id, size, token)
+    body = _drive_permission_page(permissions, file_id, size, token)
+    # The mask is read last: real answered a bad one after the typed, range and `pageToken`
+    # refusals, the domain-administrator 404 and the file lookup, each sent beside it, measured
+    # 2026-10-20.
+    mask = gerr.first_repeat(request.query_params, "fields")
+    projected = _drive_project_listing(body, mask, "permissions", _DRIVE_PERMISSION_FIELDS)
+    return body if projected is None else JSONResponse(projected)
 
 
 # --- Google Workspace editors read APIs (Docs / Sheets / Slides) ------------------
