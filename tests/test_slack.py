@@ -35,6 +35,7 @@ def _parts(fields) -> bytes:
 _PART_A = b'Content-Disposition: form-data; name="a"\r\n\r\nb\r\n'
 _PART_C = b'Content-Disposition: form-data; name="c"\r\n\r\nd\r\n'
 _PART_E = b'Content-Disposition: form-data; name="e"\r\n\r\nf\r\n'
+_PART_EMPTY = b'Content-Disposition: form-data; name=""\r\n\r\nx\r\n'
 
 
 def _one_part(name: str, value: str) -> bytes:
@@ -3048,6 +3049,101 @@ def test_slack_post_charset_warning_on_a_refusal(
                     b'--b\r\nContent-Disposition: form-data; name="c"\r\n\r\nw\r\n--b--\r\n',
                     {},
                 ),
+            )
+        ),
+        # a part HHVM's `rfc1867PostHandler` names otherwise (``slack._multipart_parts``): an empty
+        # name, no Content-Disposition, a filename alone, neither parameter, two of the header
+        *(
+            ("POST", _MULTIPART, body, want)
+            for body, want in (
+                (b"--b\r\n" + _PART_EMPTY + b"--b\r\n" + _PART_A + b"--b--\r\n", {"a": "b"}),
+                (b"--b\r\n" + _PART_A + b"--b\r\n" + _PART_EMPTY + b"--b--\r\n", {"a": "b"}),
+                (
+                    b"--b\r\n"
+                    + _PART_A
+                    + b"--b\r\nX-Other: y\r\n\r\nz\r\n--b\r\n"
+                    + _PART_C
+                    + b"--b--\r\n",
+                    {"a": "b", "c": "d"},
+                ),
+                (b'--b\r\nContent-Disposition: form-data; filename="f"\r\n\r\nx\r\n--b--\r\n', {}),
+                (
+                    b"--b\r\n"
+                    + _PART_A
+                    + b"--b\r\nContent-Disposition: form-data\r\n\r\nx\r\n--b\r\n"
+                    + _PART_C
+                    + b"--b--\r\n",
+                    {"a": "b"},
+                ),
+                (
+                    b'--b\r\nContent-Disposition: form-data; name="a"\r\nContent-Disposition: form-data; name="c"\r\n\r\nv\r\n--b--\r\n',
+                    {"a": "v"},
+                ),
+            )
+        ),
+        # headers that end without a blank line, and a line with no `:`, which adds to the header
+        # above it or, with none above, is ignored (``slack._Rfc1867Buffer.headers``)
+        *(
+            ("POST", _MULTIPART, body, want)
+            for body, want in (
+                (
+                    b'--b\r\nContent-Disposition: form-data; name="a"\r\n--b--\r\n',
+                    "invalid_arg_name",
+                ),
+                (
+                    b'--b\r\nContent-Disposition: form-data; name="a"\r\nX: y\r\n--b--\r\n',
+                    {"a": ""},
+                ),
+                (
+                    b'--b\r\nContent-Disposition: form-data; name="a"\r\nfoo\r\n--b--\r\n',
+                    "invalid_arg_name",
+                ),
+                (b'--b\r\nContent-Disposition: form-data; name="a"\r\nfoo', {"a": "foo"}),
+                (
+                    b'--b\r\nContent-Disposition: form-data; name="a"\r\nfoo\r\n\r\nb\r\n--b--\r\n',
+                    "invalid_arg_name",
+                ),
+                (b"--b\r\n--b\r\n" + _PART_A + b"--b--\r\n", {"a": "b"}),
+                (b"--b\r\n--bx\r\n" + _PART_A + b"--b--\r\n", {"a": "b"}),
+                (
+                    b'--b\r\n Content-Disposition: form-data; name="a"\r\n\r\nv\r\n--b--\r\n',
+                    "invalid_form_data",
+                ),
+                (b"--b\r\nX:\r\n" + _PART_A + b"--b--\r\n", {"a": "b"}),
+            )
+        ),
+        # a parameter's value as `php_ap_getword` and `php_ap_getword_conf` read it
+        # (``slack._getword``, ``slack._getword_conf``)
+        *(
+            (
+                "POST",
+                _MULTIPART,
+                b"--b\r\nContent-Disposition: form-data" + params + b"\r\n\r\nv\r\n--b--\r\n",
+                want,
+            )
+            for params, want in (
+                (b"; name='a'", {"a": "v"}),
+                (b'; name="a\\"b"', "invalid_arg_name"),
+                (b'; name="a\\\\b"', "invalid_arg_name"),
+                (b"; name=a b", {"a": "v"}),
+                (b'; name="a" x', "invalid_arg_name"),
+                (b';; name="a"', {"a": "v"}),
+            )
+        ),
+        # the media types HHVM's `IsRfc1867` reads as multipart (``slack._rfc1867_boundary``), and
+        # the tab Slack's own media-type check refuses
+        *(
+            ("POST", content_type, b"--b\r\n" + _PART_A + b"--b--\r\n", want)
+            for content_type, want in (
+                ("multipart/form; boundary=b", ({"a": "b"}, "missing_charset")),
+                ("multipart/form-datax; boundary=b", "invalid_post_type"),
+                ("; boundary=b", ({"a": "b"}, "missing_charset")),
+                ("m; boundary=b", ({"a": "b"}, "missing_charset")),
+                ("multipart/form-data ; boundary=b", ({"a": "b"}, "missing_charset")),
+                ("multipart/form-data;boundary=b", {"a": "b"}),
+                ('multipart/form-data; boundary="b', "invalid_form_data"),
+                ("text/plain; boundary=b", ({}, "missing_charset")),
+                ("multipart/form-data\t; boundary=b", "invalid_post_type"),
             )
         ),
         (

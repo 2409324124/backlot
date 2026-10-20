@@ -323,21 +323,18 @@ def read_post_body(content_type: str | None, body: bytes) -> tuple[dict[str, str
     method, or None. Each error comes ahead of the credential, a `token` query parameter included,
     and of the arguments, in the order the checks here run.
 
-    A body is read as a form when its Content-Type starts with the form type in any case
+    A body is read as multipart when :func:`_rfc1867_boundary` reads a boundary off its
+    Content-Type, else as a form when the Content-Type starts with the form type in any case
     (`APPLICATION/X-WWW-FORM-URLENCODED`, `…-urlencodedx` and `…-urlencoded, text/html` are read
-    too), and as multipart when it starts with the multipart one (:func:`_multipart_parts`); what it
-    carries passes the media-type check whatever the media type is. A JSON or `text/plain` body
-    is not read here. `Content-Encoding` is not read: a gzipped body is read as the bytes it is, and
-    a plain one under `gzip`, `bogus` or an empty value is read as itself.
+    too); what it carries passes the media-type check whatever the media type is. A JSON or
+    `text/plain` body is not read here. `Content-Encoding` is not read: a gzipped body is read as
+    the bytes it is, and a plain one under `gzip`, `bogus` or an empty value is read as itself.
     """
     if not content_type:
         return {}, "missing_post_type" if body else None
-    lower = content_type.lower()
-    pairs: list[tuple[bytes, bytes | None]] | None = None
-    if lower.startswith(_FORM):
+    pairs = _multipart_parts(content_type, body)
+    if pairs is None and content_type.lower().startswith(_FORM):
         pairs = _form_pairs(body)
-    elif lower.startswith(_MULTIPART):
-        pairs = _multipart_parts(content_type, body)
     args, error = _register(pairs or [])
     if error is not None:
         return {}, error
@@ -369,89 +366,256 @@ def _unquote(raw: bytes) -> bytes:
     return urllib.parse.unquote_to_bytes(raw.replace(b"+", b" "))
 
 
-def _multipart_parts(content_type: str, body: bytes) -> list[tuple[bytes, bytes | None]] | None:
-    """The (name, value) of each part of a multipart body, the value None for a file's part, or None
-    for a Content-Type with no boundary, a part with no name and a part whose headers end without a
-    blank line, which real reads as more of the header above and this does not; no part for a body
-    in which none is read.
+#: C's `isspace` on a header's bytes, which HHVM's reading of a part applies.
+_C_SPACE = b" \t\n\v\f\r"
+#: HHVM's `FILLUNIT`: how many bytes its multipart buffer holds, and asks for at a time.
+_FILLUNIT = 5120
 
-    The boundary is what follows the first `=` after the first `boundary` in the Content-Type, in
-    that case, wherever it is (`xboundary=b` and `boundary =b` are `b`): up to the next `"` if it
-    starts with one, else up to a `,` or a `;`, a space after the `=` included. A delimiter is a
-    line that is `--` and the boundary, ended by CRLF or LF alike, with nothing after it, and the
-    text before the first one is skipped. A part whose first line is blank has no headers and is no
-    part. A part's value is what follows its blank line: its first line whatever it holds, then up
-    to the line break before the next line that starts with the delimiter, less the CR before it, or
-    to the end of the body, less a CRLF or LF that ends it there. Such a line with more after the
-    delimiter (`--bx`, `--b  `, the closing `--b--`) ends the part, and what follows it up to the
-    next delimiter is no part. Its name is the last `name` parameter of its `Content-Disposition`,
-    quoted or not, its first parameter read as the others are and a `;` inside quotes kept in the
-    value, and a part with a `filename` is a file's, which is no argument, each parameter's name
-    read in any case (`NAME="a"` names the part, and `FILENAME="x"` makes it a file's) and only with
-    a `=`. A part with no name and a missing boundary are bodies real cannot read, and so, with no
-    part read, is a body with no delimiter, one that is only the closing delimiter included. An
-    empty boundary (`boundary=`, `boundary=""`) is read, its delimiter `--`.
-    """
-    at = content_type.find("boundary")
+
+def _rfc1867_boundary(content_type: str) -> bytes | None:
+    """The boundary HHVM's ``IsRfc1867`` reads off a Content-Type, or None where it reads the body
+    as no multipart one. The header's first token, up to a `;`, `,` or space, is compared to
+    `multipart/form-data` in any case over the token's own length, so `multipart/form`, `m` and
+    an empty token pass and `multipart/form-datax` does not; the boundary is what follows the
+    first `=` after the first `boundary` past that token, up to the closing `"` when it starts
+    with one (none is no boundary) and up to a `,` or `;` otherwise, a space after the `=` and an
+    empty value included."""
+    content_type = content_type.split("\0", 1)[0]
+    token = re.split("[;, ]", content_type, maxsplit=1)[0]
+    if token.lower() != _MULTIPART[: len(token)]:
+        return None
+    at = content_type.find("boundary", len(token))
     eq = content_type.find("=", at) if at != -1 else -1
     if eq == -1:
         return None
-    boundary = content_type[eq + 1 :]
-    if boundary.startswith('"'):
-        boundary = boundary[1:].partition('"')[0]
-    else:
-        boundary = re.split("[,;]", boundary, maxsplit=1)[0]
-    delimiter = b"--" + boundary.encode("latin-1")
-    lines = body.split(b"\n")
-
-    def next_delimiter(at: int) -> int | None:
-        return next(
-            (i for i in range(at, len(lines)) if lines[i].removesuffix(b"\r") == delimiter), None
-        )
-
-    parts = []
-    at = next_delimiter(0)
-    while at is not None:
-        head = at + 1
-        if head == len(lines) or lines[head].removesuffix(b"\r") == b"":
-            at = next_delimiter(head + 1)
-            continue
-        blank = head
-        while blank < len(lines) and lines[blank].removesuffix(b"\r") != b"":
-            if lines[blank].startswith(delimiter):
-                return None
-            blank += 1
-        if blank == len(lines):
+    rest = content_type[eq + 1 :]
+    if rest.startswith('"'):
+        close = rest.find('"', 1)
+        if close == -1:
             return None
-        name, filename = None, False
-        for header in lines[head:blank]:
-            key, _, value = header.removesuffix(b"\r").partition(b":")
-            if key.strip().lower() != b"content-disposition":
-                continue
-            for param in _CD_PARAM.findall(value):
-                pname, eq, pvalue = param.strip().partition(b"=")
-                if eq and pname.lower() == b"name":
-                    name = pvalue.strip(b'"')
-                elif eq and pname.lower() == b"filename":
-                    filename = True
-        if not name:
+        return rest[1:close].encode("latin-1")
+    return re.split("[,;]", rest, maxsplit=1)[0].encode("latin-1")
+
+
+class _Rfc1867Buffer:
+    """HHVM's `multipart_buffer` over a body held whole: the buffer is the body's bytes from
+    ``begin`` (`buf_begin`) for ``held`` of them (`bytes_in_buffer`), a fill extends ``held`` to
+    ``bufsize`` or to the body's end, and each method is the function it is named after."""
+
+    def __init__(self, body: bytes, boundary: bytes):
+        self.body = body
+        self.bufsize = max(len(boundary) + 6, _FILLUNIT)
+        self.boundary = b"--" + boundary
+        self.boundary_next = b"\n--" + boundary
+        self.begin = 0
+        self.held = 0
+
+    def fill(self) -> int:
+        held = min(self.bufsize, len(self.body) - self.begin)
+        added, self.held = held - self.held, held
+        return added
+
+    def eof(self) -> bool:
+        return self.held == 0 and self.fill() < 1
+
+    def next_line(self) -> bytes | None:
+        """The bytes up to the next LF, less a CR before it, as C reads them (to a NUL); None when
+        the buffer holds no LF and is not full, else the whole buffer as a partial line."""
+        end = self.begin + self.held
+        lf = self.body.find(b"\n", self.begin, end)
+        if lf != -1:
+            line = self.body[self.begin : lf].removesuffix(b"\r")
+            self.held -= lf + 1 - self.begin
+            self.begin = lf + 1
+        elif self.held < self.bufsize:
             return None
-        end = next(
-            (i for i in range(blank + 2, len(lines)) if lines[i].startswith(delimiter)), None
-        )
-        value = b"\n".join(lines[blank + 1 : end])
-        if end is None:
-            value = value[:-2] if value.endswith(b"\r\n") else value.removesuffix(b"\n")
-            at = None
         else:
-            value = value.removesuffix(b"\r")
-            at = end if lines[end].removesuffix(b"\r") == delimiter else next_delimiter(end + 1)
-        parts.append((name, None if filename else value))
+            line = self.body[self.begin : end]
+            self.begin, self.held = end, 0
+        return line.split(b"\0", 1)[0]
+
+    def get_line(self) -> bytes | None:
+        line = self.next_line()
+        if line is None:
+            self.fill()
+            line = self.next_line()
+        return line
+
+    def find_boundary(self) -> bool:
+        while (line := self.get_line()) is not None:
+            if line == self.boundary:
+                return True
+        return False
+
+    def headers(self) -> list[tuple[bytes, bytes]] | None:
+        """A part's headers from the next delimiter to the first empty line, or None when no
+        delimiter is left: a line with a `:` and no space in front starts one, a line without
+        adds to the one above and, with none above, is ignored, and one left empty is dropped."""
+        if not self.find_boundary():
+            return None
+        headers: list[tuple[bytes, bytes]] = []
+        key = value = b""
+        while line := self.get_line():
+            colon = line.find(b":") if line[0] not in _C_SPACE else -1
+            if colon != -1:
+                if value and key:
+                    headers.append((key, value))
+                    value = b""
+                key = line[:colon]
+                value += line[colon + 1 :].lstrip(_C_SPACE)
+            elif value:
+                value += line
+        if value and key:
+            headers.append((key, value))
+        return headers
+
+    def read_body(self) -> bytes:
+        """`multipart_buffer_read_body`: the bytes up to the next `\n--` and the boundary or, with
+        none, to the body's end less a prefix of that it ends on (`\n`, `\n-`, `\n--b…`), which
+        the buffer's last read takes for a boundary cut short; less a CR before either, which
+        stays in the buffer. The reads of 5119 bytes behind this split a value without changing it,
+        so the body is read whole."""
+        self.fill()
+        body, start, bn = self.body, self.begin, self.boundary_next
+        cut = body.find(bn, start)
+        if cut == -1:
+            cut = len(body)
+            at = body.find(b"\n--", max(start, len(body) - len(bn) + 1))
+            while at != -1:
+                if body.startswith(bn[: len(body) - at], at):
+                    cut = at
+                    break
+                at = body.find(b"\n--", at + 1)
+            if cut == len(body) and body.endswith(b"\n-", start):
+                cut = len(body) - 2
+            elif cut == len(body) and body.endswith(b"\n", start):
+                cut = len(body) - 1
+        value = body[start:cut]
+        if cut < len(body) and value.endswith(b"\r"):
+            value = value[:-1]
+            cut -= 1
+        self.held = max(0, self.begin + self.held - cut)
+        self.begin = cut
+        return value
+
+
+def _getword(text: bytes, stop: int) -> tuple[bytes, bytes]:
+    """`php_ap_getword`: the text up to the first ``stop`` byte outside quotes, and what follows the
+    run of ``stop`` bytes there. A `"` or `'` opens a quote its own kind closes, a `\\` before
+    that quote excepted."""
+    pos = 0
+    while pos < len(text) and text[pos] != stop:
+        quote = text[pos]
+        if quote in (0x22, 0x27):
+            pos += 1
+            while pos < len(text) and text[pos] != quote:
+                pos += (
+                    2 if text[pos] == 0x5C and pos + 1 < len(text) and text[pos + 1] == quote else 1
+                )
+            if pos < len(text):
+                pos += 1
+        else:
+            pos += 1
+    if pos >= len(text):
+        return text, b""
+    word = text[:pos]
+    while pos < len(text) and text[pos] == stop:
+        pos += 1
+    return word, text[pos:]
+
+
+def _getword_conf(text: bytes) -> bytes:
+    """`php_ap_getword_conf`: a parameter's value past the spaces in front of it. Unquoted, it runs
+    to a space or the end; quoted (the quotes :func:`_getword` knows), to the closing quote, but a
+    closing quote that is not the last byte or followed by a CR or LF is read as part of the value
+    and the search goes on (`"a"foo` is `a"foo`)."""
+    i = 0
+    while i < len(text) and text[i] in _C_SPACE:
+        i += 1
+    if i == len(text):
+        return b""
+    quote = text[i]
+    if quote not in (0x22, 0x27):
+        end = i
+        while end < len(text) and text[end] not in _C_SPACE:
+            end += 1
+        return _substring_conf(text[i:end], 0)
+    end = i + 1
+    while True:
+        while end < len(text) and text[end] != quote:
+            end += 2 if text[end] == 0x5C and end + 1 < len(text) and text[end + 1] == quote else 1
+        if end + 1 < len(text) and text[end + 1] not in (0x0D, 0x0A):
+            end += 1
+            continue
+        return _substring_conf(text[i + 1 : end], quote)
+
+
+def _substring_conf(text: bytes, quote: int) -> bytes:
+    """`substring_conf`: ``text`` with `\\\\` read as `\\` and, inside quotes, `\\` and the quote as
+    the quote."""
+    out = bytearray()
+    i = 0
+    while i < len(text):
+        following = text[i + 1] if i + 1 < len(text) else 0
+        if text[i] == 0x5C and (following == 0x5C or (quote and following == quote)):
+            out.append(following)
+            i += 2
+        else:
+            out.append(text[i])
+            i += 1
+    return bytes(out)
+
+
+def _multipart_parts(content_type: str, body: bytes) -> list[tuple[bytes, bytes | None]] | None:
+    """The (name, value) of each part of a multipart body as real reads them, the value None for a
+    file's part, or None for a Content-Type :func:`_rfc1867_boundary` reads no boundary off.
+
+    Real's reading is HHVM's `rfc1867PostHandler` (`hphp/runtime/server/upload.cpp`, with
+    `IsRfc1867` in `hphp/runtime/server/http-protocol.cpp`), the same at tags `HHVM-3.30.12` and
+    `HHVM-4.172.3`, read off its answers: Slack does not say. The functions above port that
+    code's and :class:`_Rfc1867Buffer` its buffer, so what they do is theirs; in short, a part's
+    headers run from a line that is `--` and the boundary exactly to the first empty line, the
+    first `Content-Disposition` names the part by its last `name` and makes it a file's by a
+    `filename`, each parameter's name read in any case, a part with no `Content-Disposition` is
+    no part, one with neither parameter ends the reading, one with a `filename` alone is a file's,
+    and a value runs from the line after the headers to the cut :meth:`_Rfc1867Buffer.read_body`
+    makes. Measured against slack.com/api on 2026-10-20: each multipart `POST` to `api.test`
+    captured is answered as this reads it."""
+    boundary = _rfc1867_boundary(content_type)
+    if boundary is None:
+        return None
+    buffer = _Rfc1867Buffer(body, boundary)
+    parts: list[tuple[bytes, bytes | None]] = []
+    anonymous = 0
+    while not buffer.eof():
+        headers = buffer.headers()
+        if headers is None:
+            break
+        disposition = next((v for k, v in headers if k.lower() == b"content-disposition"), None)
+        if disposition is None:
+            continue
+        name = filename = None
+        rest = disposition.lstrip(_C_SPACE)
+        while rest:
+            pair, rest = _getword(rest, 0x3B)
+            rest = rest.lstrip(_C_SPACE)
+            if b"=" in pair:
+                key, value = _getword(pair, 0x3D)
+                if key.lower() == b"name":
+                    name = _getword_conf(value)
+                elif key.lower() == b"filename":
+                    filename = _getword_conf(value)
+        if filename is None and name is not None:
+            parts.append((name, buffer.read_body()))
+            continue
+        if name is None and filename is None:
+            break
+        if name is None:
+            name = b"%d" % anonymous
+            anonymous += 1
+        buffer.read_body()
+        parts.append((name, None))
     return parts
-
-
-#: A header parameter, as :func:`_multipart_parts` splits them.
-_CD_PARAM = re.compile(rb'(?:"[^"]*"?|[^;"])+')
 
 
 def _registered_name(name: bytes) -> tuple[str, bool] | None:

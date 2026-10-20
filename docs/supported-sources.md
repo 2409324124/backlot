@@ -743,13 +743,15 @@ than a `not_found` for something the caller never named.
 A POST's body is read before the method runs, ahead of its credential and its arguments, as the real
 Web API reads it. A body with no Content-Type is `missing_post_type`, one under a media type other
 than `application/json`, `text/plain`, `application/x-www-form-urlencoded` and
-`multipart/form-data`, spelt so, is `invalid_post_type` unless its type starts with one of the two
-form types in any case and it reads as that form, a charset other than `utf-8`, `utf8` or
-`iso-8859-1` outside a form or multipart type is `invalid_charset`, and a form or multipart body
-real cannot read is `invalid_form_data`, `invalid_arg_name` or `invalid_array_arg`. A multipart
-part's name follows a urlencoded form's name rules, its value is taken as sent, `+` and `%XX`
-included, and its `token` is read as a form's is; an argument the body sends is read ahead of the
-same name in the query string.
+`multipart/form-data`, spelt so, is `invalid_post_type` unless it reads as a form, which a
+Content-Type starting with the form type in any case does, or as multipart, which one whose media
+type is a prefix of `multipart/form-data` in any case does (`multipart/form; boundary=b` and
+`; boundary=b` are read, `multipart/form-datax; boundary=b` is not); a charset other than `utf-8`,
+`utf8` or `iso-8859-1` outside a form or multipart type is `invalid_charset`, and a form or
+multipart body real cannot read is `invalid_form_data`, `invalid_arg_name` or `invalid_array_arg`. A
+multipart body is read as HHVM reads one, which is how real reads it: a part's name follows a
+urlencoded form's name rules, its value is taken as sent, `+` and `%XX` included, and its `token` is
+read as a form's is; an argument the body sends is read ahead of the same name in the query string.
 
 A POST whose form or multipart type names a charset is answered with real's `superfluous_charset`
 warning, and one with a body under any other type that names none with `missing_charset`, each in
