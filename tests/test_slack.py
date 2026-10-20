@@ -104,8 +104,8 @@ _TOKEN = "<the token>"
         ("get", "token={bogus}&foo=1", None, None, "invalid_auth"),
         ("get", "a=1&token=2", None, None, "invalid_auth"),
         ("get", "token=&foo=1", "Bearer {admin}", None, "invalid_auth"),
-        # a `token` form field, an empty one included, in the query parameter's place, and a body
-        # with none
+        # a `token` form field in the query parameter's place (`auth.slack_query_token_refused`),
+        # and a body with none
         ("post", "token={admin}", None, "token=", {"token": ""}),
         ("post", "token={admin}", None, ("token", ""), {"token": ""}),
         ("post", "token={admin}", None, "a=b", "invalid_auth"),
