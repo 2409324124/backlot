@@ -9,9 +9,9 @@ The file lists every method the index at ``INDEX`` links to its own page, which 
 Slack baseline is read off a description Slack last changed in 2020, and lacks methods the live API
 answers (`files.getUploadURLExternal`, `apps.connections.open`). The index serves markdown, one
 table row per method, a row read as its first cell's link to the method's own page.
-`.github/workflows/fidelity.yml` runs ``--check`` on its schedule, which is where a method Slack adds
-or retires shows, and an index this cannot read row by row exits 1 there as a stale file does. No
-response, a 5xx or a 429 is 2, which that step lets pass with a warning.
+`.github/workflows/fidelity.yml` runs ``--check`` on its schedule, which is where a method Slack
+adds or retires shows, and an index this cannot read row by row exits 1 there as a stale file does.
+No response, a 5xx or a 429 is 2, which that step lets pass with a warning.
 """
 
 from __future__ import annotations
