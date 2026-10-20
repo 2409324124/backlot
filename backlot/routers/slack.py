@@ -631,9 +631,11 @@ def _multipart_parts(content_type: str, body: bytes) -> list[tuple[bytes, bytes 
     passed over with its body unread, so the next delimiter is found line by line; one with an
     empty `filename` is taken with its body unread too. A file's name, as
     :func:`_normalize_protected` spells it, and its `tmp_name` key (:func:`_tmp_name_key`) are
-    protected: a later value under a protected name registers nothing. Measured against
-    slack.com/api on 2026-10-20: each multipart `POST` to `api.test` captured is answered as this
-    reads it."""
+    protected: a later value under a protected name registers nothing. A value's name is looked
+    up, and registered, as :func:`_normalize_protected` spells it, which HHVM does to the name in
+    place for the lookup: `a[ b` is `a_b` here, and `invalid_arg_name` in a urlencoded form.
+    Measured against slack.com/api on 2026-10-20: each multipart `POST` to `api.test` captured is
+    answered as this reads it."""
     boundary = _rfc1867_boundary(content_type)
     if boundary is None:
         return None
@@ -662,7 +664,8 @@ def _multipart_parts(content_type: str, body: bytes) -> list[tuple[bytes, bytes 
                     filename = _getword_conf(pair[eq:])
         if filename is None and name is not None:
             value = buffer.read_body()
-            if _normalize_protected(name) not in protected:
+            name = _normalize_protected(name)
+            if name not in protected:
                 parts.append((name, value))
             continue
         if name is None and filename is None:

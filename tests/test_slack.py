@@ -3421,6 +3421,104 @@ def test_slack_post_charset_warning_on_a_refusal(
             b'--bbbb\r\nContent-Disposition: form-data; name="a"\r\n\r\nv\r\n--bb',
             {"a": "v"},
         ),
+        # a value's name as HHVM registers it, spelt as a protected name is, and the same names in a
+        # form; a header line with no name before the part's Content-Disposition
+        *(
+            ("POST", _MULTIPART, body, want)
+            for body, want in (
+                (
+                    b'--b\r\nContent-Disposition: form-data; name="a["\r\n\r\nv\r\n--b--\r\n',
+                    {"a_": "v"},
+                ),
+                (
+                    b'--b\r\nContent-Disposition: form-data; name="a[ "\r\n\r\nv\r\n--b\r\nContent-Disposition: form-data; name="c"\r\n\r\nw\r\n--b--\r\n',
+                    {"a_": "v", "c": "w"},
+                ),
+                (
+                    b'--b\r\nContent-Disposition: form-data; name="a"; filename="x"\r\n\r\nf\r\n--b\r\nContent-Disposition: form-data; name="a["\r\n\r\nv\r\n--b--\r\n',
+                    {"a_": "v"},
+                ),
+                (
+                    b'--b\r\nContent-Disposition: form-data; name="a["; filename="x"\r\n\r\nf\r\n--b\r\nContent-Disposition: form-data; name="a"\r\n\r\nv\r\n--b--\r\n',
+                    {"a": "v"},
+                ),
+                (
+                    b"--b\r\n:x; name=q\r\nContent-Disposition: form-data\r\n\r\nv\r\n--b--\r\n",
+                    {"qform-data": "v"},
+                ),
+                (
+                    b"--b\r\n:name=q\r\nContent-Disposition: form-data; x=y\r\n\r\nv\r\n--b--\r\n",
+                    {"qform-data": "v"},
+                ),
+                (
+                    b"--b\r\nContent-Disposition: form-data; name=a\\\r\n\r\nv\r\n--b--\r\n",
+                    "invalid_arg_name",
+                ),
+                (
+                    b'--b\r\nContent-Disposition: form-data; name="a[ "\r\n\r\nv\r\n--b--\r\n',
+                    {"a_": "v"},
+                ),
+                (
+                    b'--b\r\nContent-Disposition: form-data; name="a[b "\r\n\r\nv\r\n--b--\r\n',
+                    "invalid_arg_name",
+                ),
+                (
+                    b'--b\r\nContent-Disposition: form-data; name="a[ b"\r\n\r\nv\r\n--b--\r\n',
+                    {"a_b": "v"},
+                ),
+                (
+                    b'--b\r\nContent-Disposition: form-data; name="a[  "\r\n\r\nv\r\n--b--\r\n',
+                    {"a_": "v"},
+                ),
+                (
+                    b'--b\r\nContent-Disposition: form-data; name="a[\t"\r\n\r\nv\r\n--b--\r\n',
+                    {"a_": "v"},
+                ),
+                (
+                    b'--b\r\nContent-Disposition: form-data; name="a[b\t"\r\n\r\nv\r\n--b--\r\n',
+                    "invalid_arg_name",
+                ),
+                (
+                    b'--b\r\nContent-Disposition: form-data; name="a[b. "\r\n\r\nv\r\n--b--\r\n',
+                    "invalid_arg_name",
+                ),
+                (
+                    b'--b\r\nContent-Disposition: form-data; name="a[b c"\r\n\r\nv\r\n--b--\r\n',
+                    "invalid_arg_name",
+                ),
+                (
+                    b'--b\r\nContent-Disposition: form-data; name="a[b[ "\r\n\r\nv\r\n--b--\r\n',
+                    "invalid_arg_name",
+                ),
+                (
+                    b'--b\r\nContent-Disposition: form-data; name="a "\r\n\r\nv\r\n--b--\r\n',
+                    {"a_": "v"},
+                ),
+                (
+                    b'--b\r\nContent-Disposition: form-data; name="a[b] "\r\n\r\nv\r\n--b--\r\n',
+                    "invalid_array_arg",
+                ),
+                (
+                    b'--b\r\nContent-Disposition: form-data; name="a[]x "\r\n\r\nv\r\n--b--\r\n',
+                    "invalid_array_arg",
+                ),
+            )
+        ),
+        (
+            "POST",
+            "multipart/form-data; boundary=bbbb",
+            b'--bbbb\r\nContent-Disposition: form-data; name="a"\r\n\r\nv\n--xy',
+            {"a": "v\n--xy"},
+        ),
+        ("POST", _FORM, b"a[%20=v", "invalid_arg_name"),
+        ("POST", _FORM, b"a[b%20=v", "invalid_arg_name"),
+        ("POST", _FORM, b"a[%20b=v", "invalid_arg_name"),
+        ("POST", _FORM, b"a[%09=v", "invalid_arg_name"),
+        ("POST", _FORM, b"a%20=v", {"a_": "v"}),
+        ("POST", _FORM, b"a[b%0B=v", "invalid_arg_name"),
+        ("POST", _FORM, b"a[b%0C=v", "invalid_arg_name"),
+        ("POST", _FORM, b"a[b%0D=v", "invalid_arg_name"),
+        ("POST", _FORM, b"a[b%0A=v", "invalid_arg_name"),
         # Content-Encoding is not read
         (
             "POST",
