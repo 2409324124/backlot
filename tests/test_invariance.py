@@ -126,7 +126,9 @@ def test_compare_flags_a_difference_and_only_one_two_base_runs_agree_on(
     assert (found or "invariant") in out
 
 
-@pytest.mark.parametrize("written", ["backlot/x.py", "backlot\\x.py"], ids=["slash", "backslash"])
+@pytest.mark.parametrize(
+    "written", ["backlot/x.py", "backlot\\x.py"], ids=["written-slash", "written-backslash"]
+)
 @pytest.mark.parametrize(
     ("path", "listed"),
     [
