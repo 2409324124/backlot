@@ -115,7 +115,7 @@ class DrivePermissionList(_GLoose):
 # drive_files_get / .export return a raw Response on some branches — they get openapi_extra params
 # only (no JSON response_model, which would mis-serialize the raw body).
 _P_DRIVE_LIST = [qp("pageSize", "integer"), qp("pageToken"), qp("q"), qp("fields"), qp("orderBy")]
-_P_DRIVE_PERMISSIONS = [qp("pageSize", "integer"), qp("pageToken")]
+_P_DRIVE_PERMISSIONS = [qp("pageSize", "integer"), qp("pageToken"), qp("fields")]
 _P_DRIVE_ALT = [qp("alt"), qp("fields")]
 _P_DRIVE_EXPORT = [qp("mimeType", required=True)]
 _P_DRIVE_ABOUT = [qp("fields", required=True)]
@@ -2273,13 +2273,36 @@ _DRIVE_DRIVE_FIELDS = frozenset(
     orgUnitId restrictions themeId
 """.split()
 )
+# The fields a resource's default answer holds, which an empty group selects: real answered
+# `id()`, `name()`, `kind()` and `mimeType()` on a file, `id()`, `type()`, `kind()` and `role()` on
+# a permission, `id()`, `name()` and `kind()` on a drive, and a listing's `kind()` and
+# `nextPageToken()` with those keys, and `createdTime()`, `owners()`, `trashed()`,
+# `permissions(emailAddress())` and `drives(hidden())` with nothing, measured 2026-10-20.
+_DRIVE_FILE_DEFAULT = frozenset({"kind", "id", "name", "mimeType"})
+_DRIVE_PERMISSION_DEFAULT = frozenset({"id", "type", "kind", "role"})
+_DRIVE_DRIVE_DEFAULT = frozenset({"id", "name", "kind"})
+_DRIVE_LIST_DEFAULT = frozenset({"kind", "nextPageToken", "incompleteSearch"})
+# Documented fields real gave each of a Google Workspace member's 228 files, or each of 40 of their
+# permissions, measured 2026-10-20, that no file or permission here carries: a mask that names one
+# is refused, saying so, rather than answered without it.
+_DRIVE_FILE_UNSERVED = frozenset(
+    """
+    clientEncryptionDetails copyRequiresWriterPermission downloadRestrictions hasThumbnail
+    inheritedPermissionsDisabled isAppAuthorized linkShareMetadata thumbnailVersion
+    viewersCanCopyContent writersCanShare
+""".split()
+)
+_DRIVE_PERMISSION_UNSERVED = frozenset(
+    {"deleted", "pendingOwner", "permissionDetails", "photoLink"}
+)
 # What a name in a `fields` mask is made of, as real read each character between `id,b` and `x` on
 # 2026-10-20: the ASCII below, and past ASCII the name characters of XML 1.0's fourth edition
 # (Appendix B), whose table expat's is. None of the 1,345 code points past ASCII it was sent, every
 # one from U+0080 to U+02FF and the rest chosen by category and where that table and `str.isalnum`
 # part (`ª` and `²` are not in it, `·` and U+0308 are), was read otherwise. Every other character it
 # was sent, white space other than a space or a tab among them, made the whole mask the 400's
-# subject.
+# subject, and so did a name ending in `-` or holding `:` other than once between two other
+# characters (`x-`, `:x`, `x:`, `x::y`, `x:y:z`), where `-x`, `x--y` and `x:y` were names.
 _MASK_NAME = frozenset("$+-.:_" + string.ascii_letters + string.digits)
 # The last name of a path an empty group, `owners()`, ends.
 _MASK_EMPTY = "()"
@@ -2289,9 +2312,9 @@ def _mask_paths(mask: str) -> list[tuple[str, ...]]:
     """The paths a `fields` mask selects, in its order: ``files(id,owners(kind)),kind`` is
     ``files/id``, ``files/owners/kind`` and ``kind``, and ``files()`` is ``files`` then
     ``_MASK_EMPTY``. A space or a tab may stand beside a name, a ``/`` or a parenthesis. A mask
-    that is not one — an empty entry, a name holding a character outside ``_MASK_NAME``, a group
-    never opened or never closed — is the 400 naming the whole mask, as real answered
-    ``id,,name``, ``files(id,)``, ``id,`` and ``owners(``; that refusal comes before any name's.
+    that is not one — an empty entry, a name `_mask_name` does not take, a group never opened or
+    never closed — is the 400 naming the whole mask, as real answered ``id,,name``, ``files(id,)``,
+    ``id,`` and ``owners(``; that refusal comes before any name's.
 
     Read without recursion: real answered a group nested a thousand deep with the name it did not
     take, not a refusal of the mask."""
@@ -2316,7 +2339,7 @@ def _mask_paths(mask: str) -> list[tuple[str, ...]]:
         while i < len(mask) and mask[start] != "*" and _mask_name_char(mask[i]):
             i += 1
         end = i
-        if end == start:
+        if not _mask_name(mask[start:end]):
             raise refused()
         blank()
         return mask[start:end]
@@ -2349,6 +2372,17 @@ def _mask_paths(mask: str) -> list[tuple[str, ...]]:
         i += 1
 
 
+def _mask_name(text: str) -> bool:
+    """Whether ``text``, read of the characters `_mask_name_char` takes, is a name, as the comment
+    above ``_MASK_NAME`` says."""
+    if text == "*":
+        return True
+    colons = text.count(":")
+    if not text or text.endswith("-") or colons > 1:
+        return False
+    return not colons or (text[0] != ":" and text[-1] != ":")
+
+
 @functools.lru_cache(maxsize=4096)
 def _mask_name_char(ch: str) -> bool:
     if ch.isascii():
@@ -2361,10 +2395,19 @@ def _mask_name_char(ch: str) -> bool:
     return True
 
 
-def _check_mask(paths, top: frozenset, under: str | None = None, entries: frozenset = frozenset()):
+def _check_mask(
+    paths,
+    top: frozenset,
+    under: str | None = None,
+    entries: frozenset = frozenset(),
+    unserved: frozenset = frozenset(),
+):
     """Refuse the first name, in the mask's order, the resource does not have, as real names it:
     a top-level name outside ``top`` or, under the list ``under``, an entry's name outside
-    ``entries``. A name deeper than that is not checked."""
+    ``entries``. A name deeper than that is not checked. Then refuse the first of the ``unserved``
+    names of a file or permission, the top level's on `files.get` and an entry's on a listing, with
+    a sentence saying Backlot does not carry it."""
+    served: list[str] = []
     for path in paths:
         checks = [(path[0], top)]
         if under is not None and path[0] == under and len(path) > 1:
@@ -2372,17 +2415,25 @@ def _check_mask(paths, top: frozenset, under: str | None = None, entries: frozen
         for name, allowed in checks:
             if name not in ("*", _MASK_EMPTY) and name not in allowed:
                 raise gerr.invalid_parameter("fields", f"Invalid field selection {name}")
+        served.append(checks[-1][0] if under is None or path[0] == under else "")
+    for name in served:
+        if name in unserved:
+            raise gerr.invalid_parameter(
+                "fields",
+                f"'{name}' is not served by Backlot: real Drive answers it, and nothing here "
+                f"carries it.",
+            )
 
 
-def _mask_keys(paths, under: str | None = None) -> set[str] | None:
+def _mask_keys(paths, under: str | None = None, defaults: frozenset = frozenset()):
     """The names a mask selects at the top level, or of each entry of the list ``under``; ``None``
-    selects every one. A key selected only by an empty group is not selected, as real left an
-    ``owners()`` out of the file it answered."""
+    selects every one. A key an empty group names is selected only when it is one of the
+    ``defaults``, as the comment above ``_DRIVE_FILE_DEFAULT`` says."""
     if under is not None:
         paths = [p[1:] for p in paths if p[0] == under]
         if any(not p for p in paths):
             return None
-    keys = {p[0] for p in paths if not (len(p) > 1 and p[1] == _MASK_EMPTY)}
+    keys = {p[0] for p in paths if not (len(p) > 1 and p[1] == _MASK_EMPTY) or p[0] in defaults}
     return None if "*" in keys else keys
 
 
@@ -2400,8 +2451,8 @@ def _drive_refuse_a_trailing_comma(request: Request) -> None:
 
 
 def _drive_mask(fields: str | None) -> list[tuple[str, ...]] | None:
-    """A mask's paths; ``None`` for an absent one, and none for one of spaces and tabs alone, which
-    real answered with ``{}``."""
+    """A mask's paths; ``None`` for an absent one, and none for one of spaces and tabs alone, the
+    blank mask `_drive_get_field_keys` describes."""
     if fields is None:
         return None
     return _mask_paths(fields) if fields.strip(" \t") else []
@@ -2419,10 +2470,10 @@ def _drive_file_field_keys(fields: str | None) -> set[str] | None:
     paths = _drive_mask(fields)
     if not paths:
         return None
-    _check_mask(paths, _DRIVE_LIST_FIELDS, "files", _DRIVE_FILE_FIELDS)
+    _check_mask(paths, _DRIVE_LIST_FIELDS, "files", _DRIVE_FILE_FIELDS, _DRIVE_FILE_UNSERVED)
     if _mask_keys(paths) is None or not any(p[0] == "files" for p in paths):
         return None
-    return _mask_keys(paths, "files")
+    return _mask_keys(paths, "files", _DRIVE_FILE_DEFAULT)
 
 
 def _drive_get_field_keys(fields: str | None) -> set[str] | None:
@@ -2430,32 +2481,40 @@ def _drive_get_field_keys(fields: str | None) -> set[str] | None:
     (``fields=id,name,size``). Applying it is what makes one file look the same whether a client
     read it out of a listing or resolved it by id.
 
-    A mask that is empty or blank selects nothing, which is not the same as no mask: measured
-    2026-09-23, `fields=` and `fields=%20` answer ``{}`` where an absent `fields` answers the
-    default object. So an absent mask is ``None`` and a blank one the empty set."""
+    A mask that is empty or of spaces and tabs alone selects nothing, which is not the same as no
+    mask: measured 2026-09-23, `fields=` and `fields=%20` answer ``{}`` where an absent `fields`
+    answers the default object, and `fields=%09` did too on 2026-10-20. So an absent mask is
+    ``None`` and one of spaces and tabs the empty set."""
     paths = _drive_mask(fields)
     if paths is None:
         return None
-    _check_mask(paths, _DRIVE_FILE_FIELDS)
-    return _mask_keys(paths)
+    _check_mask(paths, _DRIVE_FILE_FIELDS, unserved=_DRIVE_FILE_UNSERVED)
+    return _mask_keys(paths, defaults=_DRIVE_FILE_DEFAULT)
 
 
-def _drive_project_listing(body: dict, fields: str | None, under: str, entries: frozenset):
+def _drive_project_listing(
+    body: dict,
+    fields: str | None,
+    under: str,
+    entries: frozenset,
+    defaults: frozenset,
+    unserved: frozenset = frozenset(),
+):
     """``permissions.list`` or ``drives.list`` trimmed to its mask: the top-level keys it names,
-    and the entries of the list ``under`` trimmed to theirs, an entry left with none dropped, as
-    real dropped them. The list stays when only its entries are emptied. ``None`` for no mask."""
+    and the entries of the list ``under`` trimmed to theirs by `_drive_project_entries`. The list
+    stays when only its entries are emptied. ``None`` for no mask."""
     paths = _drive_mask(fields)
     if paths is None:
         return None
-    _check_mask(paths, frozenset({"kind", "nextPageToken", under}), under, entries)
-    tops = _mask_keys(paths)
+    _check_mask(paths, frozenset({"kind", "nextPageToken", under}), under, entries, unserved)
+    tops = _mask_keys(paths, defaults=_DRIVE_LIST_DEFAULT)
     if tops is None:
         return body
     if any(p[:2] == (under, _MASK_EMPTY) for p in paths):
         tops.add(under)
     out = {k: v for k, v in body.items() if k in tops}
     if under in out:
-        keys = _mask_keys(paths, under)
+        keys = _mask_keys(paths, under, defaults)
         out[under] = _drive_project_entries(out[under], keys)
     return out
 
@@ -2871,7 +2930,9 @@ async def drive_shared_drives(request: Request):
     # The rest of the mask's refusals last: real answered a name a drive does not have after a bad
     # `q`, a bad `pageToken` and the 403, each sent beside it, measured 2026-10-20.
     mask = gerr.first_repeat(request.query_params, "fields")
-    projected = _drive_project_listing(body, mask, "drives", _DRIVE_DRIVE_FIELDS)
+    projected = _drive_project_listing(
+        body, mask, "drives", _DRIVE_DRIVE_FIELDS, _DRIVE_DRIVE_DEFAULT
+    )
     return body if projected is None else projected
 
 
@@ -3032,9 +3093,9 @@ async def drive_files_get(file_id: str, request: Request):
     else:
         _drive_refuse_a_trailing_comma(request)
     # Measured 2026-10-04: before the lookup, so a file that does not exist is refused alike, and
-    # before `fields`. Inside a batch real checks a part's own flag only when the part is the
-    # batch's one part that is not a download, measured 2026-10-05 beside downloads, other reads and
-    # a second flagged part.
+    # before each `fields` refusal but `_drive_refuse_a_trailing_comma`'s. Inside a batch real
+    # checks a part's own flag only when the part is the batch's one part that is not a download,
+    # measured 2026-10-05 beside downloads, other reads and a second flagged part.
     outer = _BATCH_OUTER.get()
     if not download and _drive_true(request, "acknowledgeAbuse") and (outer is None or outer.lone):
         raise gerr.abuse_acknowledgment_not_applicable()
@@ -3154,8 +3215,8 @@ async def drive_files_permissions(file_id: str, request: Request):
     _drive_refuse_a_trailing_comma(request)
     # Refused in real's order, measured by sending two bad values at once: the `pageToken`
     # refusals, a repeated `pageSize`'s 500, the domain-administrator refusal and the file lookup
-    # below, and a token issued for another file last, in `_drive_permission_page`. The places of
-    # the 500 and of that last refusal were measured 2026-10-08.
+    # below, and a token issued for another file after those, in `_drive_permission_page`. The
+    # places of the 500 and of the other-file token were measured 2026-10-08.
     token = _drive_permissions_page_token(request)
     size = _drive_permissions_page_size(sizes)
     # No caller here is a domain administrator: 404 for the file, even one the caller owns,
@@ -3180,7 +3241,14 @@ async def drive_files_permissions(file_id: str, request: Request):
     # Real answered a name a permission does not have after the `pageToken` refusals, the
     # domain-administrator 404 and the file lookup, each sent beside it, measured 2026-10-20.
     mask = gerr.first_repeat(request.query_params, "fields")
-    projected = _drive_project_listing(body, mask, "permissions", _DRIVE_PERMISSION_FIELDS)
+    projected = _drive_project_listing(
+        body,
+        mask,
+        "permissions",
+        _DRIVE_PERMISSION_FIELDS,
+        _DRIVE_PERMISSION_DEFAULT,
+        _DRIVE_PERMISSION_UNSERVED,
+    )
     return body if projected is None else JSONResponse(projected)
 
 

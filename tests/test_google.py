@@ -1951,9 +1951,9 @@ def _mask_refused(subject: str) -> tuple:
 
 _DOC = "/drive/v3/files/{doc}"
 _PERMS_OF_DOC = "/drive/v3/files/{doc}/permissions"
-# Masks real refused, sent for a Google Workspace member's file, its permissions and its
-# `drives.list`: a mask that is not one is named whole, an unknown name alone, the first in the
-# mask's order.
+# Masks real refused on a Google Workspace member's `files.get`, `files.list`, `permissions.list`,
+# `drives.list` and `about`: a mask that is not one is named whole, an unknown name alone, the first
+# in the mask's order.
 _MASKS_REFUSED = (
     [
         (_DOC, mask, mask)
@@ -1964,6 +1964,7 @@ _MASKS_REFUSED = (
         + ["owners(kind", "owners(kind,zzz", "id name", "id)name", "\n", chr(0x3000)]
         + ["owners(" * 1000 + "kind" + ")" * 1000 + ",", "owners(" * 1000 + "kind"]
         + ["id,b" + chr(cp) + "x" for cp in (0xAA, 0xB2, 0xB5, 0x9FA6, 0x21030)]
+        + ["id,x-", "id,-", "id,:x", "id,x:", "id,x::y", "id,x:y:z", "id,:", "owners(:x)"]
     ]
     + [
         (_DOC, mask, name)
@@ -1972,6 +1973,7 @@ _MASKS_REFUSED = (
             ("id,b" + chr(cp) + "x", "b" + chr(cp) + "x")
             for cp in (0xE9, 0xB7, 0x308, 0x640, 0x4E00)
         ]
+        + [(f"id,{name}", name) for name in ("-x", "x--y", "x:y", "1:x", "x.", "x$y$z", "+x")]
         + [
             ("zzz,bogus", "zzz"),
             ("bogus,zzz", "bogus"),
@@ -2007,9 +2009,31 @@ _FIELDS_REQUIRED = (
     "The 'fields' parameter is required for this method.",
 )
 _NOT_FOUND = (404, "notFound", "fileId", None)
+
+
+def _unserved(name: str) -> tuple:
+    message = (
+        f"'{name}' is not served by Backlot: real Drive answers it, and nothing here carries it."
+    )
+    return (400, "invalidParameter", "fields", message)
+
+
+# Masks naming a field real answered and nothing here carries, refused as the comment above
+# `_DRIVE_FILE_UNSERVED` says.
+_MASKS_UNSERVED = [
+    (_DOC, "downloadRestrictions", "downloadRestrictions"),
+    (_DOC, "id,clientEncryptionDetails", "clientEncryptionDetails"),
+    (_DOC, "copyRequiresWriterPermission,viewersCanCopyContent", "copyRequiresWriterPermission"),
+    ("/drive/v3/files", "files(id,writersCanShare)", "writersCanShare"),
+    ("/drive/v3/files", "files/linkShareMetadata", "linkShareMetadata"),
+    (_PERMS_OF_DOC, "permissions(deleted)", "deleted"),
+    (_PERMS_OF_DOC, "permissions(id,photoLink)", "photoLink"),
+    (_PERMS_OF_DOC, "permissions/permissionDetails", "permissionDetails"),
+]
 _FULLTEXT = "q=" + quote("fullText contains 'a'")
 # Where real answered a mask ending in a comma among a route's other refusals, each sent beside it,
-# and, as controls, where it answered a mask that is not one in another way.
+# and, as controls, where it answered a mask that is not one in another way or one naming a field
+# the resource lacks, and which of two `fields` it read.
 _MASK_ORDER = (
     [("/drive/v3/files", "files(id),", "pageSize=NOPE", _TYPED)]
     + [("/drive/v3/files", "files(id),", "pageSize=0", _RANGE)]
@@ -2220,6 +2244,9 @@ _DRIVE_CHECK_ROWS = [
     *[(path, f"fields={quote(mask)}", "admin", _mask_refused(subject)) for path, mask, subject in _MASKS_REFUSED],
     *[("/drive/v3/about", f"fields={quote(mask)}", "admin", _FIELDS_REQUIRED) for mask in _ABOUT_MASKS_REQUIRED],
     *[(path, f"fields={quote(mask)}" + (extra and f"&{extra}"), "admin", expected) for path, mask, extra, expected in _MASK_ORDER],
+    *[(path, f"fields={quote(mask)}", "admin", _unserved(name)) for path, mask, name in _MASKS_UNSERVED],
+    ("/drive/v3/files/{pdf}/permissions", "fields=bogus&pageToken={issued}", "admin", _PAGE_EXPIRED),
+    ("/drive/v3/files/{pdf}/permissions", "fields=kind%2C&pageToken={issued}", "admin", _mask_refused("kind,")),
     *[(path, "fields=bogus&fields=kind", "admin", _mask_refused("bogus")) for path in (_PERMS_OF_DOC, "/drive/v3/drives")],
     *[(path, "fields=kind&fields=bogus", "admin", _SERVED) for path in (_PERMS_OF_DOC, "/drive/v3/drives")],
     *[(path, f"fields=bogus&{query}", "admin", _TYPED) for path in (_PERMS_OF_DOC, "/drive/v3/drives") for query in ("pageSize=NOPE", "useDomainAdminAccess=NOPE")],
@@ -2458,7 +2485,14 @@ _MASKS_SERVED = [
     (_DOC, "owners(),id", {"id"}, None),
     (_DOC, "*,id", None, None),
     (_DOC, "id,*", None, None),
-    (_DOC, "id,downloadRestrictions,clientEncryptionDetails", {"id"}, None),
+    (_DOC, "id()", {"id"}, None),
+    (_DOC, "id( )", {"id"}, None),
+    (_DOC, "name()", {"name"}, None),
+    (_DOC, "kind()", {"kind"}, None),
+    (_DOC, "mimeType()", {"mimeType"}, None),
+    (_DOC, "kind(),id", {"kind", "id"}, None),
+    (_DOC, "createdTime()", set(), None),
+    (_DOC, "trashed()", set(), None),
     ("/drive/v3/files", "*", {"files"}, "default"),
     ("/drive/v3/files", "*,files(id)", {"files"}, "default"),
     ("/drive/v3/files", "files(id,*)", {"files"}, "default"),
@@ -2467,12 +2501,9 @@ _MASKS_SERVED = [
     ("/drive/v3/files", "files(trashingUser)", {"files"}, set()),
     ("/drive/v3/files", "files/trashingUser", {"files"}, set()),
     ("/drive/v3/files", "files(id,trashingUser)", {"files"}, {"id"}),
-    (
-        "/drive/v3/files",
-        "files(id,downloadRestrictions,clientEncryptionDetails)",
-        {"files"},
-        {"id"},
-    ),
+    ("/drive/v3/files", "files(id())", {"files"}, {"id"}),
+    ("/drive/v3/files", "files(name())", {"files"}, {"name"}),
+    ("/drive/v3/files", "files(createdTime())", {"files"}, set()),
     (_PERMS_OF_DOC, "", set(), None),
     (_PERMS_OF_DOC, " ", set(), None),
     (_PERMS_OF_DOC, "nextPageToken", set(), None),
@@ -2487,6 +2518,10 @@ _MASKS_SERVED = [
     (_PERMS_OF_DOC, "permissions(id,\trole)", {"permissions"}, {"id", "role"}),
     (_PERMS_OF_DOC, "kind ,permissions(id)", {"kind", "permissions"}, {"id"}),
     (_PERMS_OF_DOC, "permissions()", {"permissions"}, set()),
+    (_PERMS_OF_DOC, "kind()", {"kind"}, None),
+    (_PERMS_OF_DOC, "permissions(id())", {"permissions"}, {"id"}),
+    (_PERMS_OF_DOC, "permissions(role())", {"permissions"}, {"role"}),
+    (_PERMS_OF_DOC, "permissions(emailAddress())", {"permissions"}, set()),
     (_PERMS_OF_DOC, "permissions( )", {"permissions"}, set()),
     (_PERMS_OF_DOC, "permissions(teamDrivePermissionDetails)", {"permissions"}, set()),
     (_PERMS_OF_DOC, "permissions", {"permissions"}, "default"),
@@ -2499,14 +2534,16 @@ _MASKS_SERVED = [
     ("/drive/v3/drives", "nextPageToken", set(), None),
     ("/drive/v3/drives", "kind", {"kind"}, None),
     ("/drive/v3/drives", "kind,nextPageToken", {"kind"}, None),
-    ("/drive/v3/drives", "drives(id)", {"drives"}, set()),
-    ("/drive/v3/drives", "drives/id", {"drives"}, set()),
-    ("/drive/v3/drives", "drives()", {"drives"}, set()),
-    ("/drive/v3/drives", "drives(id,name)", {"drives"}, set()),
-    ("/drive/v3/drives", "*", {"kind", "drives"}, set()),
+    ("/drive/v3/drives", "drives(id)", {"drives"}, None),
+    ("/drive/v3/drives", "drives/id", {"drives"}, None),
+    ("/drive/v3/drives", "drives()", {"drives"}, None),
+    ("/drive/v3/drives", "drives(id,name)", {"drives"}, None),
+    ("/drive/v3/drives", "*", {"kind", "drives"}, None),
+    ("/drive/v3/drives", "kind()", {"kind"}, None),
     ("/drive/v3/about", "user, storageQuota", {"user", "storageQuota"}, None),
     ("/drive/v3/about", "user ,kind", {"user", "kind"}, None),
-    ("/drive/v3/about", "storageQuota/limit", {"storageQuota"}, None),
+    ("/drive/v3/about", "user", {"user"}, None),
+    ("/drive/v3/about", "user,storageQuota", {"user", "storageQuota"}, None),
     ("/drive/v3/about", "user(kind)", {"user"}, None),
     ("/drive/v3/about", "user(*)", {"user"}, None),
 ]
@@ -2518,8 +2555,8 @@ def test_drive_answers_a_fields_mask_with_what_it_selects(
 ):
     """The rows `_MASKS_SERVED` records. `files.list`'s own top-level keys are left whole, as
     `_drive_file_field_keys` says, so only its `files` is compared; `"default"` is each entry as an
-    unmasked request gets it. Backlot serves no shared drive, so `drives` is empty under any
-    mask."""
+    unmasked request gets it. A `drives.list` row compares the top-level keys alone: Backlot serves
+    no shared drive, where real listed the member's two."""
     doc = _drive_find(client, admin_h, "Brand")["id"]
     url = path.format(doc=doc)
 
@@ -5576,13 +5613,6 @@ def test_drive_about_rejects_an_unknown_field(client, admin_h):
     assert _about(client, admin_h, "storageQuota").status_code == 200
 
 
-def test_drive_about_rejects_a_mask_that_selects_nothing(client, admin_h):
-    """`fields=,` clears the required-mask check but names no field. Falling through to "no
-    projection" would answer a request for nothing with the entire resource."""
-    r = client.get(ABOUT, headers=admin_h, params={"fields": ","})
-    assert r.status_code == 400
-
-
 def test_drive_about_needs_auth(client):
     # no header at all -> 401 (`about` takes no API key, `_NO_CREDENTIAL_ROWS`); a bad token -> 401
     assert client.get(ABOUT, params={"fields": "user"}).status_code == 401
@@ -5592,17 +5622,9 @@ def test_drive_about_needs_auth(client):
     assert client.get(ABOUT, headers=bad).status_code == 401
 
 
-def test_drive_about_serves_only_the_requested_fields(client, admin_h):
-    """Unlike `files.list` — whose typed response model always carries `kind` — `about` projects
-    strictly, which is what real Drive does: ask for `user` and `user` is all you get."""
-    j = _about(client, admin_h, "user").json()
-    assert set(j) == {"user"}
-    assert set(_about(client, admin_h, "user,storageQuota").json()) == {"user", "storageQuota"}
-
-
 def test_drive_about_nested_mask_selects_its_parent(client, admin_h):
-    """`storageQuota/limit` selects `storageQuota`, the same rule every other mask in Backlot
-    follows — one projection depth, applied consistently."""
+    """`storageQuota/limit` selects `storageQuota` whole, as `owners/kind` selects `owners` on
+    `files.get`."""
     j = _about(client, admin_h, "storageQuota/limit").json()
     assert set(j) == {"storageQuota"}
     assert "usage" in j["storageQuota"]
