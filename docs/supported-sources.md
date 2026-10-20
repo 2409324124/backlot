@@ -254,11 +254,11 @@ One `source_type` (`google_drive`) across four prefixes.
 
 | Endpoint | Notes |
 |---|---|
-| `/drive/v3/files` | `q`, parsed as the reference's grammar (`and`, `or`, `not`, parentheses, `\'` inside a value): `name` and `mimeType` with `contains`/`=`/`!=`, `fullText contains`, `modifiedTime` and `createdTime` with `<`/`<=`/`=`/`!=`/`>`/`>=`, `trashed`, `sharedWithMe`, `… in parents` incl. `'root'`, `… in owners`. A term Backlot cannot evaluate is a 400 on `q`, never a silently unfiltered listing. `orderBy`: the eleven keys the reference lists, each with or without ` asc` or ` desc`; `name_natural` in ICU's collation, as an English-language account's listing has it, `recency` newest first whichever way, and files a key ties newest modification first. `fields` projection, validated |
+| `/drive/v3/files` | `q`, parsed as the reference's grammar (`and`, `or`, `not`, parentheses, `\'` inside a value): `name` and `mimeType` with `contains`/`=`/`!=`, `fullText contains`, `modifiedTime`, `createdTime` and `viewedByMeTime` with `<`/`<=`/`=`/`!=`/`>`/`>=`, `trashed`, `starred` and `sharedWithMe`, each alone meaning `= true`, `… in parents` incl. `'root'`, `… in owners`; nothing is viewed or starred. A term Backlot cannot evaluate is a 400 on `q`, never a silently unfiltered listing, and so is a `q` of white space alone. `orderBy`: the eleven keys the reference lists, each with or without ` asc` or ` desc`; `name_natural` in ICU's collation, as an English-language account's listing has it, `recency` newest first whichever way, and files a key ties newest modification first. `fields` projection, validated |
 | `/drive/v3/files/{id}` | `fields` |
 | `/drive/v3/files/{id}/export` | |
 | `/drive/v3/files/{id}/permissions` | |
-| `/drive/v3/drives` | |
+| `/drive/v3/drives` | `q`, as a member who is not the domain's administrator may send it: `name` with `contains`/`=`/`!=` and `hidden` with `=`/`!=`; any other term is a 400 |
 | `/drive/v3/about` | `fields` **required**, as in real Google Drive; `storageQuota` is measured from the caller's visible corpus |
 | `/docs/v1/documents/{id}` | |
 | `/sheets/v4/spreadsheets/{id}` | One entry per sheet, with its own `sheetId`, `index`, `title` and `gridProperties`. Structure only — cells need `includeGridData=true`, as in real Sheets. `ranges` filters the `sheets` array itself, and gives a sheet one `data` block per range that touches it |
@@ -272,7 +272,7 @@ The three editor APIs serve native-doc content for editor-aware clients, read st
 of via Google Drive export.
 
 Folders are files here: they match `mimeType='…folder'`, project, sort and resolve permissions like
-stored rows. Trashed files are excluded unless `trashed = true` asks for them.
+stored rows. A trashed file is listed with the rest unless `q` leaves it out with `trashed = false`.
 
 A spreadsheet has two shapes, and the corpus record picks which. A record that states `sheets` is a
 real workbook: named sheets over a 2D grid whose cells keep the type the corpus gave them, so

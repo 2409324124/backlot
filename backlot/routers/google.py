@@ -1728,27 +1728,54 @@ def _gmail_message(
 # "Escape single quotes in queries with \'". Parentheses group. Whether `and` binds before `or` the
 # reference does not say; Backlot reads it as SQL does, `and` first.
 #
-# A term Backlot cannot evaluate is a 400 on `q`, never a silence. Two kinds: a term the reference
-# does not list (`bogusField = 'x'`), which real Drive refuses too — its wording is unmeasured, so
-# the bare `Invalid Value` of the parameter envelope stands — and a documented term Backlot holds no
-# fact for, refused with a message that says so, the way an unmodelled `orderBy` key is. Honouring
-# `starred = true` as "everything" would be the listing this section exists to stop.
+# A term Backlot cannot evaluate is a 400 on `q`, never a silence. Two kinds: a term the listing
+# does not take (`bogusField = 'x'`), which real Drive refuses too with the bare `Invalid Value` of
+# the parameter envelope, and a term `files.list` documents that Backlot holds no fact for, refused
+# with a message that says so. `viewedByMeTime` and `starred` are not that kind: nothing in the
+# corpus is viewed or starred, as every file's `viewedByMe` and `starred` say, and real answers a
+# file never viewed and never starred the way `_drive_q_eval` does.
 
-# Every term Backlot evaluates, with the operators the reference lists for it.
-_DRIVE_Q_OPERATORS: dict[str, frozenset[str]] = {
-    "name": frozenset({"contains", "=", "!="}),
-    "fullText": frozenset({"contains"}),
-    "mimeType": frozenset({"contains", "=", "!="}),
-    "modifiedTime": frozenset({"<=", "<", "=", "!=", ">", ">="}),
-    "createdTime": frozenset({"<=", "<", "=", "!=", ">", ">="}),
-    "trashed": frozenset({"=", "!="}),
-    "sharedWithMe": frozenset({"=", "!="}),
-}
-_DRIVE_Q_COLLECTIONS = frozenset({"parents", "owners"})
-_DRIVE_Q_BOOLEAN = frozenset({"trashed", "sharedWithMe"})
-# Documented on the reference, and nothing in a corpus record to evaluate them against.
-_DRIVE_Q_UNMODELLED = frozenset(
-    {"starred", "viewedByMeTime", "writers", "readers", "properties", "appProperties", "visibility"}
+_TIME_OPS = frozenset({"<=", "<", "=", "!=", ">", ">="})
+_TIME_FIELDS = frozenset({"modifiedTime", "createdTime", "viewedByMeTime"})
+
+
+class _DriveQTerms(NamedTuple):
+    """The terms one listing's `q` takes: each field with the operators the reference lists for
+    it, the fields whose value is `true` or `false` (and which alone mean `= true`), the fields
+    `'x' in <field>` takes, and the documented fields refused with a sentence saying Backlot does
+    not evaluate them."""
+
+    operators: dict[str, frozenset[str]]
+    boolean: frozenset[str]
+    collections: frozenset[str]
+    unmodelled: frozenset[str]
+
+
+_FILES_Q = _DriveQTerms(
+    operators={
+        "name": frozenset({"contains", "=", "!="}),
+        "fullText": frozenset({"contains"}),
+        "mimeType": frozenset({"contains", "=", "!="}),
+        "modifiedTime": _TIME_OPS,
+        "createdTime": _TIME_OPS,
+        "viewedByMeTime": _TIME_OPS,
+        "trashed": frozenset({"=", "!="}),
+        "starred": frozenset({"=", "!="}),
+        "sharedWithMe": frozenset({"=", "!="}),
+    },
+    boolean=frozenset({"trashed", "starred", "sharedWithMe"}),
+    collections=frozenset({"parents", "owners"}),
+    unmodelled=frozenset({"writers", "readers", "properties", "appProperties", "visibility"}),
+)
+# What `drives.list` takes from a caller who is not the domain's administrator, measured 2026-10-20
+# as a Google Workspace member of two shared drives. The reference's other four terms for it,
+# `memberCount`, `organizerCount`, `orgUnitId` and `createdTime`, were each the 400 at `q` with a
+# value of their own type.
+_DRIVES_Q = _DriveQTerms(
+    operators={"name": frozenset({"contains", "=", "!="}), "hidden": frozenset({"=", "!="})},
+    boolean=frozenset({"hidden"}),
+    collections=frozenset(),
+    unmodelled=frozenset(),
 )
 # `{` and `}` are tokens so that `properties has { key='x' and value='y' }`, the reference's own
 # spelling, reaches `term()` with the field read — the refusal then names `properties` instead of
@@ -1802,14 +1829,16 @@ def _drive_q_tokens(q: str) -> list[tuple[str, str]]:
     return out
 
 
-def _drive_q_parse(q: str):
-    """The parsed query, or ``None`` for an empty one. A clause Backlot cannot evaluate is a 400.
-
-    A query that names no ``trashed`` term gets ``and trashed = false`` appended: real Drive leaves
-    trashed files out of a listing unless a clause asks for them, as the plain listing does through
-    ``exclude_trashed``."""
+def _drive_q_parse(q: str, terms: _DriveQTerms = _FILES_Q):
+    """The parsed query, or ``None`` for an empty one; a query of white space alone is the 400, as
+    real answered a space, a tab, a newline and U+00A0 on `files.list` and a space and a tab on
+    `drives.list`. A clause ``terms`` does not take is a 400. Nothing is added to the query, so one
+    that names no ``trashed`` term matches a trashed file, as `drive_files_list` lists the trash
+    with no ``q``."""
     tokens = _drive_q_tokens(q)
     if not tokens:
+        if q:
+            raise _drive_q_refused()
         return None
     pos = 0
 
@@ -1862,7 +1891,7 @@ def _drive_q_parse(q: str):
             depth -= 1
 
     def unmodelled(field: str) -> gerr.GoogleError:
-        evaluated = ", ".join(sorted(_DRIVE_Q_OPERATORS))
+        evaluated = ", ".join(sorted(terms.operators))
         return _drive_q_refused(
             f"'{field}' is not evaluated by Backlot: a corpus record carries nothing to answer it "
             f"from. Terms it evaluates: {evaluated}, and 'x' in parents / owners."
@@ -1877,17 +1906,17 @@ def _drive_q_parse(q: str):
             fkind, field = take()
             if fkind != "word":
                 raise _drive_q_refused()
-            if field in _DRIVE_Q_UNMODELLED:
+            if field in terms.unmodelled:
                 raise unmodelled(field)
-            if field not in _DRIVE_Q_COLLECTIONS:
+            if field not in terms.collections:
                 raise _drive_q_refused()
             return _QTerm(field, "in", text or "")
         if kind != "word" or text is None:
             raise _drive_q_refused()
         field = text
-        if field in _DRIVE_Q_UNMODELLED:
+        if field in terms.unmodelled:
             raise unmodelled(field)
-        if field not in _DRIVE_Q_OPERATORS:
+        if field not in terms.operators:
             raise _drive_q_refused()
         okind, op = peek()
         if okind == "op":
@@ -1895,32 +1924,32 @@ def _drive_q_parse(q: str):
         elif okind == "word" and (op or "").lower() in ("contains", "has", "in"):
             take()
             op = (op or "").lower()
-        elif field == "sharedWithMe":
-            # The bare `sharedWithMe` Drive also accepts, meaning true.
+        elif field in terms.boolean:
+            # The bare `sharedWithMe`, `trashed`, `starred` or `hidden` Drive also accepts,
+            # meaning true.
             return _QTerm(field, "=", "true")
         else:
             raise _drive_q_refused()
-        if op not in _DRIVE_Q_OPERATORS[field]:
+        if op not in terms.operators[field]:
             raise _drive_q_refused()
         vkind, value = take()
-        if field in _DRIVE_Q_BOOLEAN:
+        if field in terms.boolean:
             if vkind != "word" or (value or "").lower() not in ("true", "false"):
                 raise _drive_q_refused()
             return _QTerm(field, op or "", (value or "").lower())
         if vkind != "str":
             raise _drive_q_refused()
-        if field in ("modifiedTime", "createdTime") and _drive_q_time(value or "") is None:
+        if field in _TIME_FIELDS and _drive_q_time(value or "") is None:
             # The reference wants RFC 3339 here. A value that is not one would otherwise compare
-            # as a string against the file's timestamp and answer something for every file; what
-            # real Drive answers for it is unmeasured, so this is a refusal rather than its wording.
+            # as a string against the file's timestamp and answer something for every file; real
+            # answered `modifiedTime < 'yesterday'`, `createdTime < 'yesterday'` and
+            # `viewedByMeTime > 'garbage'` with this 400, measured 2026-10-20.
             raise _drive_q_refused()
         return _QTerm(field, op or "", value or "")
 
     node = disjunction()
     if pos != len(tokens):
         raise _drive_q_refused()
-    if not any(t.field == "trashed" for t in _drive_q_terms(node)):
-        node = _QAnd((node, _QTerm("trashed", "=", "false")))
     return node
 
 
@@ -1993,6 +2022,12 @@ def _drive_q_eval(node, f: dict, me: str | None, fulltext: dict[str, set[str]]) 
     field, op, value = node
     if field == "trashed":
         return ((value == "true") == f["trashed"]) == (op == "=")
+    if field == "starred":
+        return (value == "false") == (op == "=")
+    if field == "viewedByMeTime":
+        # No file has one: real matched a file its caller never viewed under `!=` and under no
+        # other comparison, measured 2026-10-20, and `not` around any of them matches the rest.
+        return op == "!="
     if field == "sharedWithMe":
         # "Shared with me" = visible to the caller and not owned by them. Items shared with you
         # carry no My Drive parent on real Drive, so this clause is the only way to enumerate
@@ -2407,12 +2442,13 @@ def _drive_starred_after_another_key(order_by: str | None) -> bool:
 
 
 def _drive_q_plain_folder(query) -> bool:
-    """True when the query is just a folder scope (``'<id>' in parents``, and the ``trashed =
-    false`` every query carries) with no other clause — the shape a tree-walking client sends,
-    servable straight from SQL."""
-    return _drive_q_is_conjunction(query) and all(
-        t.field == "parents" or t == _QTerm("trashed", "=", "false")
-        for t in _drive_q_conjuncts(query)
+    """True when the query is just a folder scope, ``'<id>' in parents and trashed = false`` with
+    no other clause — the shape a tree-walking client sends, servable straight from SQL, whose
+    folder listing leaves out the trash as that query does."""
+    conjuncts = _drive_q_conjuncts(query) if _drive_q_is_conjunction(query) else []
+    trashed_false = _QTerm("trashed", "=", "false")
+    return trashed_false in conjuncts and all(
+        t.field == "parents" or t == trashed_false for t in conjuncts
     )
 
 
@@ -2688,6 +2724,9 @@ async def drive_shared_drives(request: Request):
     _drive_page_size_in_range(
         _drive_typed(request, "useDomainAdminAccess", page_size=True)["pageSize"], 100
     )
+    # A `q` it does not take comes after the typed and range refusals and ahead of a bad
+    # `pageToken` and the 403 below, measured 2026-10-20 by sending one of each beside it.
+    _drive_q_parse(gerr.first_repeat(request.query_params, "q") or "", _DRIVES_Q)
     _drive_listing_page_token(request)
     # Every caller here is a member of one Workspace domain and none is its administrator: a
     # member's 403, with a `q` sent and without one, on its own and in a batch, measured 2026-10-06.
@@ -2779,16 +2818,11 @@ async def drive_files_list(request: Request):
         matched = _drive_q_rows(conn, query, container, ids, me, hits)
         total_rows, fetch = len(matched), lambda o, n: matched[o : o + n]  # noqa: E731
     else:
-        # exclude_trashed: with no `q` at all there is no query to carry `trashed = false`, and
-        # real Drive leaves trashed files out of files.list unless `trashed = true` asks for them.
-        # The q-bearing paths already do this (the `trashed = false` _drive_q_parse appends,
-        # store.list_drive_folder's WHERE), so without it the DEFAULT listing was the one call that
-        # returned trash.
-        total_rows = store.count_documents(
-            conn, "google_drive", visible_ids=ids, exclude_trashed=True
-        )
+        # The trash with the rest: real listed a trashed file with no `q`, and under each `q` it was
+        # sent that named no `trashed` term, measured 2026-10-20 on two accounts' Drives.
+        total_rows = store.count_documents(conn, "google_drive", visible_ids=ids)
         fetch = lambda o, n: store.list_documents(  # noqa: E731
-            conn, "google_drive", visible_ids=ids, limit=n, offset=o, exclude_trashed=True
+            conn, "google_drive", visible_ids=ids, limit=n, offset=o
         )
 
     # The file ids that came from the row stream, as opposed to a synthesized folder -- see
