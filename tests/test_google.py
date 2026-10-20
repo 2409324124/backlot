@@ -1768,11 +1768,18 @@ def test_drive_permissions_list_pages_a_file_with_three_permissions(tmp_path, si
     assert [x for p in pages for x in p["permissions"]] == whole
 
 
-def test_drive_permissions_list_declares_the_parameters_it_pages_by(client):
-    """`pageSize` and `pageToken` shape the page, so a client reading the OpenAPI document can
-    find them, and `backlot diff --source google_drive` reports neither as missing."""
-    op = client.app.openapi()["paths"]["/drive/v3/files/{file_id}/permissions"]["get"]
-    assert {"pageSize", "pageToken"} <= {p["name"] for p in op["parameters"]}
+@pytest.mark.parametrize(
+    "route, names",
+    [
+        ("/drive/v3/files/{file_id}/permissions", {"pageSize", "pageToken"}),
+        ("/drive/v3/drives", {"q"}),
+    ],
+)
+def test_drive_listing_declares_the_parameters_it_reads(client, route, names):
+    """A parameter that shapes the answer is declared, so a client reading the OpenAPI document can
+    find it, and `backlot diff --source google_drive` reports none of them as missing."""
+    op = client.app.openapi()["paths"][route]["get"]
+    assert names <= {p["name"] for p in op["parameters"]}
 
 
 @pytest.mark.parametrize(
