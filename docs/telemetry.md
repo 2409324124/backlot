@@ -64,6 +64,8 @@ Each export carries the Backlot version, the operating system family (`darwin`, 
 - Anything from your corpus: channel, repository, bucket, key, page or issue names and ids.
 - Any identifier of the installation, the machine or the person, and no `User-Agent` string as sent.
 
+An export arrives from your network address, as any request does. The receiving side does not keep it: the collector stores only the values listed above, and the load balancer in front of it keeps no access log.
+
 An operation's name comes from Backlot's own fidelity baselines (`backlot/fidelity/baseline/`), which record every operation of each vendor's contract, or from the name of a route Backlot adds beyond it (`extra`), never from the request. A Google batch envelope is `batch`, beside a call for each of its parts. A request that asks for something no baseline names is counted as `unmatched`, a GraphQL field outside the vendor's schema as `query.unmatched`, a GraphQL document that does not parse as `unparsed`, and a mutation or subscription as `mutation` or `subscription`.
 
 ## The code

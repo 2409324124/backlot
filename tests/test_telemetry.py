@@ -4,18 +4,24 @@ test starts one."""
 
 from __future__ import annotations
 
+import base64
+import gzip
 import json
 import os
 import re
+import socket
 import threading
+import time
+import zlib
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import pytest
 
 from backlot.config import get_settings
 from backlot.server import HELLO_CORPUS
-from backlot.telemetry import clients, enabled, naming, notice, recorder
+from backlot.telemetry import clients, enabled, errors, naming, notice, recorder
 from backlot.telemetry.errors import error_class
+from backlot.telemetry.middleware import _credential
 from backlot.telemetry.recorder import MAX_SERIES, RECORDER, Exporter, Recorder, encode
 from tests._helpers import build_corpus, client_for
 
@@ -164,13 +170,32 @@ def test_each_way_to_start_a_server_can_turn_it_off(monkeypatch, hello, capsys):
     assert seen == [True, False, True, False, None, True, "0", False]
 
 
-@pytest.mark.parametrize("rule", clients._CLIENTS, ids=lambda rule: rule.label.partition("/")[0])
-def test_each_client_rule_names_the_headers_it_was_measured_from(rule):
-    # The rule itself answers, not an earlier one, with the version the headers carry.
-    label = clients.client(rule.sent)
-    assert label.partition("/")[0] == rule.label.partition("/")[0]
-    version = label.partition("/")[2]
-    assert not version or re.search(rf"\b{re.escape(version)}\b", rule.sent[rule.header])
+def test_each_client_rule_names_the_headers_it_was_measured_from():
+    assert [rule.label.partition("/")[0] for rule in clients._CLIENTS] == [
+        "google-api-python-client",
+        "google-auth",
+        "boto3",
+        "aiobotocore",
+        "botocore",
+        "slack_sdk",
+        "hubspot-api-client",
+        "notion-client",
+        "PyGithub",
+        "aiohttp",
+        "python-httpx2",
+        "python-httpx",
+        "python-requests",
+        "python-urllib",
+        "httplib2",
+        "curl",
+        "node",
+    ]
+    for rule in clients._CLIENTS:
+        # The rule itself answers, not an earlier one, with the version the headers carry.
+        label = clients.client(rule.sent)
+        assert label.partition("/")[0] == rule.label.partition("/")[0], rule
+        version = label.partition("/")[2]
+        assert not version or re.search(rf"\b{re.escape(version)}\b", rule.sent[rule.header])
     assert clients.client({"user-agent": "Mozilla/5.0 (Macintosh) AppleWebKit/537.36"}) == "other"
     assert clients.client({}) == "other"
 
@@ -183,6 +208,10 @@ def test_each_client_rule_names_the_headers_it_was_measured_from(rule):
         ("slack", "implemented", 429, "ratelimited", False, "rate_limit"),
         ("hubspot", "implemented", 401, "INVALID_AUTHENTICATION", False, "auth"),
         ("slack", "implemented", 200, "invalid_auth", False, "auth"),
+        ("slack", "implemented", 200, "not_authed", False, "auth"),
+        ("slack", "implemented", 200, "account_inactive", False, "auth"),
+        # Slack's own code at 200, not an exception of Backlot's.
+        ("slack", "implemented", 200, "internal_error", False, "client"),
         ("linear", "implemented", 200, "unsupported_filter", False, "unsupported"),
         ("gmail", "implemented", 501, "notImplemented", False, "client"),
         ("gmail", "implemented", 503, "backendError", False, "internal"),
@@ -190,6 +219,55 @@ def test_each_client_rule_names_the_headers_it_was_measured_from(rule):
 )
 def test_a_failure_is_classed_by_its_answer(source, support, status, code, spent, expected):
     assert error_class(source, support, status, code, spent) == expected
+    assert error_class(source, support, status, code, spent, raised=True) == "internal"
+
+
+@pytest.mark.parametrize(
+    "source, status, body, expected",
+    [
+        ("slack", 200, b'{"ok":false,"error":"channel_not_found"}', "channel_not_found"),
+        ("s3", 404, b"<Error><Code>NoSuchKey</Code></Error>", "NoSuchKey"),
+        (
+            "gmail",
+            404,
+            b'{"error":{"errors":[{"reason":"notFound"}],"status":"NOT_FOUND"}}',
+            "notFound",
+        ),
+        ("google_drive", 404, b'{"error":{"code":404,"status":"NOT_FOUND"}}', "NOT_FOUND"),
+        ("gmail", 400, b'{"error":"invalid_request"}', ""),
+        ("notion", 404, b'{"object":"error","code":"object_not_found"}', "object_not_found"),
+        (
+            "hubspot",
+            401,
+            b'{"status":"error","category":"INVALID_AUTHENTICATION"}',
+            "INVALID_AUTHENTICATION",
+        ),
+        ("github", 404, b'{"message":"Not Found"}', "not_found"),
+        ("github", 422, b'{"message":"something Backlot never says"}', "unrecognized"),
+        (
+            "jira",
+            404,
+            b'{"errorMessages":["Issue does not exist or you do not have permission to see it."]}',
+            "issue_not_found",
+        ),
+        (
+            "confluence",
+            404,
+            b'{"message":"No content found with id: ContentId{id=1}"}',
+            "content_not_found",
+        ),
+        (
+            "fireflies",
+            200,
+            b'{"errors":[{"message":"x","extensions":{"code":"invalid_argument"}}]}',
+            "invalid_argument",
+        ),
+        ("linear", 200, b'{"errors":[{"message":"Entity not found: Issue"}]}', "entity_not_found"),
+        ("linear", 400, b'{"errors":[{"message":"x","extensions":[1]}]}', "unrecognized"),
+    ],
+)
+def test_an_error_code_is_the_envelopes_own_identifier(source, status, body, expected):
+    assert errors.error_code(source, status, body) == expected
 
 
 GITHUB = "/github/repos/acme/docs-site"
@@ -315,28 +393,59 @@ def test_a_call_is_named_by_the_baseline(client, method, path, kwargs, expected)
 
 
 @pytest.mark.parametrize(
-    "query, expected",
+    "query, encoding, expected",
     [
-        ("{ issues(first: 1) { nodes { id } } }", ("query.issues", "implemented", 200, None, None)),
+        (
+            "{ issues(first: 1) { nodes { id } } }",
+            None,
+            ("query.issues", "implemented", 200, None, None),
+        ),
+        # Named by the document the route read, which Linear inflates.
+        (
+            "{ issues(first: 1) { nodes { id } } }",
+            "gzip",
+            ("query.issues", "implemented", 200, None, None),
+        ),
+        (
+            "{ issues(first: 1) { nodes { id } } }",
+            "deflate",
+            ("query.issues", "implemented", 200, None, None),
+        ),
         (
             '{ issue(id: "x") { id } teams { nodes { id } } }',
+            None,
             ("query.issue,teams", "implemented", 200, "entity_not_found", "client"),
         ),
         (
             "{ projects { nodes { id } } }",
+            None,
             ("query.projects", "missing", 400, "graphql_validation", "unsupported"),
         ),
-        ("{ notAField }", ("query.unmatched", "unknown", 400, "graphql_validation", "client")),
+        (
+            "{ notAField }",
+            None,
+            ("query.unmatched", "unknown", 400, "graphql_validation", "client"),
+        ),
         (
             'mutation { issueCreate(input: {title: "x", teamId: "t"}) { success } }',
+            None,
             ("mutation", "unknown", 400, "graphql_validation", "client"),
         ),
-        ("{ issues {", ("unparsed", "unknown", 400, "graphql_parse", "client")),
-        ("{ __schema { queryType { name } } }", ("query.__schema", "implemented", 200, None, None)),
+        ("{ issues {", None, ("unparsed", "unknown", 400, "graphql_parse", "client")),
+        (
+            "{ __schema { queryType { name } } }",
+            None,
+            ("query.__schema", "implemented", 200, None, None),
+        ),
     ],
 )
-def test_a_graphql_call_is_named_by_its_root_fields(client, query, expected):
-    calls = _calls(lambda: client.post("/linear/graphql", headers=LINEAR, json={"query": query}))
+def test_a_graphql_call_is_named_by_its_root_fields(client, query, encoding, expected):
+    body = json.dumps({"query": query}).encode()
+    headers = LINEAR | {"Content-Type": "application/json"}
+    if encoding:
+        body = gzip.compress(body) if encoding == "gzip" else zlib.compress(body)
+        headers |= {"Content-Encoding": encoding}
+    calls = _calls(lambda: client.post("/linear/graphql", headers=headers, content=body))
     assert len(calls) == 1, calls
     c = calls[0]
     assert (
@@ -349,20 +458,58 @@ def test_a_graphql_call_is_named_by_its_root_fields(client, query, expected):
     assert (c["backlot.auth.kind"], c["backlot.caller.kind"]) == ("api_key", "admin")
 
 
+def test_a_fragment_that_spreads_others_is_named_in_bounded_time():
+    # Four fragments that each spread the next 80 times expand to 41 million visits.
+    fragments = " ".join(
+        f"fragment F{i} on Query {{ {' '.join([f'...F{i + 1}'] * 80)} }}" for i in range(4)
+    )
+    query = f"{{ ...F0 }} {fragments} fragment F4 on Query {{ issues {{ nodes {{ id }} }} }}"
+    namer = naming.Namer()
+    namer.source_of("/linear/graphql")  # loads the baselines outside the timing
+    began = time.perf_counter()
+    named = namer._graphql_call("linear", {"query": query})
+    assert named.operation == "query.issues"
+    assert time.perf_counter() - began < 1
+
+
 def test_how_a_call_authenticated_is_counted_without_its_credential(client, hello):
     tokens = __import__("yaml").safe_load(hello.tokens_path.read_text(encoding="utf-8"))
     user = tokens["users"][0]["token"]
     sigv4 = "AWS4-HMAC-SHA256 Credential=AKIAEXAMPLE/20261019/us-east-1/s3/aws4_request, SignedHeaders=host, Signature=00"
+    basic = base64.b64encode(f"x:{user}".encode()).decode()
     cases = [
-        ({}, ("anonymous", "anonymous")),
-        (ADMIN, ("bearer", "admin")),
-        ({"Authorization": f"Bearer {user}"}, ("bearer", "user")),
-        ({"Authorization": sigv4}, ("sigv4", "user")),
+        ("GET", GITHUB, {}, ("anonymous", "anonymous")),
+        ("GET", GITHUB, {"headers": ADMIN}, ("bearer", "admin")),
+        ("GET", GITHUB, {"headers": {"Authorization": f"Bearer {user}"}}, ("bearer", "user")),
+        ("GET", GITHUB, {"headers": {"Authorization": f"Basic {basic}"}}, ("basic", "user")),
+        ("GET", GITHUB, {"headers": {"Authorization": sigv4}}, ("sigv4", "user")),
+        ("GET", GITHUB, {"headers": {"Authorization": "AWS AKIAEXAMPLE:c2ln"}}, ("sigv2", "user")),
+        (
+            "GET",
+            GITHUB,
+            {"params": {"X-Amz-Credential": "AKIAEXAMPLE/20261019"}},
+            ("presigned", "user"),
+        ),
+        ("GET", GITHUB, {"params": {"hapikey": user}}, ("api_key", "user")),
+        ("POST", "/slack/api/auth.test", {"data": {"token": user}}, ("bearer", "user")),
     ]
-    for headers, expected in cases:
-        (c,) = _calls(lambda: client.get(GITHUB, headers=headers))
-        assert (c["backlot.auth.kind"], c["backlot.caller.kind"]) == expected
+    for method, path, kwargs, expected in cases:
+        (c,) = _calls(lambda: client.request(method, path, **kwargs))
+        assert (c["backlot.auth.kind"], c["backlot.caller.kind"]) == expected, kwargs
         assert user not in json.dumps(c)
+    # A credential with no `/` after it is read in linear time.
+    began = time.perf_counter()
+    _credential({"authorization": "AWS4-HMAC-SHA256 " + "Credential=" * 24_000}, {}, {})
+    assert time.perf_counter() - began < 0.5
+
+
+def test_a_spent_github_window_is_a_rate_limit(hello):
+    with client_for(hello) as c:
+        for _ in range(100):
+            if c.get("/github/search/issues?q=x", headers=ADMIN).status_code != 200:
+                break
+        (call,) = _calls(lambda: c.get("/github/search/issues?q=x", headers=ADMIN))
+    assert (call["http.response.status_code"], call["backlot.error_class"]) == (403, "rate_limit")
 
 
 def test_each_part_of_a_google_batch_is_a_call_of_its_own(client):
@@ -423,6 +570,9 @@ def test_nothing_the_request_spelled_reaches_an_export(client):
             f"/github/repos/{marker}/{marker}/commits", headers=ADMIN, follow_redirects=False
         ),
         lambda: client.post("/slack/api/search.messages", headers=ADMIN, data={"query": marker}),
+        # api.test answers with the `error` it is sent.
+        lambda: client.post("/slack/api/api.test", headers=ADMIN, data={"error": marker}),
+        lambda: client.post(f"/slack/api/api.test?error={marker}", headers=ADMIN),
         lambda: client.post(f"/slack/api/{marker}.method", headers=ADMIN),
         lambda: client.get(f"/atlassian/rest/api/3/issue/{marker}-1", headers=ADMIN),
         lambda: client.get(f"/{marker}/v1/{marker}", headers=ADMIN),
@@ -483,7 +633,7 @@ def collector():
     server.shutdown()
 
 
-def test_the_exporter_posts_each_interval_and_survives_a_dead_endpoint(collector):
+def test_the_exporter_posts_each_interval_and_survives_a_dead_endpoint(collector, monkeypatch):
     url, bodies = collector
     recorder = Recorder()
     attrs = {
@@ -491,8 +641,10 @@ def test_the_exporter_posts_each_interval_and_survives_a_dead_endpoint(collector
         "backlot.operation": "repos/get",
         "http.response.status_code": 200,
     }
-    for ms in (3, 30, 3000):
-        recorder.record(attrs, ms)
+    recorder.record(attrs, 3)
+    recorder.record(attrs, 30)
+    # How a call was answered splits its count, not its latency.
+    recorder.record(attrs | {"http.response.status_code": 404, "backlot.error_code": "x"}, 3000)
     live = Exporter(recorder, url, 3600, surface=lambda: {("github", "implemented"): 32})
     live.flush()
     live.flush()  # an empty interval sends nothing
@@ -500,9 +652,9 @@ def test_the_exporter_posts_each_interval_and_survives_a_dead_endpoint(collector
     (sums, hists, gauge) = bodies[0]["resourceMetrics"][0]["scopeMetrics"][0]["metrics"]
     assert gauge["name"] == "backlot.surface.operations"
     assert gauge["gauge"]["dataPoints"][0]["asInt"] == "32"
-    assert (
-        sums["sum"]["dataPoints"][0]["asInt"] == "3" and sums["sum"]["aggregationTemporality"] == 1
-    )
+    assert sorted(p["asInt"] for p in sums["sum"]["dataPoints"]) == ["1", "2"]
+    assert sums["sum"]["aggregationTemporality"] == 1
+    assert len(hists["histogram"]["dataPoints"]) == 1
     assert hists["histogram"]["dataPoints"][0]["bucketCounts"] == [
         "1",
         "0",
@@ -522,11 +674,37 @@ def test_the_exporter_posts_each_interval_and_survives_a_dead_endpoint(collector
     dead.flush(timeout=1)
     assert (dead.sent, dead.failed) == (0, 1)
 
+    # Once an interval, not only at shutdown.
+    ticking = Exporter(recorder, url, 1)
+    ticking.start()
+    recorder.record(attrs, 1)
+    deadline = time.monotonic() + 5
+    while len(bodies) < 2 and time.monotonic() < deadline:
+        time.sleep(0.05)
+    ticking.stop()
+    assert len(bodies) == 2
+
     for i in range(MAX_SERIES + 10):
         recorder.record({"backlot.operation": f"op{i}"}, 1)
-    metrics = encode(*recorder.take())["resourceMetrics"][0]["scopeMetrics"][0]["metrics"]
+    recorder.record({"backlot.operation": "op0"}, 1)  # a combination already held still counts
+    interval = recorder.take()
+    assert interval[2][(("backlot.operation", "op0"),)] == 2
+    metrics = encode(*interval)["resourceMetrics"][0]["scopeMetrics"][0]["metrics"]
     (dropped,) = [m for m in metrics if m["name"] == "backlot.http.dropped"]
     assert dropped["sum"]["dataPoints"][0]["asInt"] == "10"
+
+    # A resolver that stalls is outside httpx's timeout; stopping is still bounded.
+    resolve = socket.getaddrinfo
+    monkeypatch.setattr(
+        socket,
+        "getaddrinfo",
+        lambda host, *a, **k: time.sleep(3) or resolve(host, *a, **k),
+    )
+    stalled = Exporter(recorder, "http://stalled.invalid/v1/metrics", 3600)
+    recorder.record(attrs, 1)
+    began = time.monotonic()
+    stalled.stop(timeout=0.5)
+    assert time.monotonic() - began < 1
 
 
 def test_a_server_sends_what_it_counted_when_it_stops(hello, collector):

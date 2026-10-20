@@ -23,7 +23,7 @@ from backlot.telemetry.recorder import RECORDER, Recorder
 
 _ERROR_BODY_CAP = 256 * 1024
 _GRAPHQL_BODY_CAP = 4 * 1024 * 1024
-_SIGV4_KEY = re.compile(r"Credential=([^/,\s]+)/")
+_SIGV4_KEY = re.compile(r"Credential=([^/,\s]{1,128})/")
 # The client label of the request being answered. A Google batch re-sends each part through this
 # app with Backlot's own HTTP client, so a part takes the label of the batch that carried it.
 _CLIENT: ContextVar[str | None] = ContextVar("telemetry_client", default=None)
@@ -55,10 +55,6 @@ class TelemetryMiddleware:
         source = placed[0] if placed else "other"
         graphql = source in ("linear", "fireflies")
 
-        request_body: bytes | None = None
-        if graphql and scope["method"] == "POST":
-            receive, request_body = await _buffered(receive)
-
         answer = {"status": 500, "body": bytearray(), "keep": False, "cap": 0, "ended": None}
         answer["spent"] = False
 
@@ -88,7 +84,7 @@ class TelemetryMiddleware:
         try:
             await self.app(scope, receive, watch)
         except Exception:
-            self._record(scope, client, headers, query, request_body, 500, None, False, began)
+            self._record(scope, client, headers, query, 500, None, False, began)
             raise
         finally:
             _CLIENT.reset(outer)
@@ -97,7 +93,6 @@ class TelemetryMiddleware:
             client,
             headers,
             query,
-            request_body,
             answer["status"],
             bytes(answer["body"]),
             answer["spent"],
@@ -106,7 +101,7 @@ class TelemetryMiddleware:
         )
 
     def _record(
-        self, scope, client, headers, query, request_body, status, body, spent, began, ended=None
+        self, scope, client, headers, query, status, body, spent, began, ended=None
     ) -> None:
         """Count one call. ``body`` is the answer's kept body, None for an unhandled exception."""
         try:
@@ -116,7 +111,8 @@ class TelemetryMiddleware:
                 route=scope.get("route"),
                 query=query,
                 headers=headers,
-                graphql_body=request_body,
+                # The GraphQL routes leave the document they parsed here.
+                graphql_payload=(scope.get("state") or {}).get("graphql_payload"),
             )
             kind, credential = _credential(headers, query, scope)
             attributes = {
@@ -137,37 +133,17 @@ class TelemetryMiddleware:
                 code = "internal_error"
             else:
                 code = errors.error_code(named.source, status, body) if body else ""
+                if named.source == "slack" and named.operation == "api.test":
+                    code = ""  # api.test echoes the caller's own `error`, not a slug Slack chose
             if code:
                 attributes["backlot.error_code"] = code
             if code or status >= 400:
                 attributes["backlot.error_class"] = errors.error_class(
-                    named.source, named.support, int(status), code, spent
+                    named.source, named.support, int(status), code, spent, raised=body is None
                 )
             self.recorder.record(attributes, ((ended or time.perf_counter()) - began) * 1000)
         except Exception:  # noqa: BLE001 — counting a call must never change the answer to it
             pass
-
-
-async def _buffered(receive: Any) -> tuple[Any, bytes]:
-    """Read the whole request body, and a ``receive`` that replays it to the app."""
-    messages, body = [], bytearray()
-    while True:
-        message = await receive()
-        messages.append(message)
-        if message["type"] != "http.request":
-            break
-        body += message.get("body", b"")
-        if not message.get("more_body", False):
-            break
-    replay = iter(messages)
-
-    async def again() -> dict:
-        try:
-            return next(replay)
-        except StopIteration:
-            return await receive()
-
-    return again, bytes(body)
 
 
 def _credential(

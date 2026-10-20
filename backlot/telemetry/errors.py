@@ -151,9 +151,12 @@ def error_code(source: str, status: int, body: bytes) -> str:
 _SLACK_AUTH = frozenset({"account_inactive", "invalid_auth", "not_authed"})
 
 
-def error_class(source: str, support: str, status: int, code: str, spent: bool) -> str:
-    """The class of a failed call; ``spent`` is whether it answered ``x-ratelimit-remaining: 0``."""
-    if code == "internal_error":
+def error_class(
+    source: str, support: str, status: int, code: str, spent: bool, raised: bool = False
+) -> str:
+    """The class of a failed call. ``spent`` is whether it answered ``x-ratelimit-remaining: 0``,
+    ``raised`` whether Backlot raised instead of answering."""
+    if raised:
         return "internal"
     if support in ("missing", "refused") or code == "unsupported_filter":
         return "unsupported"

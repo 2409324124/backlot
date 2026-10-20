@@ -101,7 +101,8 @@ def encode(
 ) -> dict | None:
     """The OTLP/JSON body for one interval, None for an interval with no calls.
 
-    ``dropped`` adds the ``backlot.http.dropped`` count: calls past :data:`MAX_SERIES` this interval.
+    ``dropped`` adds the ``backlot.http.dropped`` count: the calls past :data:`MAX_SERIES` this
+    interval.
 
     ``surface`` adds the ``backlot.surface.operations`` gauge: per source and support state, how
     many vendor operations this Backlot's baselines record, so coverage is read off the sender's own
@@ -264,7 +265,11 @@ class Exporter:
             self._thread.join(timeout)
         remaining = deadline - time.monotonic()
         if remaining > 0.05:
-            self.flush(timeout=remaining)
+            # On a thread of its own: httpx resolves the host outside its timeout, and a resolver
+            # held to 6 s made this wait 6.02 s. The thread is left behind at the bound.
+            final = threading.Thread(target=self.flush, kwargs={"timeout": remaining}, daemon=True)
+            final.start()
+            final.join(remaining)
 
 
 # The process's one recorder: the middleware counts into it and the server's exporter drains it.

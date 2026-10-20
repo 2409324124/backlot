@@ -19,7 +19,7 @@ class _Rule(NamedTuple):
 # proxy on 2026-10-14 (Python 3.12.12, Node 24), and curl, httplib2 and a bare botocore client
 # sent on their own on 2026-10-20 (Python 3.15.0).
 _CLIENTS = [
-    # examples/official-sdk/gmail.py and gdrive.py
+    # examples/using-official-sdk/gmail.py and gdrive.py
     _Rule(
         "x-goog-api-client",
         r"\bgdcl/(\d+)\.(\d+)",
@@ -36,7 +36,7 @@ _CLIENTS = [
             "x-goog-api-client": "gl-python/3.12.12 auth/2.57.1 cred-type/u",
         },
     ),
-    # examples/official-sdk/s3.py
+    # examples/using-official-sdk/s3.py
     _Rule(
         "user-agent",
         r"\bBoto3/(\d+)\.(\d+)",
@@ -47,7 +47,7 @@ _CLIENTS = [
             "Botocore/1.40.61"
         },
     ),
-    # examples/llamaindex-readers/s3.py, fsspec/s3.py and mirage/s3.py
+    # examples/using-llamaindex-readers/s3.py, using-fsspec/s3.py and using-mirage/s3.py
     _Rule(
         "user-agent",
         r"\baiobotocore/(\d+)\.(\d+)",
@@ -68,30 +68,30 @@ _CLIENTS = [
             "lang/python#3.15.0 md/pyimpl#CPython m/b,e,Z,D,N cfg/retry-mode#legacy"
         },
     ),
-    # examples/official-sdk/slack.py and llamaindex-readers/slack.py
+    # examples/using-official-sdk/slack.py and using-llamaindex-readers/slack.py
     _Rule(
         "user-agent",
         r"\bslackclient/(\d+)\.(\d+)",
         "slack_sdk/{v}",
         {"user-agent": "Python/3.12.12 slackclient/3.44.1 Darwin/24.6.0"},
     ),
-    # examples/official-sdk/hubspot.py
+    # examples/using-official-sdk/hubspot.py
     _Rule(
         "user-agent",
         r"\bhubspot-api-client-python; (\d+)\.(\d+)",
         "hubspot-api-client/{v}",
         {"user-agent": "hubspot-api-client-python; 12.0.0"},
     ),
-    # examples/official-sdk/notion.py
+    # examples/using-official-sdk/notion.py
     _Rule(
         "user-agent",
         r"\bnotion-sdk-py@(\d+)\.(\d+)",
         "notion-client/{v}",
         {"user-agent": "ramnes/notion-sdk-py@3.1.0"},
     ),
-    # examples/official-sdk/github.py
+    # examples/using-official-sdk/github.py
     _Rule("user-agent", r"^PyGithub/", "PyGithub", {"user-agent": "PyGithub/Python"}),
-    # examples/mirage/slack.py
+    # examples/using-mirage/slack.py
     _Rule(
         "user-agent",
         r"\baiohttp/(\d+)\.(\d+)",
@@ -105,14 +105,15 @@ _CLIENTS = [
         "python-httpx2/{v}",
         {"user-agent": "python-httpx2/2.12.0"},
     ),
-    # examples/official-sdk/fireflies.py and llamaindex-readers/github.py
+    # examples/using-official-sdk/fireflies.py and using-llamaindex-readers/github.py
     _Rule(
         "user-agent",
         r"^python-httpx/(\d+)\.(\d+)",
         "python-httpx/{v}",
         {"user-agent": "python-httpx/0.28.1"},
     ),
-    # examples/official-sdk/jira.py and confluence.py, llamaindex-readers/linear.py, fsspec/github.py
+    # examples/using-official-sdk/jira.py and confluence.py, using-llamaindex-readers/linear.py and
+    # using-fsspec/github.py
     _Rule(
         "user-agent",
         r"^python-requests/(\d+)\.(\d+)",
@@ -135,7 +136,7 @@ _CLIENTS = [
     ),
     # curl 8.7.1
     _Rule("user-agent", r"^curl/(\d+)\.(\d+)", "curl/{v}", {"user-agent": "curl/8.7.1"}),
-    # examples/official-sdk/linear/index.ts (@linear/sdk)
+    # examples/using-official-sdk/linear/index.ts (@linear/sdk)
     _Rule("user-agent", r"^node$", "node", {"user-agent": "node"}),
 ]
 

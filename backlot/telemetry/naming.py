@@ -166,7 +166,7 @@ class Namer:
         route: Any,
         query: Mapping[str, str],
         headers: Mapping[str, str],
-        graphql_body: bytes | None,
+        graphql_payload: Any = None,
     ) -> Named:
         self._load()
         placed = self.source_of(path)
@@ -174,7 +174,7 @@ class Namer:
             return Named("other", "unmatched", UNKNOWN)
         source, strip = placed
         if source in self._graphql:
-            return self._graphql_call(source, graphql_body)
+            return self._graphql_call(source, graphql_payload)
         if source == "s3":
             return self._s3_call(method, path[len(strip) :], query, headers)
         if path.startswith("/batch"):
@@ -250,15 +250,18 @@ class Namer:
             return Named("s3", "unmatched", UNKNOWN)
         return Named("s3", best.id, best.status)
 
-    def _graphql_call(self, source: str, body: bytes | None) -> Named:
+    def _graphql_call(self, source: str, payload: Any) -> Named:
+        """``payload`` is the request body as the route read it, None where it read none."""
         fields = self._graphql[source]
+        query = payload.get("query") if isinstance(payload, dict) else None
         try:
-            request = json.loads(body or b"")
-            document = parse(request["query"])
+            document = parse(query) if isinstance(query, str) else None
         except Exception:  # noqa: BLE001 — anything unreadable is one answer
+            document = None
+        if document is None:
             return Named(source, "unparsed", UNKNOWN)
         operations = [d for d in document.definitions if isinstance(d, OperationDefinitionNode)]
-        wanted = request.get("operationName") if isinstance(request, dict) else None
+        wanted = payload.get("operationName")
         chosen = next((o for o in operations if o.name and o.name.value == wanted), None) or (
             operations[0] if len(operations) == 1 or not wanted and operations else None
         )
@@ -282,18 +285,30 @@ def _under(path: str, prefix: str) -> bool:
     return path == prefix or path.startswith(prefix.rstrip("/") + "/")
 
 
+# Nodes visited per document. Fragments that each spread the next k times expand to k**depth
+# visits: 41 million for four levels at k=80, which a 2 KB body spells.
+_ROOT_FIELD_BUDGET = 10_000
+
+
 def _root_fields(
-    selections: Iterable[Any], fragments: Mapping[str, Any], depth: int = 0
+    selections: Iterable[Any],
+    fragments: Mapping[str, Any],
+    depth: int = 0,
+    budget: list[int] | None = None,
 ) -> list[str]:
+    budget = [_ROOT_FIELD_BUDGET] if budget is None else budget
     out: list[str] = []
     for node in selections:
+        if budget[0] <= 0:
+            break
+        budget[0] -= 1
         if isinstance(node, FieldNode):
             out.append(node.name.value)
         elif isinstance(node, InlineFragmentNode) and depth < 5:
-            out += _root_fields(node.selection_set.selections, fragments, depth + 1)
+            out += _root_fields(node.selection_set.selections, fragments, depth + 1, budget)
         elif isinstance(node, FragmentSpreadNode) and depth < 5 and node.name.value in fragments:
             out += _root_fields(
-                fragments[node.name.value].selection_set.selections, fragments, depth + 1
+                fragments[node.name.value].selection_set.selections, fragments, depth + 1, budget
             )
     return out
 
