@@ -116,7 +116,7 @@ class DrivePermissionList(_GLoose):
 # only (no JSON response_model, which would mis-serialize the raw body).
 _P_DRIVE_LIST = [qp("pageSize", "integer"), qp("pageToken"), qp("q"), qp("fields"), qp("orderBy")]
 _P_DRIVE_PERMISSIONS = [qp("pageSize", "integer"), qp("pageToken"), qp("fields")]
-_P_DRIVE_DRIVES = [qp("q")]
+_P_DRIVE_DRIVES = [qp("q"), qp("fields")]
 _P_DRIVE_ALT = [qp("alt"), qp("fields")]
 _P_DRIVE_EXPORT = [qp("mimeType", required=True)]
 _P_DRIVE_ABOUT = [qp("fields", required=True)]
