@@ -38,6 +38,18 @@ _PART_E = b'Content-Disposition: form-data; name="e"\r\n\r\nf\r\n'
 _PART_EMPTY = b'Content-Disposition: form-data; name=""\r\n\r\nx\r\n'
 
 
+def _file(name: str, filename: str = "x", value: str = "f") -> bytes:
+    """A file's part under :data:`_MULTIPART`, its delimiter included."""
+    return (
+        f'--b\r\nContent-Disposition: form-data; name="{name}"; filename="{filename}"\r\n\r\n{value}\r\n'
+    ).encode()
+
+
+def _field(name: str, value: str = "v") -> bytes:
+    """:func:`_file` with no `filename`: a value's part."""
+    return f'--b\r\nContent-Disposition: form-data; name="{name}"\r\n\r\n{value}\r\n'.encode()
+
+
 def _one_part(name: str, value: str) -> bytes:
     """:func:`_parts` with the one field ``name``."""
     return _parts([(name, value)])
@@ -3128,6 +3140,48 @@ def test_slack_post_charset_warning_on_a_refusal(
                 (b"; name=a b", {"a": "v"}),
                 (b'; name="a" x', "invalid_arg_name"),
                 (b';; name="a"', {"a": "v"}),
+            )
+        ),
+        # a file's part as HHVM takes or passes over one, and the names it protects
+        # (``slack._multipart_parts``): the bracket rule, the twenty-upload cap, an empty filename,
+        # a protected name's spelling
+        *(
+            ("POST", _MULTIPART, body, want)
+            for body, want in (
+                (_file("a") + _field("a[b]") + b"--b--\r\n", "invalid_array_arg"),
+                (_file("a[b]") + _field("a") + b"--b--\r\n", {"a": "v"}),
+                (_file("a]") + _field("a]") + b"--b--\r\n", "invalid_arg_name"),
+                (_file("a]") + b"--b--\r\n", "invalid_form_data"),
+                (_file("a[b") + _field("a_b") + b"--b--\r\n", {"a_b": "v"}),
+                (_file("a[b]c") + _field("a[b]") + b"--b--\r\n", "invalid_array_arg"),
+                (_file("a") + _field("a.b") + b"--b--\r\n", {"a_b": "v"}),
+                (_file("a.b") + _field("a_b") + b"--b--\r\n", {}),
+                (_file("a[tmp_name]") + _field("a") + b"--b--\r\n", {"a": "v"}),
+                (
+                    b"".join(_file(f"f{i}") for i in range(21))
+                    + _field("f20")
+                    + _field("f0", "w")
+                    + b"--b--\r\n",
+                    {"f20": "v"},
+                ),
+                (
+                    b"".join(_file(f"f{i}") for i in range(20))
+                    + _field("f19")
+                    + _field("f0", "w")
+                    + b"--b--\r\n",
+                    {},
+                ),
+                (_file("f", "") + _field("f") + b"--b--\r\n", {}),
+                (
+                    b'--b\r\nContent-Disposition: form-data; name="f"; filename=""\r\n\r\n--b\r\n'
+                    + _field("a")[5:]
+                    + b"--b--\r\n",
+                    {"a": "v"},
+                ),
+                (
+                    _file("a]", "x", "v" * 5120)[:-2] + b"--b\r\n" + _field("a")[5:] + b"--b--\r\n",
+                    {"a": "v"},
+                ),
             )
         ),
         # the media types HHVM's `IsRfc1867` reads as multipart (``slack._rfc1867_boundary``), and

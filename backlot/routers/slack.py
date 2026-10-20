@@ -370,6 +370,8 @@ def _unquote(raw: bytes) -> bytes:
 _C_SPACE = b" \t\n\v\f\r"
 #: HHVM's `FILLUNIT`: how many bytes its multipart buffer holds, and asks for at a time.
 _FILLUNIT = 5120
+#: HHVM's `Server.Upload.MaxFileUploads` as built: file parts past this many are skipped.
+_MAX_FILE_UPLOADS = 20
 
 
 def _rfc1867_boundary(content_type: str) -> bytes | None:
@@ -470,34 +472,43 @@ class _Rfc1867Buffer:
             headers.append((key, b"".join(pieces)))
         return headers
 
-    def read_body(self) -> bytes:
-        """`multipart_buffer_read_body`: the bytes up to the next `\n--` and the boundary or, with
-        none, to the body's end less a prefix of that it ends on (`\n`, `\n-`, `\n--b…`), which
-        the buffer's last read takes for a boundary cut short; less a CR before either, which
-        stays in the buffer. The reads of 5119 bytes behind this split a value without changing it,
-        so the body is read whole."""
-        self.fill()
-        body, start, bn = self.body, self.begin, self.boundary_next
-        cut = body.find(bn, start)
-        if cut == -1:
-            cut = len(body)
-            at = body.find(b"\n--", max(start, len(body) - len(bn) + 1))
+    def read(self) -> bytes:
+        """`multipart_buffer_read` asked for ``_FILLUNIT`` bytes: the buffer's bytes up to a `\\n--`
+        and the boundary, or up to a `\\n` the buffer ends on with a prefix of that after it, at
+        most 5119 of them, less a CR they end on while such a bound is in view, which stays in the
+        buffer. A bound the buffer ends on and a later fill does not disprove ends the value there:
+        with a boundary longer than the buffer's 5120 bytes, which no client sends, that cuts a
+        value at a `\\n--` of its own."""
+        if _FILLUNIT > self.held:
+            self.fill()
+        body, begin, end, bn = self.body, self.begin, self.begin + self.held, self.boundary_next
+        bound = body.find(bn, begin, end)
+        if bound == -1:
+            at = body.find(b"\n--", max(begin, end - len(bn) + 1), end)
             while at != -1:
-                if body.startswith(bn[: len(body) - at], at):
-                    cut = at
+                if body[at:end] == bn[: end - at]:
+                    bound = at
                     break
-                at = body.find(b"\n--", at + 1)
-            if cut == len(body) and body.endswith(b"\n-", start):
-                cut = len(body) - 2
-            elif cut == len(body) and body.endswith(b"\n", start):
-                cut = len(body) - 1
-        value = body[start:cut]
-        if cut < len(body) and value.endswith(b"\r"):
-            value = value[:-1]
-            cut -= 1
-        self.held = max(0, self.begin + self.held - cut)
-        self.begin = cut
-        return value
+                at = body.find(b"\n--", at + 1, end)
+            if bound == -1 and end - begin >= 2 and body[end - 2 : end] == b"\n-":
+                bound = end - 2
+            elif bound == -1 and end > begin and body[end - 1] == 0x0A:
+                bound = end - 1
+        n = min((end if bound == -1 else bound) - begin, _FILLUNIT - 1)
+        chunk = body[begin : begin + n]
+        if bound != -1 and chunk.endswith(b"\r"):
+            chunk = chunk[:-1]
+            n -= 1
+        self.begin += n
+        self.held -= n
+        return chunk
+
+    def read_body(self) -> bytes:
+        """`multipart_buffer_read_body`: :meth:`read` until it reads nothing."""
+        chunks = []
+        while chunk := self.read():
+            chunks.append(chunk)
+        return b"".join(chunks)
 
 
 def _getword(text: bytes, stop: int, start: int = 0) -> tuple[bytes, int]:
@@ -567,6 +578,37 @@ def _substring_conf(text: bytes, quote: int) -> bytes:
     return bytes(out)
 
 
+def _normalize_protected(name: bytes) -> bytes:
+    """`normalize_protected_variable`: a name as the set of protected names holds it, mangled up
+    to its first `[` as :func:`_registered_name` mangles one, each index less the spaces, tabs
+    and line breaks in front of it, and nothing after the last `]` that no `[` follows."""
+    head, bracket, rest = name.lstrip(b" ").partition(b"[")
+    out = bytearray(head.replace(b" ", b"_").replace(b".", b"_"))
+    while bracket:
+        rest = rest.lstrip(b" \r\n\t")
+        close = rest.find(b"]")
+        segment, after = (rest[: close + 1], rest[close + 1 :]) if close != -1 else (rest, b"")
+        out += b"[" + segment
+        bracket, rest = (b"[", after[1:]) if after.startswith(b"[") else (b"", b"")
+    return bytes(out)
+
+
+def _skips_upload(name: bytes) -> bool:
+    """Whether the name of a file's part fails HHVM's bracket rule, which skips the upload: a `]`
+    that closes none opened, or one followed by a byte other than `[`."""
+    depth = 0
+    for i, byte in enumerate(name):
+        if byte == 0x5B:
+            depth += 1
+        elif byte == 0x5D:
+            depth -= 1
+            if i + 1 < len(name) and name[i + 1] != 0x5B:
+                return True
+        if depth < 0:
+            return True
+    return False
+
+
 def _multipart_parts(content_type: str, body: bytes) -> list[tuple[bytes, bytes | None]] | None:
     """The (name, value) of each part of a multipart body as real reads them, the value None for a
     file's part, or None for a Content-Type :func:`_rfc1867_boundary` reads no boundary off.
@@ -580,14 +622,20 @@ def _multipart_parts(content_type: str, body: bytes) -> list[tuple[bytes, bytes 
     `filename`, each parameter's name read in any case, a part with no `Content-Disposition` is
     no part, one with neither parameter ends the reading, one with a `filename` alone is a file's,
     and a value runs from the line after the headers to the cut :meth:`_Rfc1867Buffer.read_body`
-    makes. Measured against slack.com/api on 2026-10-20: each multipart `POST` to `api.test`
-    captured is answered as this reads it."""
+    makes. A file's part past the twentieth, or one whose name fails :func:`_skips_upload`, is
+    passed over with its body unread, so the next delimiter is found line by line; one with an
+    empty `filename` is taken with its body unread too. A file's name, as
+    :func:`_normalize_protected` spells it, and its `tmp_name` key (:func:`_tmp_name_key`) are
+    protected: a later value under a protected name registers nothing. Measured against
+    slack.com/api on 2026-10-20: each multipart `POST` to `api.test` captured is answered as this
+    reads it."""
     boundary = _rfc1867_boundary(content_type)
     if boundary is None:
         return None
     buffer = _Rfc1867Buffer(body, boundary)
     parts: list[tuple[bytes, bytes | None]] = []
-    anonymous = 0
+    protected: set[bytes] = set()
+    anonymous = uploads = 0
     while not buffer.eof():
         headers = buffer.headers()
         if headers is None:
@@ -608,16 +656,34 @@ def _multipart_parts(content_type: str, body: bytes) -> list[tuple[bytes, bytes 
                 elif key.lower() == b"filename":
                     filename = _getword_conf(pair[eq:])
         if filename is None and name is not None:
-            parts.append((name, buffer.read_body()))
+            value = buffer.read_body()
+            if _normalize_protected(name) not in protected:
+                parts.append((name, value))
             continue
         if name is None and filename is None:
             break
         if name is None:
             name = b"%d" % anonymous
             anonymous += 1
-        buffer.read_body()
+        if uploads >= _MAX_FILE_UPLOADS or _skips_upload(name):
+            continue
+        uploads += 1
+        if filename:
+            buffer.read_body()
+        protected.add(_normalize_protected(name))
+        protected.add(_normalize_protected(_tmp_name_key(name)))
         parts.append((name, None))
     return parts
+
+
+def _tmp_name_key(name: bytes) -> bytes:
+    """The `$_FILES` key HHVM protects beside a file's name: `name[tmp_name]`, or for a name that
+    holds a `[` and ends in `]`, `head[tmp_name][index]` with `index` what lies between its first
+    `[` and its last `]`."""
+    first = name.find(b"[")
+    if first != -1 and name.endswith(b"]"):
+        return name[:first] + b"[tmp_name][" + name[first + 1 : -1] + b"]"
+    return name + b"[tmp_name]"
 
 
 def _registered_name(name: bytes) -> tuple[str, bool] | None:
@@ -645,11 +711,10 @@ def _register(pairs: list[tuple[bytes, bytes | None]]) -> tuple[dict | None, str
     """The arguments ``pairs`` register, the last value of a name read, or None for none at all, and
     the error real refuses them with: `invalid_arg_name` for any name :data:`_ARG_NAME` does not
     take, ahead of `invalid_array_arg` for any whose last value is an array, wherever each comes
-    in the body. A file's part registers without being an argument, and so does a later value of the
-    same name, and an integer name (:data:`_INT_NAME`, within 64 bits) is no argument either. A
-    file's name is not checked: `name="a{"` and `name="a[b]"` with a `filename` are served."""
+    in the body. A file's part registers without being an argument, and an integer name
+    (:data:`_INT_NAME`, within 64 bits) is no argument either. A file's name is not checked:
+    `name="a{"` and `name="a[b]"` with a `filename` are served."""
     args: dict = {}
-    files: set[str] = set()
     registered = False
     for raw_name, raw_value in pairs:
         reg = _registered_name(raw_name)
@@ -658,9 +723,6 @@ def _register(pairs: list[tuple[bytes, bytes | None]]) -> tuple[dict | None, str
         registered = True
         name, is_array = reg
         if raw_value is None:
-            files.add(name)
-            continue
-        if name in files:
             continue
         if is_array:
             args[name] = _ARRAY
