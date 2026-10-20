@@ -4967,7 +4967,8 @@ _BY_NAME_2 = [
     "一",
     "𠀀",
 ]
-# The third: Thai names whose last two code points collate as one.
+# The third: U+0E01 U+0E4D U+0E32, whose last two code points collate as one and tie it with U+0E01
+# U+0E33, beside Thai names that hold one of its parts or neither.
 _MADE_3 = [
     "\u0e01\u0e4d\u0e32",
     "\u0e01\u0e33",
@@ -4997,6 +4998,60 @@ _BY_NAME_NATURAL_DESC_3 = [
 _MADE_4 = ["ab", "a\u00adb", "aa", "a\u200bb", "ac", "a\ufeffb"]
 _BY_NAME_NATURAL_4 = ["aa", "a\ufeffb", "a\u200bb", "a\u00adb", "ab", "ac"]
 _BY_NAME_NATURAL_DESC_4 = ["ac", "a\ufeffb", "a\u200bb", "a\u00adb", "ab", "aa"]
+# The fifth: a number of 255 digits beside one of 254, digits beside characters ICU weighs as digit
+# zero, a Cyrillic `и` whose breve follows its dot below and so collates as `й`, and Tibetan vowel
+# signs a sign further on completes; `name_natural desc` was the exact reverse.
+_MADE_5 = ["1" + "0" * 254, "2" + "0" * 253, "x5", "x\u2070", "x1", "x\u24ea", "x0"]
+_MADE_5 += [
+    "\u0438\u0430",
+    "\u0438\u0432",
+    "\u0439\u0430",
+    "\u0439\u0432",
+    "\u0438\u0323\u0306\u0431",
+]
+_MADE_5 += ["\u0f71\u0f72\u0fb3", "\u0f71\u0f71\u0f72", "\u0f71\u0f74\u0fb3", "\u0f71\u0f71\u0f74"]
+_BY_NAME_NATURAL_5 = [_MADE_5[i] for i in (0, 1, 6, 4, 2, 5, 3, 7, 8, 9, 11, 10, 12, 13, 14, 15)]
+# The sixth: names that differ in case or in a character's variant, in pairs made in turn; real
+# tied an ASCII letter's capital with it and no other.
+_MADE_6 = [
+    "xa",
+    "xA",
+    "yA",
+    "ya",
+    "q\u24ea",
+    "q\u2070",
+    "z\uff58",
+    "zx",
+    "\ufb01g",
+    "fig",
+    "k\u00aa",
+    "ka",
+    "\u00e4b",
+    "a\u0308b",
+    "\u00c4c",
+    "\u00e4c",
+    "w\u00e9",
+    "w\u00c9",
+    "we",
+]
+_BY_NAME_NATURAL_6 = [
+    _MADE_6[i] for i in (13, 12, 15, 14, 9, 8, 11, 10, 4, 5, 18, 16, 17, 1, 0, 3, 2, 7, 6)
+]
+_BY_NAME_NATURAL_DESC_6 = [
+    _MADE_6[i] for i in (6, 7, 3, 2, 1, 0, 17, 16, 18, 5, 4, 10, 11, 8, 9, 14, 15, 13, 12)
+]
+# The seventh: an `и` whose breve a mark of its own class keeps from the letter, which real sorted
+# among the names with `и`, and Tibetan vowel signs that one sign or two spell alike.
+_MADE_7 = ["\u0438\u0430", "\u0439\u0430", "\u0438\u0323\u0301\u0306\u0431", "\u0438\u0432"]
+_MADE_7 += [
+    "\u0439\u0432",
+    "\u0f40\u0f71\u0f74\u0f72",
+    "\u0f40\u0f71\u0f72",
+    "\u0f40\u0f71\u0f74",
+    "\u0f40\u0f73",
+]
+_BY_NAME_NATURAL_7 = [_MADE_7[i] for i in (0, 2, 3, 1, 4, 8, 6, 7, 5)]
+_BY_NAME_NATURAL_DESC_7 = [_MADE_7[i] for i in (5, 7, 8, 6, 4, 1, 3, 2, 0)]
 # Eleven names real listed under `name_natural` on 2026-10-10, in a folder made for them in a
 # Korean-language account; `name_natural desc` was the exact reverse. None holds Hangul or Han,
 # which a Korean-language account orders otherwise than an English-language one.
@@ -5016,6 +5071,12 @@ _ELEVEN = ["2²3", "10²", "²", "a", "x2", "x2①", "x2²", "x3", "x10", "x22",
         (_MADE_3, "name_natural desc", _BY_NAME_NATURAL_DESC_3),
         (_MADE_4, "name_natural", _BY_NAME_NATURAL_4),
         (_MADE_4, "name_natural desc", _BY_NAME_NATURAL_DESC_4),
+        (_MADE_5, "name_natural", _BY_NAME_NATURAL_5),
+        (_MADE_5, "name_natural desc", _BY_NAME_NATURAL_5[::-1]),
+        (_MADE_6, "name_natural", _BY_NAME_NATURAL_6),
+        (_MADE_6, "name_natural desc", _BY_NAME_NATURAL_DESC_6),
+        (_MADE_7, "name_natural", _BY_NAME_NATURAL_7),
+        (_MADE_7, "name_natural desc", _BY_NAME_NATURAL_DESC_7),
         (_ELEVEN, "name_natural", _ELEVEN),
         (_ELEVEN, "name_natural desc", _ELEVEN[::-1]),
     ],
