@@ -74,8 +74,6 @@ class Settings(BaseSettings):
     github_enforce_rate_limits: bool = True
 
     # --- usage telemetry (backlot.telemetry; docs/telemetry.md says what is sent) ---
-    # `backlot serve --disable-telemetry` and `backlot.serve(telemetry=False)` set it off for the
-    # server they start.
     telemetry: bool = True
 
     # --- sqlite read tuning (serving connection; see store.connect_ro) ---

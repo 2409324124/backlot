@@ -1,7 +1,8 @@
 """Counts calls in memory and sends them as OTLP/JSON delta metrics.
 
-The recorder keeps one counter and one latency histogram per combination of attributes, swaps them
-out on every export, and posts the swapped-out interval. Delivery is best effort: a payload that
+The recorder keeps one counter per combination of attributes, and one latency histogram per
+combination without the answer's status, error code and class. It swaps them out on every export
+and posts the swapped-out interval. Delivery is best effort: a payload that
 cannot be sent is dropped, nothing here ever raises into the server, and an export at shutdown
 waits a bounded time.
 """
@@ -26,7 +27,7 @@ _ANSWER = ("http.response.status_code", "backlot.error_code", "backlot.error_cla
 # Upper bounds, in ms, of the latency histogram's buckets.
 BOUNDS = (5, 10, 25, 50, 100, 250, 500, 1000, 2500, 5000)
 # Combinations kept per interval. A request that would add one more is counted as dropped instead,
-# which bounds memory however varied the traffic is.
+# which bounds memory however varied the traffic is, and the export says how many were.
 MAX_SERIES = 4096
 _POST_TIMEOUT = 5.0
 _log = logging.getLogger(__name__)
@@ -75,10 +76,10 @@ class Recorder:
             hist[1] += duration_ms
             hist[2][sum(duration_ms > b for b in BOUNDS)] += 1
 
-    def take(self) -> tuple[int, int, dict[tuple, int], dict[tuple, list]]:
+    def take(self) -> tuple[int, int, dict[tuple, int], dict[tuple, list], int]:
         """The interval so far, which starts a new one."""
         with self._lock:
-            out = (self._start_ns, time.time_ns(), self._counts, self._histograms)
+            out = (self._start_ns, time.time_ns(), self._counts, self._histograms, self.dropped)
             self._reset()
         return out
 
@@ -95,9 +96,12 @@ def encode(
     end_ns: int,
     counts: dict,
     histograms: dict,
+    dropped: int = 0,
     surface: Mapping[tuple[str, str], int] | None = None,
 ) -> dict | None:
     """The OTLP/JSON body for one interval, None for an interval with no calls.
+
+    ``dropped`` adds the ``backlot.http.dropped`` count: calls past :data:`MAX_SERIES` this interval.
 
     ``surface`` adds the ``backlot.surface.operations`` gauge: per source and support state, how
     many vendor operations this Backlot's baselines record, so coverage is read off the sender's own
@@ -149,6 +153,7 @@ def encode(
                                 "unit": "ms",
                                 "histogram": {"aggregationTemporality": 1, "dataPoints": hists},
                             },
+                            *_dropped_metric(dropped, start, end),
                             *_surface_metric(surface or {}, end),
                         ],
                     }
@@ -156,6 +161,24 @@ def encode(
             }
         ]
     }
+
+
+def _dropped_metric(dropped: int, start: str, end: str) -> list[dict]:
+    if not dropped:
+        return []
+    point = {
+        "attributes": [],
+        "startTimeUnixNano": start,
+        "timeUnixNano": end,
+        "asInt": str(dropped),
+    }
+    return [
+        {
+            "name": "backlot.http.dropped",
+            "unit": "{request}",
+            "sum": {"aggregationTemporality": 1, "isMonotonic": True, "dataPoints": [point]},
+        }
+    ]
 
 
 def _surface_metric(surface: Mapping[tuple[str, str], int], end: str) -> list[dict]:

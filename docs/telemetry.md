@@ -14,7 +14,7 @@ That is the whole use of it. In return, the parts of Backlot you use are the par
 
 ## What it is not
 
-It is anonymous and coarse by design. It counts calls, never callers. Nothing in it identifies a person, a machine or an installation. Nothing from your corpus or your requests is sent. The counts go to `https://telemetry.brekkylab.com/v1/metrics` once a minute.
+It is anonymous and coarse by design. It counts calls, never callers. The counts go to `https://telemetry.brekkylab.com/v1/metrics` once a minute and when the server stops.
 
 ## Turning it off
 
@@ -34,6 +34,8 @@ Two OTLP metrics, as delta counts over each interval:
 - `backlot.http.requests`: calls.
 - `backlot.http.duration`: how long Backlot took to answer, as a histogram in milliseconds.
 
+A server keeps at most 4096 combinations of attributes per interval. Calls past that are not counted under their attributes, and a third count, `backlot.http.dropped`, says how many there were.
+
 With them goes one gauge, `backlot.surface.operations`: for each source and support state, how many of the vendor's operations this version of Backlot's baselines records. It is the same for every server running that version, and it is what coverage is measured against.
 
 Each count carries these attributes:
@@ -46,10 +48,10 @@ Each count carries these attributes:
 | `http.request.method` | `GET`, `POST`, … |
 | `http.response.status_code` | The status Backlot answered with |
 | `backlot.error_code` | The vendor's error identifier when the answer is an error, e.g. `channel_not_found`, `NoSuchKey`, `not_found` |
-| `backlot.error_class` | On a failure, its cause, read from the status and the support state: `unsupported` (Backlot does not do this yet), `internal` (a Backlot bug), `rate_limit`, `auth`, or `client` (the request was wrong) |
+| `backlot.error_class` | On a failure, its cause, read from the status, the support state, the error code and a spent rate-limit header: `unsupported` (Backlot does not do this yet), `internal` (a Backlot bug), `rate_limit`, `auth`, or `client` (the request was wrong) |
 | `backlot.auth.kind` | `bearer`, `basic`, `api_key`, `sigv4`, `sigv2`, `presigned`, `other` or `anonymous` |
 | `backlot.caller.kind` | `admin`, `user` or `anonymous` |
-| `backlot.client` | The client library the request headers name, by name and major.minor version, e.g. `slack_sdk/3.44`, `boto3/1.40`, `python-requests/2.34`, or `other` |
+| `backlot.client` | The client library the request headers name, by name and, where the headers carry one, major.minor version, e.g. `slack_sdk/3.44`, `boto3/1.40`, `python-requests/2.34`, or `other` |
 
 Each export carries the Backlot version, the operating system family (`darwin`, `linux`, `windows`) and the Python version.
 
@@ -62,7 +64,7 @@ Each export carries the Backlot version, the operating system family (`darwin`, 
 - Anything from your corpus: channel, repository, bucket, key, page or issue names and ids.
 - Any identifier of the installation, the machine or the person, and no `User-Agent` string as sent.
 
-An operation's name comes from Backlot's own fidelity baselines (`backlot/fidelity/baseline/`), which record every operation of each vendor's contract, never from the request. A request that asks for something no baseline names is counted as `unmatched`, and a GraphQL field outside the vendor's schema as `query.unmatched`.
+An operation's name comes from Backlot's own fidelity baselines (`backlot/fidelity/baseline/`), which record every operation of each vendor's contract, or from the name of a route Backlot adds beyond it (`extra`), never from the request. A Google batch envelope is `batch`, beside a call for each of its parts. A request that asks for something no baseline names is counted as `unmatched`, a GraphQL field outside the vendor's schema as `query.unmatched`, a GraphQL document that does not parse as `unparsed`, and a mutation or subscription as `mutation` or `subscription`.
 
 ## The code
 

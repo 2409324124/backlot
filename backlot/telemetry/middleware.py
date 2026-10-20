@@ -1,7 +1,6 @@
 """The ASGI middleware that counts each call, installed outermost by ``backlot.main``.
 
-Outermost so that it sees every answer, including the ones a middleware gives without reaching a
-route. It reads the request after the app has answered: by then the router has put the matched
+It reads the request after the app has answered: by then the router has put the matched
 route on the scope, the path rewrites have run, and the HEAD middleware has put the method back.
 It reads an answer's body only to find an error code, and only for an error status, a Slack
 ``ok: false``, or a GraphQL answer.
@@ -12,6 +11,7 @@ from __future__ import annotations
 import base64
 import re
 import time
+from contextvars import ContextVar
 from typing import Any, Mapping
 from urllib.parse import parse_qsl
 
@@ -25,6 +25,9 @@ from backlot.telemetry.recorder import RECORDER, Recorder
 _ERROR_BODY_CAP = 256 * 1024
 _GRAPHQL_BODY_CAP = 4 * 1024 * 1024
 _SIGV4_KEY = re.compile(r"Credential=([^/,\s]+)/")
+# The client label of the request being answered. A Google batch re-sends each part through this
+# app with Backlot's own HTTP client, so a part takes the label of the batch that carried it.
+_CLIENT: ContextVar[str | None] = ContextVar("telemetry_client", default=None)
 
 
 class TelemetryMiddleware:
@@ -81,31 +84,32 @@ class TelemetryMiddleware:
                     answer["ended"] = time.perf_counter()
             await send(message)
 
+        client = _CLIENT.get() or codes.client(headers)
+        outer = _CLIENT.set(client)
         try:
             await self.app(scope, receive, watch)
         except Exception:
-            self._record(scope, headers, query, request_body, 500, "internal_error", False, began)
+            self._record(scope, client, headers, query, request_body, 500, None, False, began)
             raise
-        code = (
-            codes.error_code(source, answer["status"], bytes(answer["body"]))
-            if answer["body"]
-            else ""
-        )
+        finally:
+            _CLIENT.reset(outer)
         self._record(
             scope,
+            client,
             headers,
             query,
             request_body,
             answer["status"],
-            code,
+            bytes(answer["body"]),
             answer["spent"],
             began,
             answer["ended"],
         )
 
     def _record(
-        self, scope, headers, query, request_body, status, code, spent, began, ended=None
+        self, scope, client, headers, query, request_body, status, body, spent, began, ended=None
     ) -> None:
+        """Count one call. ``body`` is the answer's kept body, None for an unhandled exception."""
         try:
             named = self.namer.name(
                 method=scope["method"],
@@ -128,8 +132,12 @@ class TelemetryMiddleware:
                 else "admin"
                 if credential in self._admin
                 else "user",
-                "backlot.client": codes.client(headers),
+                "backlot.client": client,
             }
+            if body is None:
+                code = "internal_error"
+            else:
+                code = codes.error_code(named.source, status, body) if body else ""
             if code:
                 attributes["backlot.error_code"] = code
             if code or status >= 400:

@@ -23,8 +23,8 @@ from tests._helpers import build_corpus, client_for
 ADMIN = {"Authorization": "Bearer admin-service-token"}
 LINEAR = {"Authorization": "admin-service-token"}
 UNREACHABLE = "http://127.0.0.1:9/v1/metrics"
-# What the collector stores (brekkylab-telemetry-collector, collector/config.yaml); anything else
-# it replaces with `invalid`.
+# The values an export may carry. The collector replaces a value outside its own shape checks with
+# `invalid`, and every pattern here is narrower than those.
 STORED = {
     "backlot.source": r"^(github|slack|gmail|google_drive|jira|confluence|notion|s3|hubspot|linear|fireflies|other)$",
     "backlot.support": r"^(implemented|extra|refused|missing|unknown)$",
@@ -92,7 +92,7 @@ def _calls(send) -> list[dict]:
     """The calls recorded while ``send`` ran, one dict per attribute combination, with its count."""
     RECORDER.take()
     send()
-    _, _, counts, _ = RECORDER.take()
+    _, _, counts, _, _ = RECORDER.take()
     return [dict(key) | {"count": n} for key, n in counts.items()]
 
 
@@ -120,7 +120,7 @@ class _Started(Exception):
     pass
 
 
-def test_each_way_to_start_a_server_can_turn_it_off(monkeypatch, hello):
+def test_each_way_to_start_a_server_can_turn_it_off(monkeypatch, hello, capsys):
     import uvicorn
     from typer.testing import CliRunner
 
@@ -155,11 +155,14 @@ def test_each_way_to_start_a_server_can_turn_it_off(monkeypatch, hello):
             assert isinstance(runner.invoke(backlot.cli.app, argv).exception, _Started)
         for telemetry in (True, False):
             os.environ.pop("BACKLOT_TELEMETRY", None)
+            capsys.readouterr()
             with pytest.raises(_Started):
                 with backlot.server.serve(data_dir=hello.data_dir, telemetry=telemetry):
                     pass
+            # The child's own notice goes to its log, so serve() says it where its caller sees it.
+            seen.append(notice(recorder.ENDPOINT) in capsys.readouterr().err)
     get_settings.cache_clear()
-    assert seen == [True, False, True, False, None, "0"]
+    assert seen == [True, False, True, False, None, True, "0", False]
 
 
 def test_client_labels_are_the_ones_measured_from_the_examples():
@@ -256,6 +259,19 @@ GITHUB = "/github/repos/acme/docs-site"
             "/gmail/v1/users/me/drafts",
             {},
             ("gmail", "gmail.users.drafts.list", "missing", 404, None, "unsupported"),
+        ),
+        # Google Docs is mounted at /docs/v1, beside FastAPI's own /docs page.
+        (
+            "GET",
+            "/docs/v1/documents/nosuch",
+            {},
+            ("google_drive", "docs.documents.get", "implemented", 404, "NOT_FOUND", "client"),
+        ),
+        (
+            "HEAD",
+            f"{GITHUB}/actions/runs",
+            {},
+            ("github", "actions/list-workflow-runs-for-repo", "missing", 404, None, "unsupported"),
         ),
         # A bearer token is no S3 credential; real answers it InvalidArgument, and so does Backlot.
         (
@@ -355,13 +371,22 @@ def test_each_part_of_a_google_batch_is_a_call_of_its_own(client):
         for i, what in enumerate(["messages", "labels"])
     )
     body = f"{parts}--{boundary}--\r\n"
-    headers = ADMIN | {"Content-Type": f"multipart/mixed; boundary={boundary}"}
+    headers = ADMIN | {
+        "Content-Type": f"multipart/mixed; boundary={boundary}",
+        "x-goog-api-client": "gl-python/3.13.0 gdcl/2.150.0",
+    }
     calls = _calls(lambda: client.post("/batch/gmail/v1", headers=headers, content=body))
-    assert sorted((c["backlot.source"], c["backlot.operation"]) for c in calls) == [
-        ("gmail", "batch"),
-        ("gmail", "gmail.users.labels.list"),
-        ("gmail", "gmail.users.messages.list"),
+    # A part is re-sent by Backlot's own HTTP client, so it carries the batch's client label.
+    assert sorted(
+        (c["backlot.source"], c["backlot.operation"], c["backlot.client"]) for c in calls
+    ) == [
+        ("gmail", "batch", "google-api-python-client/2.150"),
+        ("gmail", "gmail.users.labels.list", "google-api-python-client/2.150"),
+        ("gmail", "gmail.users.messages.list", "google-api-python-client/2.150"),
     ]
+    calls = _calls(lambda: client.post("/batch/calendar/v3", headers=headers, content=body))
+    assert ("other", "unmatched") in [(c["backlot.source"], c["backlot.operation"]) for c in calls]
+    assert "batch" not in [c["backlot.operation"] for c in calls]
 
 
 def test_an_unhandled_exception_is_an_internal_error(client):
@@ -373,7 +398,7 @@ def test_an_unhandled_exception_is_an_internal_error(client):
         with pytest.raises(RuntimeError):
             RECORDER.take()
             client.get("/github/telemetry-boom", headers=ADMIN)
-        _, _, counts, _ = RECORDER.take()
+        _, _, counts, _, _ = RECORDER.take()
     finally:
         client.app.router.routes.pop()
     (c,) = [dict(k) for k in counts]
@@ -497,7 +522,9 @@ def test_the_exporter_posts_each_interval_and_survives_a_dead_endpoint(collector
 
     for i in range(MAX_SERIES + 10):
         recorder.record({"backlot.operation": f"op{i}"}, 1)
-    assert recorder.dropped == 10
+    metrics = encode(*recorder.take())["resourceMetrics"][0]["scopeMetrics"][0]["metrics"]
+    (dropped,) = [m for m in metrics if m["name"] == "backlot.http.dropped"]
+    assert dropped["sum"]["dataPoints"][0]["asInt"] == "10"
 
 
 def test_a_server_sends_what_it_counted_when_it_stops(hello, collector):

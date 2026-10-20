@@ -8,9 +8,10 @@
 | ``auth`` | the credential was missing, wrong, or not allowed: a 401 or 403, or Slack's auth errors, which it sends with a 200 |
 | ``client`` | the request was wrong: any other failure |
 
-The rules read the status, the baseline's support state and the response headers, so a new vendor
-code is classed without a table. A 501 from an operation Backlot serves is the vendor's own answer
-(Google's ``notImplemented``), so it is ``client``.
+The rules read the status, the baseline's support state, the error code and the
+``x-ratelimit-remaining`` header, so a code no rule names is classed by its status. A 501 from an
+operation Backlot serves is the vendor's own answer (Google's ``notImplemented``), so it is
+``client``.
 """
 
 from __future__ import annotations

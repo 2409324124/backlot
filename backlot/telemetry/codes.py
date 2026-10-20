@@ -1,8 +1,8 @@
 """The error code an answer carries, and the client library a request names.
 
-An error code is the vendor's own identifier where its envelope has one (Slack's ``error``, S3's
-``<Code>``, Google's ``reason``, Notion's ``code``, HubSpot's ``category``, a GraphQL
-``extensions.code``). GitHub, Jira, Confluence and the GraphQL engine answer with a message only;
+An error code is the vendor's own identifier where its envelope has one: Slack's ``error``, S3's
+``<Code>``, Google's ``reason`` or else its ``status``, Notion's ``code``, HubSpot's ``category``, a
+GraphQL ``extensions.code``. GitHub, Jira, Confluence and the GraphQL engine answer with a message only;
 those messages are Backlot's own text, so each maps to a fixed slug here and the message itself,
 which can carry a key, a sha or a field name from the request, is never sent. A message this table
 does not know is ``unrecognized``.
@@ -101,16 +101,24 @@ def error_code(source: str, status: int, body: bytes) -> str:
         errors = doc.get("errors")
         if not errors or not isinstance(errors, list) or not isinstance(errors[0], dict):
             return ""
-        code = (errors[0].get("extensions") or {}).get("code")
+        extensions = errors[0].get("extensions")
+        code = extensions.get("code") if isinstance(extensions, dict) else None
         return code if isinstance(code, str) and code else _slug(errors[0].get("message"), _GRAPHQL)
     if status < 400:
         return ""
     if source == "github":
         return _slug(doc.get("message"), _GITHUB) if "message" in doc else ""
     if source in ("gmail", "google_drive"):
-        entries = (doc.get("error") or {}).get("errors") or []
-        reason = entries[0].get("reason") if entries and isinstance(entries[0], dict) else None
-        return reason if isinstance(reason, str) else ""
+        error = doc.get("error")
+        if not isinstance(error, dict):
+            return ""
+        # Docs, Sheets and Slides send no `errors[].reason`, only the canonical `status`.
+        entries = error.get("errors")
+        first = entries[0] if isinstance(entries, list) and entries else None
+        reason = first.get("reason") if isinstance(first, dict) else None
+        if isinstance(reason, str):
+            return reason
+        return error["status"] if isinstance(error.get("status"), str) else ""
     if source == "notion":
         return doc["code"] if isinstance(doc.get("code"), str) else ""
     if source == "hubspot":

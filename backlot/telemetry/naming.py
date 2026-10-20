@@ -42,8 +42,8 @@ IMPLEMENTED, EXTRA, REFUSED, MISSING, UNKNOWN = (
 )
 # When two baseline rows fit a request equally well, the one Backlot serves is the one it answered.
 _PREFERENCE = {IMPLEMENTED: 0, EXTRA: 1, REFUSED: 2, MISSING: 3}
-# FastAPI's own documentation routes, beside the ones the fidelity comparisons call Backlot's own.
-_OWN = tuple(UNCOMPARED) + ("/docs", "/redoc", "/openapi.json")
+# FastAPI's own documentation routes, matched exactly: Google Docs is mounted at `/docs/v1`.
+_FASTAPI_DOCS = frozenset({"/docs", "/docs/oauth2-redirect", "/redoc", "/openapi.json"})
 # Introspection is answered by the GraphQL engine for every schema; no baseline lists it.
 _INTROSPECTION = {"__schema", "__type", "__typename"}
 _S3_ROW = re.compile(
@@ -80,7 +80,9 @@ class _S3Row:
 
 def own_route(path: str) -> bool:
     """Backlot's own surface: health, the user directory, the token exchange, the API docs."""
-    return any(path == p or path.startswith(p.rstrip("/") + "/") for p in _OWN)
+    return path in _FASTAPI_DOCS or any(
+        path == p or path.startswith(p.rstrip("/") + "/") for p in UNCOMPARED
+    )
 
 
 class Namer:
@@ -147,8 +149,10 @@ class Namer:
             return self._graphql_paths[path], ""
         if _under(path, "/batch"):
             # `/batch/{api}/{version}` names its API; the bare `/batch` is Gmail's batch path.
-            api = path.split("/")[2] if path.count("/") >= 2 else "gmail"
-            return self._batch_api.get(api, "gmail"), ""
+            if path.count("/") < 2:
+                return "gmail", ""
+            api = self._batch_api.get(path.split("/")[2])
+            return (api, "") if api else None
         for prefix, strip, name in self._mounts:
             if _under(path, prefix):
                 return name, strip
@@ -207,7 +211,7 @@ class Namer:
         pool = (
             [t for ts in methods.values() for t in ts]
             if source == "slack"
-            else methods.get(method, [])
+            else methods.get(method, []) + (methods.get("GET", []) if method == "HEAD" else [])
         )
         best: _Template | None = None
         for t in pool:

@@ -55,6 +55,8 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from backlot.config import Settings
+from backlot.telemetry import notice
+from backlot.telemetry.recorder import ENDPOINT
 
 HELLO_CORPUS = Path(__file__).resolve().parent / "data" / "hello.jsonl"
 # Settings default; per-user tokens are in <data_dir>/tokens.yaml. Used only as the LAST-RESORT
@@ -286,7 +288,9 @@ def serve(
     answers.
 
     ``telemetry=False`` starts the server with usage telemetry off (docs/telemetry.md). A test
-    suite or CI job passes it: its calls are not anyone's use of Backlot."""
+    suite or CI job passes it: its calls are not anyone's use of Backlot. A server started with it
+    on prints the telemetry notice to this process's stderr, since its own stderr goes to a log
+    nobody reads."""
     if records is not None and data_dir is not None:
         raise ValueError("serve() takes records to import or a data_dir already built, not both")
     with tempfile.TemporaryDirectory() as scratch:
@@ -309,7 +313,8 @@ def serve(
         # changes it (Settings declares env_file=".env"). `Server.token` must track that, or the
         # caller's first authenticated call fails with HTTP 200 / {"ok": false}, which reads as
         # their own mistake.
-        token = Settings().admin_token
+        settings = Settings()
+        token = settings.admin_token
         if data_dir == Path(scratch):
             # `-m backlot` rather than the `backlot` script: same CLI, but resolved through THIS
             # interpreter, so it works in an environment whose bin/ is not on PATH. No cwd= either —
@@ -328,6 +333,8 @@ def serve(
         # In the scratch dir, not the data dir: a caller's own data dir is theirs to keep clean.
         log_path = Path(scratch) / "server.log"
         python, server_env = _interpreter(env)
+        if telemetry and settings.telemetry:
+            print(notice(ENDPOINT), file=sys.stderr)
         with open(log_path, "wb") as log_f:
             proc = subprocess.Popen(
                 [
