@@ -12,6 +12,7 @@ import csv
 import io
 import json
 import re
+import unicodedata
 from urllib.parse import quote, urlencode
 
 import httpx
@@ -4310,30 +4311,78 @@ def test_drive_shared_with_me_time_needs_a_caller(client, admin_h):
     )
 
 
-def test_drive_order_by_shared_with_me_time(client, tokens_yaml):
-    """Backlot models the relation this key sorts on (owner vs caller), so it sorts rather than
-    400s — unlike the view/modify-by-me timestamps, which have no counterpart here at all."""
-    mia = {"Authorization": f"Bearer {tok(tokens_yaml, 'mia@acme.com')}"}
-    r = client.get(
-        "/drive/v3/files",
-        headers=mia,
-        params={"q": "sharedWithMe=true", "pageSize": 100, "orderBy": "sharedWithMeTime desc"},
-    )
-    assert r.status_code == 200
-    times = [f["sharedWithMeTime"] for f in r.json()["files"]]
-    assert times == sorted(times, reverse=True)
+@pytest.mark.parametrize(
+    "key, field",
+    [
+        ("sharedWithMeTime", "sharedWithMeTime"),
+        ("modifiedByMeTime", "modifiedByMeTime"),
+        ("viewedByMeTime", "viewedByMeTime"),
+        ("recency", "modifiedByMeTime"),
+    ],
+)
+@pytest.mark.parametrize("direction", ["", " asc", " desc"])
+def test_drive_order_by_a_per_caller_time(tmp_path, key, field, direction):
+    """A file without the caller's time sorts ahead of every file with one, and after every one
+    under `desc`; `recency`, the later of the caller's two times, lists newest first under all
+    three. Ava owns two of the files and the other two are Mia's, shared with her, modified in
+    turn, so each block's order is its own and not the files' modification order; none holds a
+    `viewedByMeTime`. Files without the time stay newest modification first."""
+    records = [
+        {
+            "source_type": "google_drive",
+            "doc_id": doc_id,
+            "folder": "f",
+            "title": doc_id,
+            "content": "p",
+            "author_email": f"{owner}@acme.com",
+            "readers": ["ava@acme.com", "mia@acme.com"],
+            "visibility": "private",
+            "created": f"2026-01-{day:02d}T09:00:00Z",
+            "updated": f"2026-01-{day:02d}T09:00:00Z",
+        }
+        for doc_id, owner, day in (
+            ("a1", "ava", 1),
+            ("m1", "mia", 5),
+            ("a2", "ava", 10),
+            ("m2", "mia", 15),
+        )
+    ]
+    s = tiny_corpus(tmp_path, records)
+    ava = tok(yaml.safe_load(s.tokens_path.read_text(encoding="utf-8")), "ava@acme.com")
+    with client_for(s, reload=True) as c:
+        r = c.get(
+            "/drive/v3/files",
+            headers={"Authorization": f"Bearer {ava}"},
+            params={
+                "orderBy": key + direction,
+                "fields": f"files({field},modifiedTime)",
+                "q": "mimeType != 'application/vnd.google-apps.folder'",
+            },
+        )
+    assert r.status_code == 200, r.text
+    files = r.json()["files"]
+    times = [f.get(field) for f in files]
+    present = [t for t in times if t is not None]
+    absent = [f["modifiedTime"] for f in files if f.get(field) is None]
+    assert absent == sorted(absent, reverse=True)
+    if direction == " desc" or key == "recency":
+        assert times == sorted(present, reverse=True) + [None] * len(absent)
+    else:
+        assert times == [None] * len(absent) + sorted(present)
+    assert (len(present), len(absent)) == ((0, 4) if field == "viewedByMeTime" else (2, 2))
 
 
 @pytest.mark.parametrize(
     "name, owned",
     [("Mine", True), ("Theirs", False), ("Plans", False), ("Figures", True), ("Drafts", False)],
 )
-def test_drive_owned_by_me_and_can_share_follow_the_caller(tmp_path, name, owned):
-    """`ownedByMe` is per caller, and `canShare` with it: what the caller owns it can share, and
-    what it can only read it cannot. Real answered `canShare: true` on 117 of the 118 items a Google
-    Workspace member's `files.list` named as its own on 2026-10-18 and on 2026-10-19, and `false` on
-    each folder and each file shared with it to read. `Plans` is a folder a record's `folder` names,
-    and `Figures` and `Drafts` are `subtype: folder` records."""
+def test_drive_owned_by_me_can_share_and_modified_by_me_follow_the_caller(tmp_path, name, owned):
+    """`ownedByMe` is per caller, and `canShare` and `modifiedByMe` with it: what the caller owns it
+    can share, and what it can only read it cannot; `_modified_by_me` says why the caller modified
+    exactly what it owns. Real answered `canShare: true` on 117 of the 118 items a Google Workspace
+    member's `files.list` named as its own on 2026-10-18 and on 2026-10-19, and `false` on each
+    folder and each file shared with it to read. `Plans` is a folder a record's `folder` names, and
+    `Figures` and `Drafts` are `subtype: folder` records."""
     record = {
         "source_type": "google_drive",
         "folder": "Plans",
@@ -4364,16 +4413,18 @@ def test_drive_owned_by_me_and_can_share_follow_the_caller(tmp_path, name, owned
             for f in c.get(
                 "/drive/v3/files",
                 headers=ava,
-                params={"fields": "files(id,name,ownedByMe,capabilities/canShare)"},
+                params={"fields": f"files(id,name,{_PER_CALLER})"},
             ).json()["files"]
         }[name]
         got = c.get(
-            f"/drive/v3/files/{listed['id']}",
-            headers=ava,
-            params={"fields": "ownedByMe,capabilities/canShare"},
+            f"/drive/v3/files/{listed['id']}", headers=ava, params={"fields": _PER_CALLER}
         ).json()
     for f in (listed, got):
-        assert (f["ownedByMe"], f["capabilities"]["canShare"]) == (owned, owned)
+        assert (f["ownedByMe"], f["capabilities"]["canShare"], f["modifiedByMe"]) == (owned,) * 3
+        assert f.get("modifiedByMeTime") == (f["modifiedTime"] if owned else None)
+
+
+_PER_CALLER = "ownedByMe,capabilities/canShare,modifiedByMe,modifiedByMeTime,modifiedTime"
 
 
 def test_drive_order_by_sorts_the_result(client, admin_h):
@@ -4469,16 +4520,479 @@ def test_drive_order_by_does_not_change_the_rows_themselves(client, admin_h):
     assert any(f["shared"] for f in plain.values())  # ...and `shared` is really resolved
 
 
-def test_drive_order_by_rejects_keys_it_cannot_honor(client, admin_h):
-    """Real Drive 400s an undocumented sort key. Backlot models no per-caller view/share
-    timestamps, so those documented keys are rejected loudly rather than silently ignored."""
-    for bad in ("bogusKey", "name descending", "viewedByMeTime"):
-        r = client.get("/drive/v3/files", headers=admin_h, params={"orderBy": bad})
-        assert r.status_code == 400, f"orderBy={bad!r} should 400, got {r.status_code}"
-    ok = client.get(
-        "/drive/v3/files", headers=admin_h, params={"orderBy": "folder,name desc", "pageSize": 5}
+def _nfd(name: str) -> str:
+    return unicodedata.normalize("NFD", name)
+
+
+# The first folder `backlot.collation` describes: its names in the order they were made, and the
+# orders real listed them in.
+_MADE = [
+    "resume",
+    "résumé",
+    "resumé",
+    "Resume",
+    "RESUME",
+    "cote",
+    "coté",
+    "côte",
+    "côté",
+    "가",
+    "家",
+    "可",
+    "加",
+    "각",
+    "각2",
+    "家2",
+    "a",
+    "A",
+    "b",
+    "x2",
+    "x02",
+    "x002",
+    "x10",
+    "x1٠",
+    "x٢",
+    "x²",
+    "x2①",
+    "x2²",
+    "x20",
+    "x 2",
+    "x-2",
+    "x_2",
+    "x.2",
+    "file99999999999999999999",
+    "file100000000000000000000",
+    "v1",
+    "v01",
+    "_a",
+    "-a",
+    ".a",
+    "(a",
+    "[a",
+    "1a",
+    "$a",
+    "#a",
+    "~a",
+    "€a",
+    "가나",
+    "abc",
+    "家族",
+    "ガ",
+    "α",
+    "Ж",
+    "😀",
+    _nfd("한글"),
+    "한글",
+    _nfd("éclair"),
+    "éclair",
+]
+_BY_NAME_NATURAL = [
+    "_a",
+    "-a",
+    ".a",
+    "(a",
+    "[a",
+    "#a",
+    "~a",
+    "😀",
+    "$a",
+    "€a",
+    "1a",
+    "A",
+    "a",
+    "abc",
+    "b",
+    "cote",
+    "coté",
+    "côte",
+    "côté",
+    "éclair",
+    _nfd("éclair"),
+    "file99999999999999999999",
+    "file100000000000000000000",
+    "RESUME",
+    "Resume",
+    "resume",
+    "resumé",
+    "résumé",
+    "v01",
+    "v1",
+    "x 2",
+    "x_2",
+    "x-2",
+    "x.2",
+    "x٢",
+    "x002",
+    "x02",
+    "x2",
+    "x2①",
+    "x2²",
+    "x1٠",
+    "x10",
+    "x20",
+    "x²",
+    "α",
+    "Ж",
+    "가",
+    "가나",
+    "각",
+    "각2",
+    "한글",
+    _nfd("한글"),
+    "ガ",
+    "加",
+    "可",
+    "家",
+    "家2",
+    "家族",
+]
+_BY_NAME_NATURAL_DESC = [
+    "家族",
+    "家2",
+    "家",
+    "可",
+    "加",
+    "ガ",
+    "한글",
+    _nfd("한글"),
+    "각2",
+    "각",
+    "가나",
+    "가",
+    "Ж",
+    "α",
+    "x²",
+    "x20",
+    "x1٠",
+    "x10",
+    "x2²",
+    "x2①",
+    "x٢",
+    "x002",
+    "x02",
+    "x2",
+    "x.2",
+    "x-2",
+    "x_2",
+    "x 2",
+    "v01",
+    "v1",
+    "résumé",
+    "resumé",
+    "RESUME",
+    "Resume",
+    "resume",
+    "file100000000000000000000",
+    "file99999999999999999999",
+    "éclair",
+    _nfd("éclair"),
+    "côté",
+    "côte",
+    "coté",
+    "cote",
+    "b",
+    "abc",
+    "A",
+    "a",
+    "1a",
+    "€a",
+    "$a",
+    "😀",
+    "~a",
+    "#a",
+    "[a",
+    "(a",
+    ".a",
+    "-a",
+    "_a",
+]
+_BY_NAME = [
+    "#a",
+    "$a",
+    "(a",
+    "-a",
+    ".a",
+    "1a",
+    "[a",
+    "_a",
+    "A",
+    "a",
+    "abc",
+    "b",
+    "cote",
+    "coté",
+    "côte",
+    "côté",
+    _nfd("éclair"),
+    "file100000000000000000000",
+    "file99999999999999999999",
+    "RESUME",
+    "Resume",
+    "resume",
+    "resumé",
+    "résumé",
+    "v01",
+    "v1",
+    "x 2",
+    "x-2",
+    "x.2",
+    "x002",
+    "x02",
+    "x10",
+    "x1٠",
+    "x2",
+    "x20",
+    "x2²",
+    "x2①",
+    "x_2",
+    "x²",
+    "x٢",
+    "~a",
+    "éclair",
+    "α",
+    "Ж",
+    _nfd("한글"),
+    "€a",
+    "ガ",
+    "加",
+    "可",
+    "家",
+    "家2",
+    "家族",
+    "가",
+    "가나",
+    "각",
+    "각2",
+    "한글",
+    "😀",
+]
+# The second: names some code points of which collate as one, runs of more digits than ICU reads
+# as one number, and code points ICU weighs by their value.
+_MADE_2 = [
+    "la",
+    "l\u00b7a",
+    "lb",
+    "l.a",
+    _nfd("й"),
+    "й",
+    "ий",
+    "ик",
+    "и",
+    "เก",
+    "ก",
+    "กา",
+    "ข",
+    "ཀ\u0fb2\u0f71\u0f80",
+    "ཀ\u0fb2\u0f71",
+    "ཀ\u0fb2",
+    "ཀ\u0f71\u0f80",
+    "9" * 254 + "1",
+    "9" * 255,
+    "1" + "0" * 254,
+    "x𝟐",
+    "x2",
+    "x𝟐3",
+    "x23",
+    "x１０",
+    "x11",
+    "一",
+    "𠀀",
+    "a\u0378",
+    "a\ue000",
+    "a\U0010fffd",
+    "a",
+]
+_BY_NAME_NATURAL_2 = [
+    "1" + "0" * 254,
+    "9" * 254 + "1",
+    "9" * 255,
+    "a",
+    "a\u0378",
+    "a\ue000",
+    "a\U0010fffd",
+    "l.a",
+    "la",
+    "l\u00b7a",
+    "lb",
+    "x2",
+    "x𝟐",
+    "x１０",
+    "x11",
+    "x23",
+    "x𝟐3",
+    "и",
+    "ий",
+    "ик",
+    "й",
+    _nfd("й"),
+    "ก",
+    "กา",
+    "เก",
+    "ข",
+    "ཀ\u0fb2",
+    "ཀ\u0fb2\u0f71",
+    "ཀ\u0f71\u0f80",
+    "ཀ\u0fb2\u0f71\u0f80",
+    "一",
+    "𠀀",
+]
+_BY_NAME_NATURAL_DESC_2 = [
+    "𠀀",
+    "一",
+    "ཀ\u0fb2\u0f71\u0f80",
+    "ཀ\u0f71\u0f80",
+    "ཀ\u0fb2\u0f71",
+    "ཀ\u0fb2",
+    "ข",
+    "เก",
+    "กา",
+    "ก",
+    "й",
+    _nfd("й"),
+    "ик",
+    "ий",
+    "и",
+    "x23",
+    "x𝟐3",
+    "x11",
+    "x１０",
+    "x2",
+    "x𝟐",
+    "lb",
+    "l\u00b7a",
+    "la",
+    "l.a",
+    "a\U0010fffd",
+    "a\ue000",
+    "a\u0378",
+    "a",
+    "9" * 255,
+    "9" * 254 + "1",
+    "1" + "0" * 254,
+]
+_BY_NAME_2 = [
+    "1" + "0" * 254,
+    "9" * 254 + "1",
+    "9" * 255,
+    "a",
+    "a\u0378",
+    "a\ue000",
+    "a\U0010fffd",
+    "l.a",
+    "la",
+    "lb",
+    "l\u00b7a",
+    "x11",
+    "x2",
+    "x23",
+    "x１０",
+    "x𝟐",
+    "x𝟐3",
+    "и",
+    _nfd("й"),
+    "ий",
+    "ик",
+    "й",
+    "ก",
+    "กา",
+    "ข",
+    "เก",
+    "ཀ\u0f71\u0f80",
+    "ཀ\u0fb2",
+    "ཀ\u0fb2\u0f71",
+    "ཀ\u0fb2\u0f71\u0f80",
+    "一",
+    "𠀀",
+]
+# The third: Thai names whose last two code points collate as one.
+_MADE_3 = [
+    "\u0e01\u0e4d\u0e32",
+    "\u0e01\u0e33",
+    "\u0e01\u0e32",
+    "\u0e01\u0e21",
+    "\u0e01\u0e4d",
+    "\u0e01",
+]
+_BY_NAME_NATURAL_3 = [
+    "\u0e01",
+    "\u0e01\u0e4d",
+    "\u0e01\u0e21",
+    "\u0e01\u0e32",
+    "\u0e01\u0e33",
+    "\u0e01\u0e4d\u0e32",
+]
+_BY_NAME_NATURAL_DESC_3 = [
+    "\u0e01\u0e33",
+    "\u0e01\u0e4d\u0e32",
+    "\u0e01\u0e32",
+    "\u0e01\u0e21",
+    "\u0e01\u0e4d",
+    "\u0e01",
+]
+# The fourth: `ab` with a code point ICU weighs as nothing between its letters, which real tied
+# with `ab`.
+_MADE_4 = ["ab", "a\u00adb", "aa", "a\u200bb", "ac", "a\ufeffb"]
+_BY_NAME_NATURAL_4 = ["aa", "a\ufeffb", "a\u200bb", "a\u00adb", "ab", "ac"]
+_BY_NAME_NATURAL_DESC_4 = ["ac", "a\ufeffb", "a\u200bb", "a\u00adb", "ab", "aa"]
+# Eleven names real listed under `name_natural` on 2026-10-10, in a folder made for them in a
+# Korean-language account; `name_natural desc` was the exact reverse. None holds Hangul or Han,
+# which a Korean-language account orders otherwise than an English-language one.
+_ELEVEN = ["2²3", "10²", "²", "a", "x2", "x2①", "x2²", "x3", "x10", "x22", "x²"]
+
+
+@pytest.mark.parametrize(
+    "made, order_by, listed",
+    [
+        (_MADE, "name_natural", _BY_NAME_NATURAL),
+        (_MADE, "name_natural desc", _BY_NAME_NATURAL_DESC),
+        (_MADE, "name", _BY_NAME),
+        (_MADE_2, "name_natural", _BY_NAME_NATURAL_2),
+        (_MADE_2, "name_natural desc", _BY_NAME_NATURAL_DESC_2),
+        (_MADE_2, "name", _BY_NAME_2),
+        (_MADE_3, "name_natural", _BY_NAME_NATURAL_3),
+        (_MADE_3, "name_natural desc", _BY_NAME_NATURAL_DESC_3),
+        (_MADE_4, "name_natural", _BY_NAME_NATURAL_4),
+        (_MADE_4, "name_natural desc", _BY_NAME_NATURAL_DESC_4),
+        (_ELEVEN, "name_natural", _ELEVEN),
+        (_ELEVEN, "name_natural desc", _ELEVEN[::-1]),
+    ],
+)
+def test_drive_order_by_a_name_lists_a_folder_as_real_did(tmp_path, made, order_by, listed):
+    """Each file is modified after the one made before it, as the measured folder's were, so
+    names a key ties come out newest first, as they did on real."""
+    s = tiny_corpus(
+        tmp_path,
+        [
+            {
+                "source_type": "google_drive",
+                "doc_id": f"name-{i}",
+                "folder": "names",
+                "title": title,
+                "content": "p",
+                "created": f"2026-10-20T17:36:{i:02d}Z",
+                "updated": f"2026-10-20T17:36:{i:02d}Z",
+            }
+            for i, title in enumerate(made)
+        ],
     )
-    assert ok.status_code == 200
+    admin = yaml.safe_load(s.tokens_path.read_text(encoding="utf-8"))["admin_token"]
+    with client_for(s, reload=True) as c:
+        r = c.get(
+            "/drive/v3/files",
+            headers={"Authorization": f"Bearer {admin}"},
+            params={"orderBy": order_by, "q": "mimeType != 'application/vnd.google-apps.folder'"},
+        )
+    assert r.status_code == 200, r.text
+    assert [f["name"] for f in r.json()["files"]] == listed
+
+
+def test_collation_reads_a_hangul_syllable_as_its_jamo():
+    """Every syllable, as Unicode's canonical decomposition gives it."""
+    from backlot.collation import _jamo
+
+    syllables = range(0xAC00, 0xD7A4)
+    assert all(_jamo(cp) == tuple(map(ord, _nfd(chr(cp)))) for cp in syllables)
+    assert _jamo(0xD7A4) == (0xD7A4,) and _jamo(0xABFF) == (0xABFF,)
 
 
 _DUPLICATE_403 = (
@@ -4489,6 +5003,22 @@ _FULLTEXT_403 = (
     "forbidden",
     "Sorting is not supported for queries with fullText terms. Results are always in descending relevance order.",
 )
+_INVALID_400 = ("invalid", "Invalid Value")
+# The eleven keys the reference lists, each a 200 with ` asc` and with ` desc` on real.
+_ORDER_KEYS = ["createdTime", "folder", "modifiedByMeTime", "modifiedTime", "name", "name_natural"]
+_ORDER_KEYS += ["quotaBytesUsed", "recency", "sharedWithMeTime", "starred", "viewedByMeTime"]
+# The code points sent in the three places `_DRIVE_ORDER_SPACE` describes, as real answered them:
+# its 25 a 200 in each place, and every other one sent the 400, U+001C-U+001F among them.
+_ORDER_SPACES = [*range(0x09, 0x0E), 0x20, 0x85, 0xA0, 0x1680, *range(0x2000, 0x200B)]
+_ORDER_SPACES += [0x2028, 0x2029, 0x202F, 0x205F, 0x3000]
+_ORDER_NOT_SPACES = [*range(0x00, 0x09), *range(0x0E, 0x20), 0x7F, 0x180E, 0x200B, 0x2060]
+_ORDER_NOT_SPACES += [0x3164, 0xFEFF]
+_ORDER_SPACE_ROWS = [
+    (None, spelling.format(c=chr(cp)), *answer)
+    for cps, answer in ((_ORDER_SPACES, (200, None)), (_ORDER_NOT_SPACES, (400, _INVALID_400)))
+    for cp in cps
+    for spelling in ("name{c}desc", "{c}name", "name{c}")
+]
 
 
 @pytest.mark.parametrize(
@@ -4506,8 +5036,32 @@ _FULLTEXT_403 = (
         (None, "name_natural,name", 403, _DUPLICATE_403),
         (None, "name,name_natural", 403, _DUPLICATE_403),
         (None, "name,name,bogus", 403, _DUPLICATE_403),
-        (None, "name,bogus,name", 400, None),
-        (None, "name,name sideways", 400, None),
+        (None, "name,bogus,name", 400, _INVALID_400),
+        (None, "name,name sideways", 400, _INVALID_400),
+        (None, "bogus", 400, _INVALID_400),
+        (None, "name descending", 400, _INVALID_400),
+        (None, "NAME", 400, _INVALID_400),
+        (None, "name ASC", 400, _INVALID_400),
+        (None, "name Desc", 400, _INVALID_400),
+        (None, "name desc desc", 400, _INVALID_400),
+        (None, "name asc desc", 400, _INVALID_400),
+        (None, "asc", 400, _INVALID_400),
+        (None, "name,asc", 400, _INVALID_400),
+        (None, "name asc", 200, None),
+        (None, "name   asc", 200, None),
+        (None, "name asc,modifiedTime desc", 200, None),
+        (None, "folder,name desc", 200, None),
+        (None, ",name", 200, None),
+        (None, "name,", 200, None),
+        (None, "name asc,name", 403, _DUPLICATE_403),
+        (None, "name,name asc", 403, _DUPLICATE_403),
+        (None, "viewedByMeTime", 200, None),
+        (None, "viewedByMeTime desc", 200, None),
+        (None, "modifiedByMeTime asc", 200, None),
+        (None, "viewedByMeTime,modifiedByMeTime", 200, None),
+        (None, "viewedByMeTime,viewedByMeTime desc", 403, _DUPLICATE_403),
+        *_ORDER_SPACE_ROWS,
+        *[(None, f"{key} {way}", 200, None) for key in _ORDER_KEYS for way in ("asc", "desc")],
         (None, "starred", 200, None),
         (None, "starred desc", 200, None),
         (None, "starred,name", 200, None),
@@ -4524,7 +5078,8 @@ _FULLTEXT_403 = (
         (None, "name,,starred", 500, None),
         (None, "name,starred,name", 403, _DUPLICATE_403),
         (None, "starred,starred", 403, _DUPLICATE_403),
-        (None, "name,starred,bogus", 400, None),
+        (None, "name,starred,bogus", 400, _INVALID_400),
+        (None, "name asc,starred", 500, None),
         ("fullText contains 'the'", "name", 403, _FULLTEXT_403),
         ("fullText contains 'the'", "name desc", 403, _FULLTEXT_403),
         ("fullText contains 'the'", "name,modifiedTime", 403, _FULLTEXT_403),
@@ -4549,12 +5104,12 @@ _FULLTEXT_403 = (
 def test_drive_order_by_is_refused_where_real_refuses_it(
     client, admin_h, q, order_by, status, error
 ):
-    """`orderBy` on its own and beside a `q`, answered with the 403s `_drive_order_specs` and
-    `gerr.sorting_not_supported_fulltext` describe and the 500 `gerr.drive_internal_error`
-    describes, each `error` object the one real sends. An unusable token at or before a repeat is
-    the 400, the parse is refused ahead of the 500 wherever `starred` sits and the repeat ahead of
-    the `fullText` 403, and an absent or empty `orderBy`, or a `q` with no `fullText` term, is
-    served."""
+    """`orderBy` on its own and beside a `q`, answered with the 400 and the 403s
+    `_drive_order_specs` and `gerr.sorting_not_supported_fulltext` describe and the 500
+    `gerr.drive_internal_error` describes, each `error` object the one real sends. An unusable
+    token at or before a repeat is the 400, the parse is refused ahead of the 500 wherever
+    `starred` sits and the repeat ahead of the `fullText` 403, and an absent or empty `orderBy`, or
+    a `q` with no `fullText` term, is served."""
     params = {"pageSize": 1, "q": q, "orderBy": order_by}
     r = client.get(
         "/drive/v3/files",
@@ -4565,7 +5120,7 @@ def test_drive_order_by_is_refused_where_real_refuses_it(
     if error is not None:
         reason, message = error
         assert _gerr(r) == {
-            "code": 403,
+            "code": status,
             "message": message,
             "errors": [
                 {
