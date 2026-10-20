@@ -9,11 +9,13 @@ PyICU, which Backlot does not depend on::
 for ICU 78), read only for the sequences of more than one code point that collate as one, since
 PyICU does not list them.
 
-The table holds the primary and secondary weights of the collation elements of every code point
-and of every such sequence, as ranks: ICU's own order of the primaries, read by sorting a
-one-character string per primary, and the secondaries in their numeric order. A Hangul syllable is
-left out, since ``backlot.collation`` reads it as its jamo, and so is a decimal digit's value,
-which ``backlot.collation`` reads off the run of digits it is in."""
+The table holds the primary, secondary and tertiary weights of the collation elements of every code
+point and of every such sequence, as ranks: ICU's own order of the primaries, read by sorting a
+one-character string per primary, and the secondaries and tertiaries in their numeric order. A
+Hangul syllable is left out, since ``backlot.collation`` reads it as its jamo, and so is a decimal
+digit's value, which ``backlot.collation`` reads off the run of digits it is in. The canonical
+combining class of each code point that has one other than 0 is there too, for the sequences a mark
+further on completes."""
 
 from __future__ import annotations
 
@@ -34,19 +36,21 @@ def _collator(strength) -> icu.Collator:
     return c
 
 
-def _elements(collator: icu.Collator, text: str) -> list[tuple[int, int]]:
-    """``text``'s collation elements as (32-bit primary, 16-bit secondary). The iterator hands a
-    long weight over as a second, continuation element whose tertiary has both high bits set."""
+def _elements(collator: icu.Collator, text: str) -> list[tuple[int, int, int]]:
+    """``text``'s collation elements as (32-bit primary, 16-bit secondary, 6-bit tertiary). The
+    iterator hands a long weight over as a second, continuation element whose tertiary byte has
+    both high bits set; otherwise those bits are the case, which a sort key leaves out of the
+    tertiary it compares."""
     it = collator.createCollationElementIterator(text)
     out: list[list] = []
     while (ce := it.next()) != icu.CollationElementIterator.NULLORDER:
         ce &= 0xFFFFFFFF
         p, s, t = ce >> 16, (ce >> 8) & 0xFF, ce & 0xFF
         if t & 0xC0 == 0xC0 and out:
-            out[-1] = [out[-1][0] << 16 | p, out[-1][1] << 8 | s, True]
+            out[-1] = [out[-1][0] << 16 | p, out[-1][1] << 8 | s, out[-1][2], True]
             continue
-        out.append([p, s, False])
-    return [(p if long else p << 16, s if long else s << 8) for p, s, long in out]
+        out.append([p, s, t, False])
+    return [(p if long else p << 16, s if long else s << 8, t & 0x3F) for p, s, t, long in out]
 
 
 def _contractions(allkeys: Path) -> list[tuple[int, ...]]:
@@ -70,6 +74,20 @@ def _digit_blocks() -> list[int]:
     return starts
 
 
+def _non_starters() -> list[list[int]]:
+    """Each run of code points of one canonical combining class other than 0, as (first, count,
+    class)."""
+    runs: list[list[int]] = []
+    for cp in range(0x110000):
+        if not (ccc := icu.Char.getCombiningClass(cp)):
+            continue
+        if runs and runs[-1][0] + runs[-1][1] == cp and runs[-1][2] == ccc:
+            runs[-1][1] += 1
+        else:
+            runs.append([cp, 1, ccc])
+    return runs
+
+
 def build(allkeys: Path) -> dict:
     tertiary = _collator(icu.Collator.TERTIARY)
     table = {(cp,): _elements(tertiary, chr(cp)) for cp in range(0x110000) if cp not in _HANGUL}
@@ -88,24 +106,29 @@ def build(allkeys: Path) -> dict:
         lead_order.setdefault(p >> 24, len(lead_order))
     every = [*table.values(), *contractions.values()]
     primaries = sorted(
-        {p for e in every for p, _ in e if p}, key=lambda p: (lead_order[p >> 24], p)
+        {p for e in every for p, _, _ in e if p}, key=lambda p: (lead_order[p >> 24], p)
     )
     keys = [primary.getSortKey(lone[p]) for p in primaries if p in lone]
     assert keys == sorted(keys), "ICU orders some primaries otherwise"
     rank = {p: i + 1 for i, p in enumerate(primaries)}
-    secondaries = sorted({s for e in every for _, s in e if s})
+    secondaries = sorted({s for e in every for _, s, _ in e if s})
     srank = {s: i + 1 for i, s in enumerate(secondaries)}
     common = srank[0x0500]
+    tertiaries = sorted({t for e in every for _, _, t in e if t})
+    trank = {t: i + 1 for i, t in enumerate(tertiaries)}
+    tcommon = trank[0x05]
 
     def ranked(elements):
-        return [w for p, s in elements for w in (rank.get(p, 0), srank.get(s, 0))]
+        return [
+            w for p, s, t in elements for w in (rank.get(p, 0), srank.get(s, 0), trank.get(t, 0))
+        ]
 
     runs: list[list[int]] = []
     chars: list[list[int]] = []
     for (cp,), elements in sorted(table.items()):
         flat = ranked(elements)
         last = runs[-1] if runs else None
-        if len(flat) == 2 and flat[0] and flat[1] == common:
+        if len(flat) == 3 and flat[0] and flat[1:] == [common, tcommon]:
             if last and last[0] + last[1] == cp and last[2] + last[1] == flat[0]:
                 last[1] += 1
             else:
@@ -122,11 +145,13 @@ def build(allkeys: Path) -> dict:
         "source": f"ICU {icu.ICU_VERSION} (Unicode {icu.UNICODE_VERSION}), the root collator",
         "primaries": len(primaries),
         "common": common,
+        "tcommon": tcommon,
         "zero": rank[table[(ord("0"),)][0][0]],
         "digits": _digit_blocks(),
         "runs": gaps,
         "chars": chars,
         "contractions": [[list(c), *ranked(e)] for c, e in sorted(contractions.items())],
+        "non_starters": _non_starters(),
     }
 
 

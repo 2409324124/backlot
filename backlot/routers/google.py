@@ -2400,8 +2400,8 @@ def _drive_sort(files: list[dict], specs: list[tuple]) -> list[dict]:
 
 def _drive_starred_after_another_key(order_by: str | None) -> bool:
     """Whether ``starred`` follows another key in an ``orderBy`` that ``_drive_order_specs`` passed,
-    the case `gerr.drive_internal_error` answers. An empty token is no key: `,starred` is served and
-    `name,,starred` is the 500."""
+    the case `gerr.drive_internal_error` answers: `,starred` is served and `name,,starred` is the
+    500."""
     keys = [parts[0] for parts in _drive_order_words(order_by)]
     return "starred" in keys[1:]
 
