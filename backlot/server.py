@@ -55,7 +55,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from backlot.config import Settings
-from backlot.telemetry import notice
+from backlot.telemetry import enabled, notice
 from backlot.telemetry.recorder import ENDPOINT
 
 HELLO_CORPUS = Path(__file__).resolve().parent / "data" / "hello.jsonl"
@@ -333,7 +333,7 @@ def serve(
         # In the scratch dir, not the data dir: a caller's own data dir is theirs to keep clean.
         log_path = Path(scratch) / "server.log"
         python, server_env = _interpreter(env)
-        if telemetry and settings.telemetry:
+        if telemetry and enabled(settings):
             print(notice(ENDPOINT), file=sys.stderr)
         with open(log_path, "wb") as log_f:
             proc = subprocess.Popen(

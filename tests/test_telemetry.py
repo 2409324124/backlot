@@ -88,7 +88,7 @@ class _ExportTo:
 
 @pytest.fixture(scope="module")
 def client(hello):
-    with _env(BACKLOT_TELEMETRY="1"), _ExportTo(UNREACHABLE):
+    with _env(BACKLOT_TELEMETRY="1", DO_NOT_TRACK=None), _ExportTo(UNREACHABLE):
         with client_for(hello) as c:
             yield c
 
@@ -101,18 +101,23 @@ def _calls(send) -> list[dict]:
     return [dict(key) | {"count": n} for key, n in counts.items()]
 
 
-def test_it_is_on_unless_backlot_telemetry_says_off(hello, capsys):
-    with _env(BACKLOT_TELEMETRY=None):
+def test_it_is_on_unless_backlot_telemetry_or_do_not_track_says_off(hello, capsys):
+    with _env(BACKLOT_TELEMETRY=None, DO_NOT_TRACK=None):
         get_settings.cache_clear()
         assert enabled(get_settings())
-    with _env(BACKLOT_TELEMETRY="1"), _ExportTo(UNREACHABLE):
+    with _env(DO_NOT_TRACK="0"):
+        assert enabled(get_settings())
+    with _env(BACKLOT_TELEMETRY="1", DO_NOT_TRACK=None), _ExportTo(UNREACHABLE):
         capsys.readouterr()
         with client_for(hello):
             pass
         # A server that sends says so, says why, and says how to stop it.
         assert capsys.readouterr().err.strip() == notice(UNREACHABLE)
-    for off in ("0", "false"):
-        with _env(BACKLOT_TELEMETRY=off), _ExportTo(UNREACHABLE):
+    for off in ({"BACKLOT_TELEMETRY": "0"}, {"BACKLOT_TELEMETRY": "false"}, {"DO_NOT_TRACK": "1"}):
+        with (
+            _env(**{"BACKLOT_TELEMETRY": None, "DO_NOT_TRACK": None} | off),
+            _ExportTo(UNREACHABLE),
+        ):
             get_settings.cache_clear()
             assert not enabled(get_settings())
             with client_for(hello) as c:
@@ -147,7 +152,11 @@ def test_each_way_to_start_a_server_can_turn_it_off(monkeypatch, hello, capsys):
     monkeypatch.setattr(backlot.server.subprocess, "Popen", capture)
     data_dir = str(hello.data_dir)
     # `--data-dir` and `--disable-telemetry` write the environment; both are put back afterwards.
-    with _env(BACKLOT_TELEMETRY=None, BACKLOT_DATA_DIR=os.environ.get("BACKLOT_DATA_DIR")):
+    with _env(
+        BACKLOT_TELEMETRY=None,
+        DO_NOT_TRACK=None,
+        BACKLOT_DATA_DIR=os.environ.get("BACKLOT_DATA_DIR"),
+    ):
         runner = CliRunner()
         for argv in (
             ["serve", "--data-dir", data_dir],
@@ -709,7 +718,7 @@ def test_the_exporter_posts_each_interval_and_survives_a_dead_endpoint(collector
 
 def test_a_server_sends_what_it_counted_when_it_stops(hello, collector):
     url, bodies = collector
-    with _env(BACKLOT_TELEMETRY="1"), _ExportTo(url):
+    with _env(BACKLOT_TELEMETRY="1", DO_NOT_TRACK=None), _ExportTo(url):
         with client_for(hello) as c:
             RECORDER.take()
             c.get(GITHUB, headers=ADMIN)

@@ -44,6 +44,8 @@ What is sent, and what never is, is [docs/telemetry.md](telemetry.md).
 |---|---|---|
 | `BACKLOT_TELEMETRY` | `true` | `false` turns usage telemetry off. `backlot serve --disable-telemetry`, `backlot mcp --disable-telemetry` and `backlot.serve(telemetry=False)` set it for the server they start |
 
+`DO_NOT_TRACK=1` turns it off as well.
+
 ## SQLite
 
 These are performance levers, not behaviour. Every one of them is safe to leave alone.
