@@ -3791,6 +3791,8 @@ _RETIRED = (
         # an unserved published method, with a `token` query parameter and with a body; the test
         # below sends each one the other two credentials
         ("GET", "emoji.list", "query", None, None, "invalid_auth"),
+        ("POST", "emoji.list", "query", _FORM, b"token=", "not_authed"),
+        ("POST", "emoji.list", "query", _FORM, b"a=b", "invalid_auth"),
         ("POST", "emoji.list", None, "application/json", b"{}", "not_authed"),
         ("POST", "emoji.list", None, None, b"{}", "missing_post_type"),
         ("POST", "emoji.list", None, "text/html", b"{}", "invalid_post_type"),
