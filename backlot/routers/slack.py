@@ -584,12 +584,17 @@ def _normalize_protected(name: bytes) -> bytes:
     and line breaks in front of it, and nothing after the last `]` that no `[` follows."""
     head, bracket, rest = name.lstrip(b" ").partition(b"[")
     out = bytearray(head.replace(b" ", b"_").replace(b".", b"_"))
+    at = 0
     while bracket:
-        rest = rest.lstrip(b" \r\n\t")
-        close = rest.find(b"]")
-        segment, after = (rest[: close + 1], rest[close + 1 :]) if close != -1 else (rest, b"")
-        out += b"[" + segment
-        bracket, rest = (b"[", after[1:]) if after.startswith(b"[") else (b"", b"")
+        while at < len(rest) and rest[at] in b" \r\n\t":
+            at += 1
+        close = rest.find(b"]", at)
+        if close == -1:
+            out += b"[" + rest[at:]
+            break
+        out += b"[" + rest[at : close + 1]
+        bracket = rest[close + 1 : close + 2] == b"["
+        at = close + 2
     return bytes(out)
 
 
