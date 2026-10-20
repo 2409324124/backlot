@@ -14,8 +14,15 @@ from fastapi.responses import JSONResponse
 
 from backlot import store, synth
 from backlot.routers import slack
-from tests._helpers import client_for, corpus_client, crawl_slack, db_count, tiny_corpus, tok
-from tests.test_atlassian import _sent_as
+from tests._helpers import (
+    client_for,
+    corpus_client,
+    crawl_slack,
+    db_count,
+    sent_as,
+    tiny_corpus,
+    tok,
+)
 
 _FORM = "application/x-www-form-urlencoded"
 _MULTIPART = "multipart/form-data; boundary=b"
@@ -3282,7 +3289,7 @@ def test_slack_reads_a_post_body_as_real_reads_it(client, verb, content_type, bo
     ``backlot.routers.slack`` dates the measurement): ``want`` is the error a refused body is
     answered with, or the arguments a served one echoes and the warning real adds beside them.
     ``content_type`` is one header's value, or the headers sent when there are several; one with a
-    byte past ASCII goes as its latin-1 bytes (:func:`tests.test_atlassian._sent_as`)."""
+    byte past ASCII goes as its latin-1 bytes (:func:`tests._helpers.sent_as`)."""
     if content_type is None:
         headers = []
     elif isinstance(content_type, str):
@@ -3290,7 +3297,7 @@ def test_slack_reads_a_post_body_as_real_reads_it(client, verb, content_type, bo
     else:
         headers = content_type
     if any(ord(c) > 0x7F for _, value in headers for c in value):
-        r = _sent_as(client, verb, "/slack/api/api.test", dict(headers), body)
+        r = sent_as(client, verb, "/slack/api/api.test", headers, body)
     else:
         r = client.request(verb, "/slack/api/api.test", headers=headers, content=body)
     if isinstance(want, str):
