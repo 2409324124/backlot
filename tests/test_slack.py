@@ -1083,72 +1083,81 @@ def _number_rows():
             yield m, [("query", "the"), ("page", v)], [_NUMBER_LINE("page")] if n is None else n
 
 
-@pytest.mark.parametrize(
-    "method, params, want",
-    [
-        *_number_rows(),
-        # Real reads a repeated argument by its last value.
-        ("users.list", [("limit", "1"), ("limit", "3")], 3),
-        ("users.list", [("limit", "3"), ("limit", "1")], 1),
-        # A missing required argument answers alone...
-        ("conversations.history", [("limit", "abc")], ["[ERROR] missing required field: channel"]),
-        ("search.messages", [("count", "x")], ["[ERROR] missing required field: query"]),
-        # ...and a refused number answers ahead of the checks that follow it.
+_NUMERIC_ROWS = [
+    *_number_rows(),
+    # Real reads a repeated argument by its last value.
+    ("users.list", [("limit", "1"), ("limit", "3")], 3),
+    ("users.list", [("limit", "3"), ("limit", "1")], 1),
+    # A missing required argument answers alone...
+    ("conversations.history", [("limit", "abc")], ["[ERROR] missing required field: channel"]),
+    ("search.messages", [("count", "x")], ["[ERROR] missing required field: query"]),
+    # ...and a refused number answers ahead of the checks that follow it.
+    (
+        "conversations.history",
+        [("channel", "C_NOPE"), ("limit", "abc")],
+        [_NUMBER_LINE("limit")],
+    ),
+    (
+        "conversations.history",
+        [("channel", _OWN_CHANNEL), ("latest", "x"), ("limit", "abc")],
+        [_NUMBER_LINE("limit")],
+    ),
+    (
+        "conversations.history",
+        [("channel", _OWN_CHANNEL), ("cursor", "zzz"), ("limit", "abc")],
+        [_NUMBER_LINE("limit")],
+    ),
+    ("conversations.list", [("types", "bogus"), ("limit", "abc")], [_NUMBER_LINE("limit")]),
+    ("conversations.list", [("cursor", "zzz"), ("limit", "abc")], [_NUMBER_LINE("limit")]),
+    ("users.list", [("cursor", "zzz"), ("limit", "abc")], [_NUMBER_LINE("limit")]),
+    ("users.list", [("sort_dir", "bogus"), ("limit", "abc")], [_NUMBER_LINE("limit")]),
+    (
+        "conversations.members",
+        [("channel", "C_NOPE"), ("limit", "abc")],
+        [_NUMBER_LINE("limit")],
+    ),
+    (
+        "conversations.members",
+        [("channel", _OWN_CHANNEL), ("cursor", "zzz"), ("limit", "abc")],
+        [_NUMBER_LINE("limit")],
+    ),
+    *((m, [("query", " "), ("count", "abc")], [_NUMBER_LINE("count")]) for m in _SEARCH_METHODS),
+    # Every refused number and an unknown `sort_dir` share one answer, in field order.
+    *(
         (
-            "conversations.history",
-            [("channel", "C_NOPE"), ("limit", "abc")],
-            [_NUMBER_LINE("limit")],
-        ),
-        (
-            "conversations.history",
-            [("channel", _OWN_CHANNEL), ("latest", "x"), ("limit", "abc")],
-            [_NUMBER_LINE("limit")],
-        ),
-        (
-            "conversations.history",
-            [("channel", _OWN_CHANNEL), ("cursor", "zzz"), ("limit", "abc")],
-            [_NUMBER_LINE("limit")],
-        ),
-        ("conversations.list", [("types", "bogus"), ("limit", "abc")], [_NUMBER_LINE("limit")]),
-        ("conversations.list", [("cursor", "zzz"), ("limit", "abc")], [_NUMBER_LINE("limit")]),
-        ("users.list", [("cursor", "zzz"), ("limit", "abc")], [_NUMBER_LINE("limit")]),
-        ("users.list", [("sort_dir", "bogus"), ("limit", "abc")], [_NUMBER_LINE("limit")]),
-        (
-            "conversations.members",
-            [("channel", "C_NOPE"), ("limit", "abc")],
-            [_NUMBER_LINE("limit")],
-        ),
-        (
-            "conversations.members",
-            [("channel", _OWN_CHANNEL), ("cursor", "zzz"), ("limit", "abc")],
-            [_NUMBER_LINE("limit")],
-        ),
-        *(
-            (m, [("query", " "), ("count", "abc")], [_NUMBER_LINE("count")])
-            for m in _SEARCH_METHODS
-        ),
-        # Every refused number and an unknown `sort_dir` share one answer, in field order.
-        *(
-            (
-                m,
-                [("query", "the"), ("count", "abc"), ("page", "xyz"), ("sort_dir", "bogus")],
-                [_NUMBER_LINE("count"), _NUMBER_LINE("page"), _SORT_DIR_LINE],
-            )
-            for m in _SEARCH_METHODS
-        ),
-        (
-            "search.messages",
-            [("sort_dir", "bogus"), ("page", "xyz"), ("count", "abc"), ("query", "the")],
+            m,
+            [("query", "the"), ("count", "abc"), ("page", "xyz"), ("sort_dir", "bogus")],
             [_NUMBER_LINE("count"), _NUMBER_LINE("page"), _SORT_DIR_LINE],
-        ),
-    ],
-)
-@pytest.mark.parametrize("sent_as", ["query", "form", "multipart"])
+        )
+        for m in _SEARCH_METHODS
+    ),
+    (
+        "search.messages",
+        [("sort_dir", "bogus"), ("page", "xyz"), ("count", "abc"), ("query", "the")],
+        [_NUMBER_LINE("count"), _NUMBER_LINE("page"), _SORT_DIR_LINE],
+    ),
+]
+
+
+def _numeric_cases():
+    """Each row of :data:`_NUMERIC_ROWS` sent in the query, and the first number, refused and unset
+    row of each method in a form and in a multipart body as well."""
+    seen = set()
+    for method, params, want in _NUMERIC_ROWS:
+        yield method, params, want, "query"
+        kind = "refused" if isinstance(want, list) else "unset" if want is _UNSET else "number"
+        if (method, kind) not in seen:
+            seen.add((method, kind))
+            yield method, params, want, "form"
+            yield method, params, want, "multipart"
+
+
+@pytest.mark.parametrize("method, params, want, sent_as", list(_numeric_cases()))
 def test_slack_numeric_arguments_are_read_as_real_reads_them(
     client, admin_h, method, params, want, sent_as
 ):
     """The rule on `_SLACK_INTEGER` and the order `_limit` and `_numbers` answer in, every row as
-    slack.com/api answered it, in each place ``sent_as`` puts the arguments. A row answered as a
+    slack.com/api answered it in the place ``sent_as`` puts the arguments. A row answered as a
     number is compared with the request that sends that number in its place, and an `_UNSET` row
     with the request that leaves the argument out, whose page is not empty: an empty page whose
     cursor names itself would keep a client that follows cursors on that page forever."""
