@@ -2111,6 +2111,13 @@ _DRIVES_Q_TAKEN = [
     "name = 'a' or name = 'b'",
     "name = 'a' or hidden = true",
     "name contains 'a' and not hidden = true",
+    "name < 'a'",
+    "name <= 'a'",
+    "name > 'a'",
+    "name >= 'a'",
+    "not name < 'a'",
+    "name < 'a' and hidden = false",
+    "not (not hidden)",
 ]
 _DRIVES_Q_REFUSED = [
     " ",
@@ -2133,6 +2140,8 @@ _DRIVES_Q_REFUSED = [
     "'root' in parents",
     "fullText contains 'a'",
     "starred = true",
+    "not not hidden",
+    "not not name contains 'a'",
 ]
 _PAGE_EXPIRED = (403, "pageTokenExpired", None, None)
 _UNKNOWN = (500, None, None, None)
@@ -5240,7 +5249,8 @@ _BY_NAME_2 = [
     "一",
     "𠀀",
 ]
-# The third: Thai names whose last two code points collate as one.
+# The third: U+0E01 U+0E4D U+0E32, whose last two code points collate as one and tie it with U+0E01
+# U+0E33, beside Thai names that hold one of its parts or neither.
 _MADE_3 = [
     "\u0e01\u0e4d\u0e32",
     "\u0e01\u0e33",
@@ -5270,6 +5280,60 @@ _BY_NAME_NATURAL_DESC_3 = [
 _MADE_4 = ["ab", "a\u00adb", "aa", "a\u200bb", "ac", "a\ufeffb"]
 _BY_NAME_NATURAL_4 = ["aa", "a\ufeffb", "a\u200bb", "a\u00adb", "ab", "ac"]
 _BY_NAME_NATURAL_DESC_4 = ["ac", "a\ufeffb", "a\u200bb", "a\u00adb", "ab", "aa"]
+# The fifth: a number of 255 digits beside one of 254, digits beside characters ICU weighs as digit
+# zero, a Cyrillic `и` whose breve follows its dot below and so collates as `й`, and Tibetan vowel
+# signs a sign further on completes; `name_natural desc` was the exact reverse.
+_MADE_5 = ["1" + "0" * 254, "2" + "0" * 253, "x5", "x\u2070", "x1", "x\u24ea", "x0"]
+_MADE_5 += [
+    "\u0438\u0430",
+    "\u0438\u0432",
+    "\u0439\u0430",
+    "\u0439\u0432",
+    "\u0438\u0323\u0306\u0431",
+]
+_MADE_5 += ["\u0f71\u0f72\u0fb3", "\u0f71\u0f71\u0f72", "\u0f71\u0f74\u0fb3", "\u0f71\u0f71\u0f74"]
+_BY_NAME_NATURAL_5 = [_MADE_5[i] for i in (0, 1, 6, 4, 2, 5, 3, 7, 8, 9, 11, 10, 12, 13, 14, 15)]
+# The sixth: names that differ in case or in a character's variant, in pairs made in turn; real
+# tied an ASCII letter's capital with it and no other.
+_MADE_6 = [
+    "xa",
+    "xA",
+    "yA",
+    "ya",
+    "q\u24ea",
+    "q\u2070",
+    "z\uff58",
+    "zx",
+    "\ufb01g",
+    "fig",
+    "k\u00aa",
+    "ka",
+    "\u00e4b",
+    "a\u0308b",
+    "\u00c4c",
+    "\u00e4c",
+    "w\u00e9",
+    "w\u00c9",
+    "we",
+]
+_BY_NAME_NATURAL_6 = [
+    _MADE_6[i] for i in (13, 12, 15, 14, 9, 8, 11, 10, 4, 5, 18, 16, 17, 1, 0, 3, 2, 7, 6)
+]
+_BY_NAME_NATURAL_DESC_6 = [
+    _MADE_6[i] for i in (6, 7, 3, 2, 1, 0, 17, 16, 18, 5, 4, 10, 11, 8, 9, 14, 15, 13, 12)
+]
+# The seventh: an `и` whose breve a mark of its own class keeps from the letter, which real sorted
+# among the names with `и`, and Tibetan vowel signs that one sign or two spell alike.
+_MADE_7 = ["\u0438\u0430", "\u0439\u0430", "\u0438\u0323\u0301\u0306\u0431", "\u0438\u0432"]
+_MADE_7 += [
+    "\u0439\u0432",
+    "\u0f40\u0f71\u0f74\u0f72",
+    "\u0f40\u0f71\u0f72",
+    "\u0f40\u0f71\u0f74",
+    "\u0f40\u0f73",
+]
+_BY_NAME_NATURAL_7 = [_MADE_7[i] for i in (0, 2, 3, 1, 4, 8, 6, 7, 5)]
+_BY_NAME_NATURAL_DESC_7 = [_MADE_7[i] for i in (5, 7, 8, 6, 4, 1, 3, 2, 0)]
 # Eleven names real listed under `name_natural` on 2026-10-10, in a folder made for them in a
 # Korean-language account; `name_natural desc` was the exact reverse. None holds Hangul or Han,
 # which a Korean-language account orders otherwise than an English-language one.
@@ -5289,6 +5353,12 @@ _ELEVEN = ["2²3", "10²", "²", "a", "x2", "x2①", "x2²", "x3", "x10", "x22",
         (_MADE_3, "name_natural desc", _BY_NAME_NATURAL_DESC_3),
         (_MADE_4, "name_natural", _BY_NAME_NATURAL_4),
         (_MADE_4, "name_natural desc", _BY_NAME_NATURAL_DESC_4),
+        (_MADE_5, "name_natural", _BY_NAME_NATURAL_5),
+        (_MADE_5, "name_natural desc", _BY_NAME_NATURAL_5[::-1]),
+        (_MADE_6, "name_natural", _BY_NAME_NATURAL_6),
+        (_MADE_6, "name_natural desc", _BY_NAME_NATURAL_DESC_6),
+        (_MADE_7, "name_natural", _BY_NAME_NATURAL_7),
+        (_MADE_7, "name_natural desc", _BY_NAME_NATURAL_DESC_7),
         (_ELEVEN, "name_natural", _ELEVEN),
         (_ELEVEN, "name_natural desc", _ELEVEN[::-1]),
     ],
@@ -7550,15 +7620,14 @@ def test_drive_permissions_and_trashed(tmp_path):
     # group-restricted doc surfaces a group-type permission
     gperms = _drive_permissions(conn, served_id("google_drive", "d2"))
     assert any(p["type"] == "group" for p in gperms)
-    # trashed excluded from a default `q`, included when asked
+    # `trashed = false` leaves a trashed file out and `trashed = true` matches it
     d2 = store.get_document(conn, "google_drive", served_id("google_drive", "d2"))
     facts = _drive_facts(d2)
     assert _drive_q_eval(_drive_q_parse("trashed = false"), facts, None, {}) is False
     assert _drive_q_eval(_drive_q_parse("trashed = true"), facts, None, {}) is True
 
 
-# A file and a trashed file, listed as real listed two made for it, the rule the no-`q` branch of
-# `drive_files_list` records; the folder rows are one account's, the rest two accounts'.
+# A file and a trashed file its owner lists, as the no-`q` branch of `drive_files_list` records.
 @pytest.mark.parametrize(
     "q, listed",
     [
@@ -7608,29 +7677,46 @@ def test_drive_files_list_lists_the_trash_unless_q_leaves_it_out(tmp_path, q, li
 
 
 def test_drive_lists_only_the_trash_its_caller_may_see(tmp_path):
-    """A trashed file is listed through the visible set the rest of the listing is: the admin token
-    gets Ava's private one and Mia's scoped token does not, with no `q` and under `trashed`."""
-    record = {"source_type": "google_drive", "folder": "mk", "content": "x"}
-    record |= {"trashed": True, "visibility": "private"}
+    """A trashed file is listed to its owner alone, as `_drive_unlisted` says: Mia gets her own, and
+    neither Ava's private one nor the two of Ava's she can read, which `files.get` still answers.
+    The admin token gets all four."""
+    from backlot import synth
+
+    record = {"source_type": "google_drive", "folder": "mk", "content": "alpha", "trashed": True}
+    ava = {**record, "author_email": "ava@acme.com"}
     s = tiny_corpus(
         tmp_path,
         [
             {**record, "doc_id": "hers", "title": "Hers", "author_email": "mia@acme.com"},
-            {**record, "doc_id": "secret", "title": "Secret", "author_email": "ava@acme.com"},
+            {**ava, "doc_id": "secret", "title": "Secret", "visibility": "private"},
+            {**ava, "doc_id": "public", "title": "Public", "visibility": "public"},
+            {**ava, "doc_id": "lent", "title": "Lent", "visibility": "private"}
+            | {"readers": ["ava@acme.com", "mia@acme.com"]},
         ],
     )
     tokens = yaml.safe_load(s.tokens_path.read_text(encoding="utf-8"))
-    callers = {"admin": tokens["admin_token"], "mia": tok(tokens, "mia@acme.com")}
+    callers = {
+        "admin": tokens["admin_token"],
+        "mia": tok(tokens, "mia@acme.com"),
+        "ava": tok(tokens, "ava@acme.com"),
+    }
+    folder = synth.drive_folder_id("mk")
     with client_for(s, reload=True) as c:
-        for who, want in (("admin", {"Hers", "Secret"}), ("mia", {"Hers"})):
-            for q in (None, "trashed"):
-                r = c.get(
-                    "/drive/v3/files",
-                    headers={"Authorization": f"Bearer {callers[who]}"},
-                    params={"q": q, "fields": "files(name,mimeType)"} if q else {},
-                )
+        for who, want in (
+            ("admin", {"Hers", "Secret", "Public", "Lent"}),
+            ("mia", {"Hers"}),
+            ("ava", {"Secret", "Public", "Lent"}),
+        ):
+            h = {"Authorization": f"Bearer {callers[who]}"}
+            for q in (None, "trashed", f"'{folder}' in parents", "fullText contains 'alpha'"):
+                params = {"q": q, "fields": "files(name,mimeType)"} if q else {}
+                r = c.get("/drive/v3/files", headers=h, params=params)
                 names = {f["name"] for f in r.json()["files"] if f["mimeType"] != _FOLDER}
                 assert names == want, (who, q)
+        mia = {"Authorization": f"Bearer {callers['mia']}"}
+        for doc_id in ("public", "lent"):
+            r = c.get(f"/drive/v3/files/{synth.gdrive_file_id(doc_id)}", headers=mia)
+            assert (r.status_code, r.json().get("trashed")) == (200, True), doc_id
 
 
 _Q_RECORDS = [
@@ -7806,6 +7892,7 @@ def test_drive_q_evaluates_the_operators_the_reference_lists(tmp_path):
             ("starred != false", set()),
             ("viewedByMeTime > '2000-01-01T00:00:00'", set()),
             ("viewedByMeTime < '2100-01-01T00:00:00Z'", set()),
+            ("viewedByMeTime <= '2100-01-01T00:00:00Z'", set()),
             ("viewedByMeTime >= '2000-01-01'", set()),
             ("viewedByMeTime = '2000-01-01T00:00:00'", set()),
             ("viewedByMeTime != '2000-01-01T00:00:00'", every),
@@ -7878,6 +7965,12 @@ def test_drive_q_refuses_a_clause_it_cannot_parse(tmp_path):
             "modifiedByMeTime > '2000-01-01T00:00:00'",
             "sharedWithMeTime > '2000-01-01T00:00:00'",
             "starred = true and",
+            "not not starred",
+            "not not name contains 'a'",
+            "not sharedWithMe",
+            "sharedWithMe = false",
+            "sharedWithMe != true",
+            "not (name contains 'a' and sharedWithMe)",
             " and ",
             " ",
             "\t",
@@ -7931,8 +8024,11 @@ def test_drive_q_shapes_clients_send_still_parse(tmp_path):
                 "sharedWithMe and trashed = false",
                 {"mk", "fin", "Brand guidelines", "Q1 Revenue", "Q1 Deck", "Mia's Notes"},
             ),
-            ("sharedWithMe = false", set()),
-            ("sharedWithMe != true", set()),
+            (
+                "(sharedWithMe = TRUE) and not (name contains 'zzzq') and trashed = false",
+                {"mk", "fin", "Brand guidelines", "Q1 Revenue", "Q1 Deck", "Mia's Notes"},
+            ),
+            ("not (not starred)", set()),
             ("'mia@x.com' in owners and name contains 'Q1'", {"Q1 Deck"}),
             # `me` is the caller; the admin token owns nothing, so nothing is `me`'s and
             # everything non-trashed is `not me`'s.
