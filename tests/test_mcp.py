@@ -4,7 +4,8 @@ Uses the ``live_server`` fixture (a real ``uvicorn`` on the conftest SAMPLE corp
 real MCP server against it: a document the admin can read is blocked for an ACL-restricted user —
 same tool, same object, different identity.
 
-- **Atlassian** (`mcp-atlassian`, Docker) — skipped unless Docker is available.
+- **Atlassian** (`mcp-atlassian`, Docker) — skipped unless a Docker daemon running Linux
+  containers answers.
 - **Notion** (`@notionhq/notion-mcp-server`, npx) — skipped unless ``npx`` (Node) is on PATH; the
   first run downloads the npm package.
 - **S3** (`awslabs.aws-api-mcp-server`, uvx) — skipped unless ``uvx`` is on PATH; the first run
@@ -52,13 +53,23 @@ from backlot.acl import Acl  # noqa: E402
 from tests._helpers import POSIX_SIGNALS, python_child_env, readline_within  # noqa: E402
 
 
-def _docker_available() -> bool:
+def _docker_runs_linux_containers() -> bool:
+    """Whether a Docker daemon answers here and runs Linux containers, the only kind
+    ``ghcr.io/sooperset/mcp-atlassian`` publishes an image for. Docker on ``windows-latest`` answers
+    too, but runs Windows containers, so the pull finds no image for it and the server never starts.
+    """
     if not shutil.which("docker"):
         return False
     try:
-        return subprocess.run(["docker", "info"], capture_output=True, timeout=10).returncode == 0
+        info = subprocess.run(
+            ["docker", "info", "--format", "{{.OSType}}"],
+            capture_output=True,
+            encoding="utf-8",
+            timeout=10,
+        )
     except Exception:  # noqa: BLE001
         return False
+    return info.stdout.strip() == "linux"
 
 
 def _atlassian_params(base: str, token: str, username: str = "svc@example.com"):
@@ -151,7 +162,36 @@ async def _call(params, tool_pred, args, ok_pred) -> bool:
 # --------------------------------------------------------------------------- Atlassian
 
 
-@pytest.mark.skipif(not _docker_available(), reason="Docker not available")
+@pytest.mark.parametrize(
+    ("docker", "info", "runs"),
+    [
+        pytest.param(None, None, False, id="no-docker"),
+        pytest.param("docker", (0, "linux\n"), True, id="linux-containers"),
+        pytest.param("docker", (0, "windows\n"), False, id="windows-containers"),
+        pytest.param("docker", (1, "\n"), False, id="no-daemon"),
+        pytest.param("docker", subprocess.TimeoutExpired("docker", 10), False, id="timeout"),
+    ],
+)
+def test_the_atlassian_server_runs_only_where_docker_runs_linux_containers(
+    monkeypatch, docker, info, runs
+):
+    calls = []
+
+    def run(args, **kwargs):
+        calls.append(args)
+        if isinstance(info, Exception):
+            raise info
+        return subprocess.CompletedProcess(args, info[0], stdout=info[1], stderr="")
+
+    monkeypatch.setattr(shutil, "which", lambda name: docker)
+    monkeypatch.setattr(subprocess, "run", run)
+    assert _docker_runs_linux_containers() is runs
+    assert calls == ([["docker", "info", "--format", "{{.OSType}}"]] if docker else [])
+
+
+@pytest.mark.skipif(
+    not _docker_runs_linux_containers(), reason="no Docker daemon running Linux containers"
+)
 def test_mcp_atlassian_acl_enforced(live_server):
     """A Jira issue the admin reads through mcp-atlassian is not-found for a scoped user.
 
