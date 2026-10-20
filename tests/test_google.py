@@ -13,7 +13,7 @@ import io
 import json
 import re
 import unicodedata
-from urllib.parse import quote, urlencode
+from urllib.parse import parse_qsl, quote, urlencode
 
 import httpx
 import jwt
@@ -1771,8 +1771,8 @@ def test_drive_permissions_list_pages_a_file_with_three_permissions(tmp_path, si
 @pytest.mark.parametrize(
     "route, names",
     [
-        ("/drive/v3/files/{file_id}/permissions", {"pageSize", "pageToken"}),
-        ("/drive/v3/drives", {"q"}),
+        ("/drive/v3/files/{file_id}/permissions", {"pageSize", "pageToken", "fields"}),
+        ("/drive/v3/drives", {"q", "fields"}),
     ],
 )
 def test_drive_listing_declares_the_parameters_it_reads(client, route, names):
@@ -2036,6 +2036,7 @@ _MASKS_UNSERVED = [
     (_PERMS_OF_DOC, "permissions(deleted)", "deleted"),
     (_PERMS_OF_DOC, "permissions(id,photoLink)", "photoLink"),
     (_PERMS_OF_DOC, "permissions/permissionDetails", "permissionDetails"),
+    (_PERMS_OF_DOC, "permissions(pendingOwner)", "pendingOwner"),
 ]
 _FULLTEXT = "q=" + quote("fullText contains 'a'")
 # Where real answered a mask ending in a comma among a route's other refusals, each sent beside it,
@@ -2537,6 +2538,9 @@ _MASKS_SERVED = [
     (_PERMS_OF_DOC, "kind()", {"kind"}, None),
     (_PERMS_OF_DOC, "permissions(id())", {"permissions"}, {"id"}),
     (_PERMS_OF_DOC, "permissions(role())", {"permissions"}, {"role"}),
+    (_PERMS_OF_DOC, "permissions(type())", {"permissions"}, {"type"}),
+    (_PERMS_OF_DOC, "permissions(kind())", {"permissions"}, {"kind"}),
+    (_PERMS_OF_DOC + "?pageSize=1", "nextPageToken()", {"nextPageToken"}, None),
     (_PERMS_OF_DOC, "permissions(emailAddress())", {"permissions"}, set()),
     (_PERMS_OF_DOC, "permissions( )", {"permissions"}, set()),
     (_PERMS_OF_DOC, "permissions(teamDrivePermissionDetails)", {"permissions"}, set()),
@@ -2574,10 +2578,12 @@ def test_drive_answers_a_fields_mask_with_what_it_selects(
     unmasked request gets it. A `drives.list` row compares the top-level keys alone: Backlot serves
     no shared drive, where real listed the member's two."""
     doc = _drive_find(client, admin_h, "Brand")["id"]
-    url = path.format(doc=doc)
+    url, _, query = path.format(doc=doc).partition("?")
 
     def get(**params):
-        r = client.get(url, headers=admin_h, params={"pageSize": 2, **params})
+        r = client.get(
+            url, headers=admin_h, params={"pageSize": 2, **dict(parse_qsl(query)), **params}
+        )
         assert r.status_code == 200, r.text
         body = r.json()
         return {"files": body["files"]} if path == "/drive/v3/files" else body
