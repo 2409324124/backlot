@@ -224,7 +224,7 @@ _AVA = synth.slack_user_id("ava@acme.com")
     "method,query,authorization,form,answer",
     [
         # the `token` query parameter, its last value read: a non-empty one is refused whatever
-        # else the request carries
+        # else the request carries but a `token` form field
         ("get", "token={admin}", None, None, "invalid_auth"),
         ("post", "token={admin}", None, None, "invalid_auth"),
         ("post", "token={admin}", None, "x=1", "invalid_auth"),
@@ -243,6 +243,13 @@ _AVA = synth.slack_user_id("ava@acme.com")
         ("post", "token=", None, "token=", "not_authed"),
         ("get", "token=", "bearer {admin}", None, "not_authed"),
         ("get", "TOKEN={admin}", "Bearer {admin}", None, "USERVICE0"),
+        # a `token` form field, an empty one included, in the parameter's place: the parameter is
+        # then refused only beside a token read
+        ("post", "token={admin}", None, "token=", "not_authed"),
+        ("post", "token={admin}", None, ("token", ""), "not_authed"),
+        ("post", "token={bogus}", None, "token=", "not_authed"),
+        ("post", "token={admin}", "Bearer {admin}", "token=", "invalid_auth"),
+        ("post", "token={admin}", None, "token={admin}", "invalid_auth"),
         # the `token` form field, its last value read, ahead of the bearer header
         ("post", "", "Bearer {bogus}", "token={admin}", "USERVICE0"),
         ("post", "", "Bearer {admin}", "token={ava}", _AVA),
