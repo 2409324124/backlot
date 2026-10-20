@@ -243,8 +243,7 @@ _AVA = synth.slack_user_id("ava@acme.com")
         ("post", "token=", None, "token=", "not_authed"),
         ("get", "token=", "bearer {admin}", None, "not_authed"),
         ("get", "TOKEN={admin}", "Bearer {admin}", None, "USERVICE0"),
-        # a `token` form field, an empty one included, in the parameter's place: the parameter is
-        # then refused only beside a token read
+        # a `token` form field in the parameter's place (`auth.slack_query_token_refused`)
         ("post", "token={admin}", None, "token=", "not_authed"),
         ("post", "token={admin}", None, ("token", ""), "not_authed"),
         ("post", "token={bogus}", None, "token=", "not_authed"),
