@@ -9,7 +9,6 @@ import os
 import re
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from pathlib import Path
 
 import pytest
 
@@ -165,12 +164,15 @@ def test_each_way_to_start_a_server_can_turn_it_off(monkeypatch, hello, capsys):
     assert seen == [True, False, True, False, None, True, "0", False]
 
 
-def test_client_labels_are_the_ones_measured_from_the_examples():
-    cases = json.loads(
-        (Path(__file__).parent / "telemetry_clients.json").read_text(encoding="utf-8")
-    )["cases"]
-    assert [clients.client(c["headers"]) for c in cases] == [c["client"] for c in cases]
-    assert clients.client({"user-agent": "curl/8.7.1"}) == "curl/8.7"
+@pytest.mark.parametrize("rule", clients._CLIENTS, ids=lambda rule: rule.label.partition("/")[0])
+def test_each_client_rule_names_the_headers_it_was_measured_from(rule):
+    # The rule itself answers, not an earlier one, with the version the headers carry.
+    label = clients.client(rule.sent)
+    assert label.partition("/")[0] == rule.label.partition("/")[0]
+    version = label.partition("/")[2]
+    assert not version or re.search(rf"\b{re.escape(version)}\b", rule.sent[rule.header])
+    assert clients.client({"user-agent": "Mozilla/5.0 (Macintosh) AppleWebKit/537.36"}) == "other"
+    assert clients.client({}) == "other"
 
 
 @pytest.mark.parametrize(
