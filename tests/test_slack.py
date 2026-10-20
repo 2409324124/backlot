@@ -3993,18 +3993,33 @@ class _IndexAnswer:
 
 
 @pytest.mark.parametrize(
-    "answer, want",
+    "answer, want, said",
     [
-        (_IndexAnswer(200, _INDEX_PAGE), 0),
-        (_IndexAnswer(503, _INDEX_PAGE), 2),
-        (_IndexAnswer(200, "| Name | Description |\n"), 2),
-        (None, 2),
+        (_IndexAnswer(200, _INDEX_PAGE), 0, ""),
+        (None, 2, "unreachable"),
+        (_IndexAnswer(503, _INDEX_PAGE), 2, "answered 503"),
+        (_IndexAnswer(429, _INDEX_PAGE), 2, "answered 429"),
+        (_IndexAnswer(404, _INDEX_PAGE), 1, "answered 404"),
+        (_IndexAnswer(200, "| Name | Description |\n"), 1, "| Name | Description |"),
+        (_IndexAnswer(200, "<html><body>Methods</body></html>"), 1, "lists no methods"),
+        *(
+            (_IndexAnswer(200, _INDEX_PAGE + row + "\n"), 1, row)
+            for row in (
+                "| [chat.postMessage](methods/chat.postmessage.md) | Sends a message. |",
+                "| [Pagination](https://docs.slack.dev/apis/web-api/pagination.md) | Pages. |",
+                "| [users.info](https://docs.slack.dev/reference/methods/users.list.md) | A user. |",
+                "| users.info | A user. |",
+            )
+        ),
     ],
 )
-def test_the_slack_method_list_is_written_from_the_index(tmp_path, monkeypatch, answer, want):
+def test_the_slack_method_list_is_written_from_the_index(
+    tmp_path, monkeypatch, capsys, answer, want, said
+):
     """``scripts/gen_slack_methods.py`` against a stand-in for the index: the file it writes, what
-    `--check` says of the file as written, of another and of none, and 2 for an index it cannot read
-    (an `httpx` error, a status but 200, a page with no method row), with no file written."""
+    `--check` says of the file as written, of another and of none, 2 for no answer or a 5xx or 429,
+    and 1 for any other answer that is not a table of method rows, saying why; neither writes a
+    file."""
     script = runpy.run_path(
         str(Path(__file__).resolve().parents[1] / "scripts" / "gen_slack_methods.py"),
         run_name="gen_slack_methods",
@@ -4026,8 +4041,10 @@ def test_the_slack_method_list_is_written_from_the_index(tmp_path, monkeypatch, 
     assert script["main"]() == want
     if want:
         assert not out.exists()
+        assert said in capsys.readouterr().err
         monkeypatch.setattr("sys.argv", ["gen_slack_methods.py", "--check"])
-        assert script["main"]() == 2
+        assert script["main"]() == want
+        assert said in capsys.readouterr().err
         return
     assert json.loads(out.read_text(encoding="utf-8")) == {
         "about": (
