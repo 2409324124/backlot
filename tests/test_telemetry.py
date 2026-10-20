@@ -15,8 +15,8 @@ import pytest
 
 from backlot.config import get_settings
 from backlot.server import HELLO_CORPUS
-from backlot.telemetry import codes, enabled, naming, notice, recorder
-from backlot.telemetry.classes import error_class
+from backlot.telemetry import clients, enabled, naming, notice, recorder
+from backlot.telemetry.errors import error_class
 from backlot.telemetry.recorder import MAX_SERIES, RECORDER, Exporter, Recorder, encode
 from tests._helpers import build_corpus, client_for
 
@@ -169,8 +169,8 @@ def test_client_labels_are_the_ones_measured_from_the_examples():
     cases = json.loads(
         (Path(__file__).parent / "telemetry_clients.json").read_text(encoding="utf-8")
     )["cases"]
-    assert [codes.client(c["headers"]) for c in cases] == [c["client"] for c in cases]
-    assert codes.client({"user-agent": "curl/8.7.1"}) == "curl/8.7"
+    assert [clients.client(c["headers"]) for c in cases] == [c["client"] for c in cases]
+    assert clients.client({"user-agent": "curl/8.7.1"}) == "curl/8.7"
 
 
 @pytest.mark.parametrize(

@@ -17,8 +17,7 @@ from urllib.parse import parse_qsl
 
 from backlot import synth
 from backlot.config import get_settings
-from backlot.telemetry import codes, enabled
-from backlot.telemetry.classes import error_class
+from backlot.telemetry import clients, enabled, errors
 from backlot.telemetry.naming import Namer, own_route
 from backlot.telemetry.recorder import RECORDER, Recorder
 
@@ -84,7 +83,7 @@ class TelemetryMiddleware:
                     answer["ended"] = time.perf_counter()
             await send(message)
 
-        client = _CLIENT.get() or codes.client(headers)
+        client = _CLIENT.get() or clients.client(headers)
         outer = _CLIENT.set(client)
         try:
             await self.app(scope, receive, watch)
@@ -137,11 +136,11 @@ class TelemetryMiddleware:
             if body is None:
                 code = "internal_error"
             else:
-                code = codes.error_code(named.source, status, body) if body else ""
+                code = errors.error_code(named.source, status, body) if body else ""
             if code:
                 attributes["backlot.error_code"] = code
             if code or status >= 400:
-                attributes["backlot.error_class"] = error_class(
+                attributes["backlot.error_class"] = errors.error_class(
                     named.source, named.support, int(status), code, spent
                 )
             self.recorder.record(attributes, ((ended or time.perf_counter()) - began) * 1000)

@@ -1,18 +1,33 @@
-"""The error code an answer carries, and the client library a request names.
+"""The error code an answer carries, and the class of a failure.
 
 An error code is the vendor's own identifier where its envelope has one: Slack's ``error``, S3's
 ``<Code>``, Google's ``reason`` or else its ``status``, Notion's ``code``, HubSpot's ``category``, a
-GraphQL ``extensions.code``. GitHub, Jira, Confluence and the GraphQL engine answer with a message only;
-those messages are Backlot's own text, so each maps to a fixed slug here and the message itself,
-which can carry a key, a sha or a field name from the request, is never sent. A message this table
-does not know is ``unrecognized``.
+GraphQL ``extensions.code``. GitHub, Jira, Confluence and the GraphQL engine answer with a message
+only; those messages are Backlot's own text, so each maps to a fixed slug here and the message
+itself, which can carry a key, a sha or a field name from the request, is never sent. A message
+this table does not know is ``unrecognized``.
+
+The class is the cause a failed call is put down to, sent as ``backlot.error_class`` on every
+failure:
+
+| Class | The call failed because |
+|---|---|
+| ``unsupported`` | Backlot does not do this yet: the baseline records the operation as ``missing`` or ``refused``, or the GraphQL engine refused a filter |
+| ``internal`` | of a Backlot bug: an unhandled exception, or a 5xx other than 501 |
+| ``rate_limit`` | the vendor's rate limit was reached: a 429, or a 403 with ``x-ratelimit-remaining: 0`` as GitHub sends |
+| ``auth`` | the credential was missing, wrong, or not allowed: a 401 or 403, or Slack's auth errors, which it sends with a 200 |
+| ``client`` | the request was wrong: any other failure |
+
+The rules read the status, the baseline's support state, the error code and the
+``x-ratelimit-remaining`` header, so a code no rule names is classed by its status. A 501 from an
+operation Backlot serves is the vendor's own answer (Google's ``notImplemented``), so it is
+``client``.
 """
 
 from __future__ import annotations
 
 import json
 import re
-from typing import Mapping
 
 # (pattern on the message, slug), first match wins.
 _GITHUB = [
@@ -132,33 +147,20 @@ def error_code(source: str, status: int, body: bytes) -> str:
     return ""
 
 
-# Measured from Backlot's own examples on 2026-10-14 (tests/telemetry_clients.json holds the
-# headers each sent): (header, pattern, label). `{v}` is the major.minor the pattern captures.
-_CLIENTS = [
-    ("x-goog-api-client", r"\bgdcl/(\d+)\.(\d+)", "google-api-python-client/{v}"),
-    ("x-goog-api-client", r"\bauth/(\d+)\.(\d+)", "google-auth/{v}"),
-    ("user-agent", r"\bBoto3/(\d+)\.(\d+)", "boto3/{v}"),
-    ("user-agent", r"\baiobotocore/(\d+)\.(\d+)", "aiobotocore/{v}"),
-    ("user-agent", r"\b[Bb]otocore/(\d+)\.(\d+)", "botocore/{v}"),
-    ("user-agent", r"\bslackclient/(\d+)\.(\d+)", "slack_sdk/{v}"),
-    ("user-agent", r"\bhubspot-api-client-python; (\d+)\.(\d+)", "hubspot-api-client/{v}"),
-    ("user-agent", r"\bnotion-sdk-py@(\d+)\.(\d+)", "notion-client/{v}"),
-    ("user-agent", r"^PyGithub/", "PyGithub"),
-    ("user-agent", r"\baiohttp/(\d+)\.(\d+)", "aiohttp/{v}"),
-    ("user-agent", r"^python-httpx2/(\d+)\.(\d+)", "python-httpx2/{v}"),
-    ("user-agent", r"^python-httpx/(\d+)\.(\d+)", "python-httpx/{v}"),
-    ("user-agent", r"^python-requests/(\d+)\.(\d+)", "python-requests/{v}"),
-    ("user-agent", r"^Python-urllib/(\d+)\.(\d+)", "python-urllib/{v}"),
-    ("user-agent", r"^Python-httplib2/(\d+)\.(\d+)", "httplib2/{v}"),
-    ("user-agent", r"^curl/(\d+)\.(\d+)", "curl/{v}"),
-    ("user-agent", r"^node$", "node"),
-]
+# Slack sends its auth errors with a 200.
+_SLACK_AUTH = frozenset({"account_inactive", "invalid_auth", "not_authed"})
 
 
-def client(headers: Mapping[str, str]) -> str:
-    """The library a request's headers name; ``other`` when none of the rules matches."""
-    for name, pattern, label in _CLIENTS:
-        m = re.search(pattern, headers.get(name, ""))
-        if m:
-            return label.format(v=".".join(m.groups())) if m.groups() else label
-    return "other"
+def error_class(source: str, support: str, status: int, code: str, spent: bool) -> str:
+    """The class of a failed call; ``spent`` is whether it answered ``x-ratelimit-remaining: 0``."""
+    if code == "internal_error":
+        return "internal"
+    if support in ("missing", "refused") or code == "unsupported_filter":
+        return "unsupported"
+    if status == 429 or (status == 403 and spent):
+        return "rate_limit"
+    if status in (401, 403) or (source == "slack" and code in _SLACK_AUTH):
+        return "auth"
+    if status >= 500 and status != 501:
+        return "internal"
+    return "client"
