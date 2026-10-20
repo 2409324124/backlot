@@ -160,10 +160,6 @@
           "kind": "missing_param",
           "severity": "gap"
         },
-        "q": {
-          "kind": "missing_param",
-          "severity": "gap"
-        },
         "quotaUser": {
           "kind": "missing_param",
           "severity": "gap"

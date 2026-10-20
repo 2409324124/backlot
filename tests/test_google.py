@@ -4316,13 +4316,13 @@ def _drive_ids(client, headers, **params):
 
 
 def test_drive_shared_with_me_partitions_by_owner(client, tokens_yaml):
-    """`q=sharedWithMe=true` must return only items shared with the caller by someone else, and
-    `false` must exclude them — real Drive's "Shared with me" is the only way to enumerate those.
-    Ignoring the clause makes both return the caller's whole visible corpus."""
+    """`q=sharedWithMe=true` returns only the items someone else shared with the caller, and
+    `'me' in owners` the caller's own, so the two partition what the caller sees. Real refuses
+    `sharedWithMe = false`, as `_FILES_Q` records, so the caller's own are asked for by owner."""
     mia = {"Authorization": f"Bearer {tok(tokens_yaml, 'mia@acme.com')}"}
     all_ids = set(_drive_ids(client, mia, q="trashed=false", pageSize=100))
     shared = set(_drive_ids(client, mia, q="sharedWithMe=true and trashed=false", pageSize=100))
-    own = set(_drive_ids(client, mia, q="sharedWithMe=false and trashed=false", pageSize=100))
+    own = set(_drive_ids(client, mia, q="'me' in owners and trashed=false", pageSize=100))
     assert shared and own  # SAMPLE gives mia both her own and others' files
     assert shared != own and not (shared & own)
     assert shared | own == all_ids  # together they partition the visible corpus
@@ -4345,7 +4345,7 @@ def test_drive_shared_items_carry_shared_with_me_time(client, tokens_yaml):
     own = client.get(
         "/drive/v3/files",
         headers=mia,
-        params={"q": "sharedWithMe=false and trashed=false", "pageSize": 100},
+        params={"q": "'me' in owners and trashed=false", "pageSize": 100},
     ).json()["files"]
     assert shared and own
     assert all(f["sharedWithMeTime"] for f in shared), "every shared item needs the timestamp"
