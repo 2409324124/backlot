@@ -850,7 +850,7 @@ def _build(data_dir: Path) -> Settings:
 
     settings = Settings(data_dir=data_dir)
     corpus = data_dir / "_corpus.jsonl"
-    corpus.write_text("\n".join(json.dumps(r) for r in SAMPLE))
+    corpus.write_text("\n".join(json.dumps(r) for r in SAMPLE), encoding="utf-8")
     load(corpus, settings)
     return settings
 
@@ -859,7 +859,7 @@ def _build(data_dir: Path) -> Settings:
 def sample_corpus_path(tmp_path) -> Path:
     """The in-code SAMPLE written to a JSONL tempfile (for corpus-file tests)."""
     p = tmp_path / "sample.jsonl"
-    p.write_text("\n".join(json.dumps(r) for r in SAMPLE))
+    p.write_text("\n".join(json.dumps(r) for r in SAMPLE), encoding="utf-8")
     return p
 
 
@@ -929,7 +929,7 @@ def acl(sample_settings) -> Acl:
 
 @pytest.fixture
 def tokens(sample_settings) -> dict[str, str]:
-    data = yaml.safe_load(sample_settings.tokens_path.read_text())
+    data = yaml.safe_load(sample_settings.tokens_path.read_text(encoding="utf-8"))
     return {u["email"]: u["token"] for u in data["users"]}
 
 
@@ -938,8 +938,7 @@ def client(sample_settings):
     """A TestClient over the SAMPLE DB, not the ambient ``data/`` import.
 
     Module-scoped, so each vendor's test file gets its own — a lifespan over SAMPLE costs ~5ms once
-    the corpus is built, and sharing one session-wide would collide with the tests that reload
-    ``backlot.main`` to serve a different DB."""
+    the corpus is built."""
     from tests._helpers import client_for
 
     with client_for(sample_settings) as c:
@@ -953,7 +952,7 @@ def tokens_yaml(sample_settings) -> dict:
     NOT :func:`tokens`, which is the ``{email: token}`` map. Two shapes, two names: the same
     fixture name meaning different things per file is how a test ends up asserting on the wrong
     one."""
-    return yaml.safe_load(sample_settings.tokens_path.read_text())
+    return yaml.safe_load(sample_settings.tokens_path.read_text(encoding="utf-8"))
 
 
 @pytest.fixture(scope="module")

@@ -175,7 +175,7 @@ def oclient(sample_settings):
 def _tokens(sample_settings):
     import yaml
 
-    data = yaml.safe_load(sample_settings.tokens_path.read_text())
+    data = yaml.safe_load(sample_settings.tokens_path.read_text(encoding="utf-8"))
     return {u["email"]: u["token"] for u in data["users"]}
 
 

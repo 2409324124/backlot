@@ -43,13 +43,12 @@ import hashlib
 import json
 import re
 import uuid
-from pathlib import Path
 
 from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ConfigDict
 
-from backlot import auth, pagination, store, synth
+from backlot import auth, pagination, published, store, synth
 from backlot.openapi import qp
 from backlot.routers import json_body
 
@@ -101,7 +100,16 @@ class NotionList(_NLoose):
 
 
 _P_PAGINATE = [qp("start_cursor"), qp("page_size", "integer")]
-_P_COMMENTS = [qp("block_id"), *_P_PAGINATE]
+_P_FILTER_PROPERTIES = qp(
+    "filter_properties",
+    description=(
+        "A property id or name; repeat the parameter, or spell it `filter_properties[]` or "
+        "`filter_properties[0]`, to list several. A page inside a database comes back with only "
+        "the listed properties (none when the value is unknown or empty); a page outside a "
+        "database keeps its title whatever is listed."
+    ),
+)
+_P_COMMENTS = [qp("block_id", required=True), *_P_PAGINATE]
 
 
 def _body(props: dict) -> dict:
@@ -330,16 +338,19 @@ def _unmounted_here(request: Request, *, data_sources: bool) -> JSONResponse | N
 
 
 def _norm(nid: str) -> str:
-    """Notion accepts an id dashed or dashless, any case. Canonicalize to the dashed lowercase
-    form the stored ``id`` / ``data_source_id`` columns actually hold (see
-    ``synth._uuid_from``) rather than to a dashless key: a UUID's dashes sit at fixed offsets
-    (8-4-4-4-12), so reconstructing them is deterministic, and the column's job is to hold the
-    value the API reports, not a lookup key a reader has to rebuild dashes from.
+    """Notion accepts an id dashed or dashless, and does not fold its case: a dashed id in upper
+    case was a 404 on ``pages/{id}`` (measured 2026-09-30) and on ``comments`` (2026-10-02), where
+    a dashless one in upper case was not read as a uuid at all. Folding case here serves an id
+    real does not. Canonicalize to the dashed lowercase form the stored ``id`` /
+    ``data_source_id`` columns actually hold (see ``synth._uuid_from``) rather than to a dashless
+    key: a UUID's dashes sit at fixed offsets (8-4-4-4-12), so reconstructing them is
+    deterministic, and the column's job is to hold the value the API reports, not a lookup key a
+    reader has to rebuild dashes from.
 
-    Malformed input (the wrong length once dashes are stripped) comes back unchanged, which just
-    won't match any stored id -- the same 404 every unknown-but-well-formed id already gets.
-    Notion draws no 400-vs-404 shape distinction the way gmail does (see
-    routers.google._gmail_check_shape); there is nothing to preserve here."""
+    Malformed input (the wrong length once dashes are stripped) comes back unchanged, which
+    matches no stored id. Real refuses a malformed id with a 400 before it looks anything up;
+    ``list_comments`` checks its ``block_id`` that way first, and the path routes answer it the
+    404 an unknown id gets."""
     h = (nid or "").replace("-", "").lower()
     if len(h) != 32:
         return h
@@ -390,16 +401,60 @@ def _list_obj(results: list, offset: int, page_len: int, total: int, type_key: s
     }
 
 
+# The objects below carry real's members in real's order, as api.notion.com answered one object of
+# each kind on 2026-10-20 under 2025-09-03, and under 2022-06-28 too for a page, a row, the block of
+# each and a database: a child block, a data source, the bot and a person beside those.
+
+
+def _partial_user(email: str) -> dict:
+    """The user member real puts on `created_by` / `last_edited_by`: `object` and `id` only.
+
+    Measured against api.notion.com on 2026-09-30: a page, a row, a block, a database and a data
+    source answer this two-member user there, while `GET /v1/users/{id}` keeps the full person
+    `_user_obj` renders.
+    """
+    return {"object": "user", "id": synth.notion_user_id(email or "")}
+
+
+def _object_url(object_id: str) -> str:
+    """The `url` real serves for a page or a database (measured 2026-09-30): `app.notion.com/p/`
+    and the id without its dashes. A data source answers its database's."""
+    return f"https://app.notion.com/p/{object_id.replace('-', '')}"
+
+
+def _workspace_id(name: str) -> str:
+    """A stable dashed uuid for one workspace, derived from its name the way the other served
+    ids are (the same corpus answers the same id)."""
+    raw = hashlib.shake_256(f"notion-workspace:{name}".encode()).digest(16)
+    return str(uuid.UUID(bytes=raw, version=4))
+
+
+def _answer(request: Request, payload: dict) -> JSONResponse:
+    """A 200 in Notion's envelope: `request_id` as the last body member and on the header.
+
+    Measured 2026-09-30 and 2026-10-20: the 200 of each route this router serves, list bodies
+    included, carries one id in `request_id` and in `x-notion-request-id`, the way `_error`
+    answers a refusal.
+    """
+    request_id = _request_id(request)
+    body = dict(payload)
+    body["request_id"] = request_id
+    return JSONResponse(content=body, headers={"x-notion-request-id": request_id})
+
+
 def _user_obj(conn, email: str) -> dict:
     u = store.get_user(conn, email)
     name = u["display_name"] if u else (email.split("@")[0] if email else "Unknown")
     return {
         "object": "user",
         "id": synth.notion_user_id(email or ""),
-        "type": "person",
         "name": name,
         "avatar_url": None,
-        "person": {"email": email},
+        "type": "person",
+        # Real's person member is `email` then `email_verified` under each Notion-Version, the
+        # latter `true` for the one person measured (2026-10-13). The corpus records no
+        # verification, so every person is served `true`.
+        "person": {"email": email, "email_verified": True},
     }
 
 
@@ -415,11 +470,31 @@ def _cover(url: str | None) -> dict | None:
     return {"type": "external", "external": {"url": url}} if url else None
 
 
-def _parent_field(row) -> dict:
-    # `parent_id` already HOLDS the parent's served id — the importer resolved it there.
-    # Hashing it again would name a page nothing serves.
-    if row["parent_id"]:
-        return {"type": "database_id", "database_id": row["parent_id"]}
+def _parent_field(conn, row, version: str | None = None) -> dict:
+    """The `parent` a page and its block serve, in the model the caller's version reads.
+
+    `parent_id` already HOLDS the parent's served id -- the importer resolved it there, and
+    hashing it again would name a page nothing serves. On 2026-10-20 api.notion.com typed the parent
+    the same way for the page and for its block: a page under a page `page_id` under 2022-06-28 and
+    2025-09-03, and a row `database_id` under 2022-06-28 and `data_source_id`, with the database id
+    beside it, under 2025-09-03.
+    """
+    if not row["parent_id"]:
+        return {"type": "workspace", "workspace": True}
+    parent = store.get_document(conn, "notion", row["parent_id"])
+    if parent["subtype"] != "database":
+        return {"type": "page_id", "page_id": row["parent_id"]}
+    if version and _data_sources_model(version):
+        return {
+            "type": "data_source_id",
+            "data_source_id": parent["data_source_id"],
+            "database_id": row["parent_id"],
+        }
+    return {"type": "database_id", "database_id": row["parent_id"]}
+
+
+def _database_parent(row) -> dict:
+    """A database's own `parent`. This router serves each database at the top of the workspace."""
     return {"type": "workspace", "workspace": True}
 
 
@@ -438,29 +513,84 @@ def _prop_value(name: str, value) -> dict:
     return {"id": name, "type": "rich_text", "rich_text": synth.notion_rich_text(str(value))}
 
 
-def _page_obj(conn, row) -> dict:
+def _page_obj(conn, row, version: str | None = None) -> dict:
     pid = row["id"]
     created = row["created_ts"]
     updated = row["updated_ts"] or created
     props = {"title": _title_prop(row["title"])}
     for k, v in (json.loads(row["properties"]) if row["properties"] else {}).items():
         props[k] = _prop_value(k, v)
+    # Both timestamps in the millisecond form real sends for the page and for its block.
     return {
         "object": "page",
         "id": pid,
-        "created_time": synth.rfc3339(created),
-        "last_edited_time": synth.rfc3339(updated),
-        "created_by": _user_obj(conn, row["author_email"]),
-        "last_edited_by": _user_obj(conn, row["author_email"]),
+        "created_time": synth.rfc3339_millis(created),
+        "last_edited_time": synth.rfc3339_millis(updated),
+        "created_by": _partial_user(row["author_email"]),
+        "last_edited_by": _partial_user(row["author_email"]),
         "cover": _cover(row["cover"]),
         "icon": _emoji_icon(row["icon"]),
-        "parent": _parent_field(row),
-        "archived": False,
+        "parent": _parent_field(conn, row, version),
         "in_trash": False,
+        "is_archived": False,
+        "is_locked": False,
         "properties": props,
-        "url": f"https://www.notion.so/{pid.replace('-', '')}",
+        "url": _object_url(pid),
         "public_url": None,
+        "archived": False,
     }
+
+
+_FILTER_PROPERTIES_KEY = re.compile(r"filter_properties((?:\[[^\[\]]*\])*)")
+_BRACKET = re.compile(r"\[([^\[\]]*)\]")
+
+
+def _filter_properties_keep(request: Request) -> list[str] | None | JSONResponse:
+    """The ``filter_properties`` names, ``None`` when the parameter is absent, or the 400 real
+    answers. Measured against api.notion.com (2022-06-28 and 2025-09-03) on 2026-10-15, which reads
+    the query string the way Node's ``qs`` does: the bare key, ``[]`` and an index from 0 to 20
+    all add to one list; any other single bracket (``[x]``, ``[21]``, ``[01]``) is a 400 unless the
+    bare key came first, and then lists nothing; a deeper bracket (``[0][x]``) or an index given
+    twice lists nothing. A bare ``[][]=Tags`` kept ``Tags`` on real and keeps nothing here."""
+    keep: list[str] = []
+    slots: dict[str, list[str]] = {}
+    first = refused = None
+    for key, value in request.query_params.multi_items():
+        if (m := _FILTER_PROPERTIES_KEY.fullmatch(key)) is None:
+            continue
+        brackets = _BRACKET.findall(m[1])
+        first = brackets if first is None else first
+        if brackets in ([], [""]):
+            keep.append(value)
+        elif len(brackets) > 1:
+            continue
+        elif (i := brackets[0]).isascii() and i.isdigit() and str(int(i)) == i and int(i) <= 20:
+            slots.setdefault(i, []).append(value)
+        else:
+            refused = first != []
+    if first is None:
+        return None
+    if refused:
+        return _error(
+            request,
+            400,
+            "validation_error",
+            'The value of "filter_properties" in query parameters must be a string or list of '
+            "strings",
+        )
+    return keep + [values[0] for values in slots.values() if len(values) == 1]
+
+
+def _filter_properties(page: dict, keep: list[str] | None) -> dict:
+    """Narrow ``properties`` to those whose id or name is in ``keep``; ``None`` leaves the page
+    as it is."""
+    if keep is None:
+        return page
+    wanted = set(keep)
+    page["properties"] = {
+        k: v for k, v in page["properties"].items() if k in wanted or v["id"] in wanted
+    }
+    return page
 
 
 def _schema_props(row) -> dict:
@@ -474,46 +604,107 @@ def _schema_props(row) -> dict:
 
 
 def _database_obj(conn, row, version: str) -> dict:
+    """A database as 2025-09-03 and later answer it, with its data sources, `is_locked` and no
+    author, or as earlier versions do, with the property schema, both authors and no
+    `is_locked`."""
     did = row["id"]
     created = row["created_ts"]
     updated = row["updated_ts"] or created
-    obj = {
+    if _data_sources_model(version):
+        return {
+            "object": "database",
+            "id": did,
+            "title": synth.notion_rich_text(row["title"]),
+            "description": synth.notion_rich_text(row["content"]),
+            "parent": _database_parent(row),
+            "is_inline": False,
+            "database_type": None,
+            "in_trash": False,
+            "is_locked": False,
+            "created_time": synth.rfc3339(created),
+            "last_edited_time": synth.rfc3339(updated),
+            "data_sources": [{"id": row["data_source_id"], "name": row["title"]}],
+            "icon": _emoji_icon(row["icon"]),
+            "cover": _cover(row["cover"]),
+            "url": _object_url(did),
+            "public_url": None,
+            "archived": False,
+        }
+    return {
         "object": "database",
         "id": did,
+        "cover": _cover(row["cover"]),
+        "icon": _emoji_icon(row["icon"]),
         "created_time": synth.rfc3339(created),
+        "created_by": _partial_user(row["author_email"]),
+        "last_edited_by": _partial_user(row["author_email"]),
         "last_edited_time": synth.rfc3339(updated),
-        "created_by": _user_obj(conn, row["author_email"]),
-        "last_edited_by": _user_obj(conn, row["author_email"]),
         "title": synth.notion_rich_text(row["title"]),
         "description": synth.notion_rich_text(row["content"]),
-        "icon": _emoji_icon(row["icon"]),
-        "cover": _cover(row["cover"]),
-        "parent": {"type": "workspace", "workspace": True},
-        "archived": False,
-        "in_trash": False,
         "is_inline": False,
-        "url": f"https://www.notion.so/{did.replace('-', '')}",
+        "database_type": None,
+        "properties": _schema_props(row),
+        "parent": _database_parent(row),
+        "url": _object_url(did),
         "public_url": None,
+        "in_trash": False,
+        "archived": False,
     }
-    if _data_sources_model(version):
-        obj["data_sources"] = [{"id": row["data_source_id"], "name": row["title"]}]
-    else:
-        obj["properties"] = _schema_props(row)
-    return obj
 
 
 def _data_source_obj(conn, row) -> dict:
+    """The data source `GET /v1/data_sources/{id}` answers: the database as `parent`, the
+    database's own parent as `database_parent`, the database's URL as `url`, and the title as
+    `title`, with no `name`."""
+    created = row["created_ts"]
+    updated = row["updated_ts"] or created
     return {
         "object": "data_source",
         "id": row["data_source_id"],
-        "name": row["title"],
-        "parent": {"type": "database_id", "database_id": row["id"]},
-        "database_parent": {"type": "database_id", "database_id": row["id"]},
+        "cover": _cover(row["cover"]),
+        "icon": _emoji_icon(row["icon"]),
+        "created_time": synth.rfc3339_millis(created),
+        "created_by": _partial_user(row["author_email"]),
+        "last_edited_by": _partial_user(row["author_email"]),
+        "last_edited_time": synth.rfc3339_millis(updated),
+        "title": synth.notion_rich_text(row["title"]),
+        "description": synth.notion_rich_text(row["content"]),
+        "is_inline": False,
+        "database_type": None,
         "properties": _schema_props(row),
+        "parent": {"type": "database_id", "database_id": row["id"]},
+        "database_parent": _database_parent(row),
+        "url": _object_url(row["id"]),
+        "public_url": None,
+        "in_trash": False,
+        "archived": False,
     }
 
 
 # --------------------------------------------------------------------------- pages / blocks
+
+
+def _block_child(conn, page_row, block: dict) -> dict:
+    """A block of `blocks.children` in the twelve members real serves (measured 2026-09-30): the
+    seven `synth.notion_blocks` emits plus the page parent, both timestamps in the millisecond form
+    and the two partial authors."""
+    created = page_row["created_ts"]
+    updated = page_row["updated_ts"] or created
+    kind = block["type"]
+    return {
+        "object": "block",
+        "id": block["id"],
+        "parent": {"type": "page_id", "page_id": page_row["id"]},
+        "created_time": synth.rfc3339_millis(created),
+        "last_edited_time": synth.rfc3339_millis(updated),
+        "created_by": _partial_user(page_row["author_email"]),
+        "last_edited_by": _partial_user(page_row["author_email"]),
+        "has_children": block["has_children"],
+        "in_trash": block["in_trash"],
+        "type": kind,
+        kind: block[kind],
+        "archived": block["archived"],
+    }
 
 
 @router.get("/pages/{page_id}", response_model=NotionObject, openapi_extra=_params())
@@ -528,7 +719,7 @@ async def get_page(page_id: str, request: Request):
     row = store.notion_by_id(conn, _norm(page_id), auth.visible_ids(request, caller))
     if row is None or row["subtype"] == "database":
         return _error(request, 404, "object_not_found", f"Could not find page with ID: {page_id}.")
-    return _page_obj(conn, row)
+    return _answer(request, _page_obj(conn, row, _version(request)))
 
 
 @router.get("/blocks/{block_id}", response_model=NotionObject, openapi_extra=_params())
@@ -544,18 +735,23 @@ async def get_block(block_id: str, request: Request):
         )
     bid = row["id"]
     kind = "child_database" if row["subtype"] == "database" else "child_page"
-    return {
-        "object": "block",
-        "id": bid,
-        "type": kind,
-        "has_children": True,
-        "archived": False,
-        "in_trash": False,
-        "created_time": synth.rfc3339(row["created_ts"]),
-        "last_edited_time": synth.rfc3339(row["updated_ts"] or row["created_ts"]),
-        "parent": _parent_field(row),
-        kind: {"title": row["title"]},
-    }
+    return _answer(
+        request,
+        {
+            "object": "block",
+            "id": bid,
+            "parent": _parent_field(conn, row, _version(request)),
+            "created_time": synth.rfc3339_millis(row["created_ts"]),
+            "last_edited_time": synth.rfc3339_millis(row["updated_ts"] or row["created_ts"]),
+            "created_by": _partial_user(row["author_email"]),
+            "last_edited_by": _partial_user(row["author_email"]),
+            "has_children": row["subtype"] != "database",
+            "in_trash": False,
+            "type": kind,
+            kind: {"title": row["title"]},
+            "archived": False,
+        },
+    )
 
 
 @router.get(
@@ -573,11 +769,23 @@ async def get_block_children(block_id: str, request: Request):
         return _error(
             request, 404, "object_not_found", f"Could not find block with ID: {block_id}."
         )
-    blocks = synth.notion_blocks(row["id"], row["content"])
+    # A database's rows are pages reached through the query route, not blocks: on api.notion.com
+    # (2026-10-04, three databases, Notion-Version 2022-06-28 and 2025-09-03) its children are the
+    # empty list, and its block reports `has_children` false.
+    blocks = [] if row["subtype"] == "database" else synth.notion_blocks(row["id"], row["content"])
     offset = pagination.decode_cursor(request.query_params.get("start_cursor"))
     limit = _page_size(request.query_params.get("page_size"))
     page = blocks[offset : offset + limit]
-    return _list_obj(page, offset, len(page), len(blocks), "block")
+    return _answer(
+        request,
+        _list_obj(
+            [_block_child(conn, row, b) for b in page],
+            offset,
+            len(page),
+            len(blocks),
+            "block",
+        ),
+    )
 
 
 # --------------------------------------------------------------------------- databases / data sources
@@ -594,7 +802,7 @@ async def get_database(database_id: str, request: Request):
         return _error(
             request, 404, "object_not_found", f"Could not find database with ID: {database_id}."
         )
-    return _database_obj(conn, row, _version(request))
+    return _answer(request, _database_obj(conn, row, _version(request)))
 
 
 @router.get("/data_sources/{data_source_id}", response_model=NotionObject, openapi_extra=_params())
@@ -619,7 +827,7 @@ async def get_data_source(data_source_id: str, request: Request):
             "object_not_found",
             f"Could not find data source with ID: {data_source_id}.",
         )
-    return _data_source_obj(conn, row)
+    return _answer(request, _data_source_obj(conn, row))
 
 
 async def _query_rows(request: Request, row_id: str, *, data_sources: bool):
@@ -646,8 +854,10 @@ async def _query_rows(request: Request, row_id: str, *, data_sources: bool):
     rows = store.children(conn, "notion", db_id, visible, limit=limit + 1, offset=offset)
     page = rows[:limit]
     total = offset + len(rows)  # +1 probe tells us whether there's a next page
-    results = [_page_obj(conn, r) for r in page]
-    return _list_obj(results, offset, len(page), total, "page_or_database")
+    version = _version(request)
+    results = [_page_obj(conn, r, version) for r in page]
+    trailer = "page_or_data_source" if _data_sources_model(version) else "page_or_database"
+    return _answer(request, _list_obj(results, offset, len(page), total, trailer))
 
 
 @router.post(
@@ -669,16 +879,46 @@ async def query_database(database_id: str, request: Request):
 # --------------------------------------------------------------------------- search
 
 
-@router.post("/search", response_model=NotionList, openapi_extra={**_B_SEARCH, **_params()})
+@router.post(
+    "/search",
+    response_model=NotionList,
+    openapi_extra={**_B_SEARCH, **_params(_P_FILTER_PROPERTIES)},
+)
 async def search(request: Request):
     caller = auth.resolve_bearer(request)
     if (refusal := _refusal(request, caller)) is not None:
         return refusal
+    # Answered after the credential and the version and before the body, measured 2026-10-15.
+    if isinstance(keep := _filter_properties_keep(request), JSONResponse):
+        return keep
+    body = await json_body(request)
+    # Measured against api.notion.com on 2026-10-01 and 2026-10-04: once the credential and the
+    # version clear, a `query` that is present must be a string and a `filter` that is present an
+    # object, `null` included, or the request is 400 `validation_error` quoting the value back.
+    # When both are wrong the message names `query`, wherever each sits in the body.
+    for member, kind, named in (("query", str, "a string"), ("filter", dict, "an object")):
+        if member in body and not isinstance(body[member], kind):
+            value = json.dumps(body[member], ensure_ascii=False, separators=(",", ":"))
+            return _error(
+                request,
+                400,
+                "validation_error",
+                f"body failed validation: body.{member} should be {named} or `undefined`, "
+                f"instead was `{value}`.",
+            )
     conn = auth.conn(request)
     visible = auth.visible_ids(request, caller)
-    body = await json_body(request)
-    query = body.get("query") or ""
-    want = (body.get("filter") or {}).get("value")  # 'page' | 'database' | None
+    query = body.get("query", "")
+    want = body.get("filter", {}).get("value")  # 'page' | 'database' | 'data_source' | None
+    version = _version(request)
+    # A `data_source` filter keeps the database rows. That filter, an unfiltered search and a
+    # `query` list each database as a database before 2025-09-03 and as its data source from it,
+    # in the shape `GET /v1/data_sources/{id}` answers less its `request_id`. Real answered the
+    # filter with the three databases under 2022-06-28 and their three data sources under
+    # 2025-09-03 and 2026-03-11 (2026-10-14), `{}` the same beside the pages (2026-10-14 and
+    # 2026-10-17), and a `query` naming one database's title with that database's data source
+    # under 2025-09-03 (2026-10-17).
+    render_data_source = _data_sources_model(version) and want in (None, "data_source")
     offset = pagination.decode_cursor(body.get("start_cursor"))
     limit = _page_size(body.get("page_size"))
     # Over-fetch so object-type filtering still fills a page; cap keeps it bounded. An empty query
@@ -691,19 +931,24 @@ async def search(request: Request):
     picked = []
     for r in rows:
         is_db = r["subtype"] == "database"
-        if want == "database" and not is_db:
+        if want in ("database", "data_source") and not is_db:
             continue
         if want == "page" and is_db:
             continue
         picked.append(r)
     window = picked[offset : offset + limit]
+    # A database row is narrowed under every Notion-Version, its parent typed `database_id` or
+    # `data_source_id`; a page outside a database keeps its title whatever is listed.
     results = [
-        _database_obj(conn, r, _version(request))
+        _data_source_obj(conn, r)
+        if r["subtype"] == "database" and render_data_source
+        else _database_obj(conn, r, version)
         if r["subtype"] == "database"
-        else _page_obj(conn, r)
+        else _filter_properties(_page_obj(conn, r, version), keep if r["parent_id"] else None)
         for r in window
     ]
-    return _list_obj(results, offset, len(window), len(picked), "page_or_database")
+    trailer = "page_or_data_source" if _data_sources_model(version) else "page_or_database"
+    return _answer(request, _list_obj(results, offset, len(window), len(picked), trailer))
 
 
 # --------------------------------------------------------------------------- users
@@ -720,7 +965,7 @@ async def list_users(request: Request):
     limit = _page_size(request.query_params.get("page_size"))
     page = users[offset : offset + limit]
     results = [_user_obj(conn, u["email"]) for u in page]
-    return _list_obj(results, offset, len(page), len(users), "user")
+    return _answer(request, _list_obj(results, offset, len(page), len(users), "user"))
 
 
 @router.get("/users/me", response_model=NotionObject, openapi_extra=_params())
@@ -730,19 +975,25 @@ async def get_me(request: Request):
         return refusal
     conn = auth.conn(request)
     if caller.email:  # a user token → that person
-        return _user_obj(conn, caller.email)
+        return _answer(request, _user_obj(conn, caller.email))
     # admin/service token → the integration's bot user
-    return {
-        "object": "user",
-        "id": synth.notion_user_id("bot:backlot"),
-        "type": "bot",
-        "name": "backlot",
-        "avatar_url": None,
-        "bot": {
-            "owner": {"type": "workspace", "workspace": True},
-            "workspace_name": auth.acl(request).org_name,
+    return _answer(
+        request,
+        {
+            "object": "user",
+            "id": synth.notion_user_id("bot:backlot"),
+            "name": "backlot",
+            "avatar_url": None,
+            "type": "bot",
+            "bot": {
+                "owner": {"type": "workspace", "workspace": True},
+                "workspace_name": auth.acl(request).org_name,
+                "workspace_id": _workspace_id(auth.acl(request).org_name),
+                # 5242880 on the free workspace measured on 2026-10-20.
+                "workspace_limits": {"max_file_upload_size_in_bytes": 5 * 1024 * 1024},
+            },
         },
-    }
+    )
 
 
 @router.get("/users/{user_id}", response_model=NotionObject, openapi_extra=_params())
@@ -754,7 +1005,7 @@ async def get_user(user_id: str, request: Request):
     key = _norm(user_id)
     for u in store.list_users(conn):
         if _norm(synth.notion_user_id(u["email"])) == key:
-            return _user_obj(conn, u["email"])
+            return _answer(request, _user_obj(conn, u["email"]))
     return _error(request, 404, "object_not_found", f"Could not find user with ID: {user_id}.")
 
 
@@ -768,15 +1019,61 @@ async def list_comments(request: Request):
         return refusal
     conn = auth.conn(request)
     block_id = request.query_params.get("block_id")
+    # Once the credential and the version clear, real refuses a comments query whose `block_id`
+    # is absent, empty or not a uuid before it looks the id up (measured 2026-10-01 and
+    # 2026-10-02), and answers a database's id as restricted -- where a page's or a block's id is
+    # the 200 list both sides agree on.
+    if block_id is None:
+        return _error(
+            request,
+            400,
+            "validation_error",
+            "query failed validation: query.block_id should be defined, instead was `undefined`.",
+        )
+    if not block_id.strip():
+        return _error(
+            request,
+            400,
+            "validation_error",
+            "query failed validation: query.block_id should be a string, instead was `0`.",
+        )
+    # What real reads as a uuid here (measured 2026-10-02): the dashed 8-4-4-4-12 form in either
+    # case, or 32 lower-case hex digits. It echoes anything else as JSON.
+    if not re.fullmatch(
+        r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}|[0-9a-f]{32}",
+        block_id,
+    ):
+        return _error(
+            request,
+            400,
+            "validation_error",
+            "query failed validation: query.block_id should be a valid uuid, instead was "
+            f"`{json.dumps(block_id, ensure_ascii=False)}`.",
+        )
     # One ACL-scoped query (the parent must itself be visible to the caller), not
     # a resolve followed by a get_document refetch of the same row -- see get_page and friends.
-    row = (
-        store.notion_by_id(conn, _norm(block_id), auth.visible_ids(request, caller))
-        if block_id
-        else None
-    )
+    row = store.notion_by_id(conn, _norm(block_id), auth.visible_ids(request, caller))
     if row is None:
-        return _list_obj([], 0, 0, 0, "comment")
+        # A block is not a row: it is one of the blocks `blocks/{id}/children` derives for a page,
+        # and Backlot keeps no comment on one, so a block of a page the caller can see is the empty
+        # list real answered on 2026-10-02.
+        visible = auth.visible_ids(request, caller)
+        wanted = _norm(block_id)
+        for page in store.list_documents(conn, "notion", visible_ids=visible, limit=-1):
+            if page["subtype"] != "database" and any(
+                b["id"] == wanted for b in synth.notion_blocks(page["id"], page["content"])
+            ):
+                return _answer(request, _list_obj([], 0, 0, 0, "comment"))
+        return _error(
+            request, 404, "object_not_found", f"Could not find block with ID: {block_id}."
+        )
+    if row["subtype"] == "database":
+        return _error(
+            request,
+            403,
+            "restricted_resource",
+            "This object is managed by Notion and isn’t accessible via MCP",
+        )
     parent_id = row["id"]
     comments = store.doc_comments(conn, "notion", parent_id)
     offset = pagination.decode_cursor(request.query_params.get("start_cursor"))
@@ -795,32 +1092,15 @@ async def list_comments(request: Request):
         }
         for c in page
     ]
-    return _list_obj(results, offset, len(page), len(comments), "comment")
+    return _answer(request, _list_obj(results, offset, len(page), len(comments), "comment"))
 
 
 # --------------------------------------------------------------------------- misc
 
 
-# The baseline `backlot diff --source notion` keeps, the file ``backlot.fidelity.baseline_path``
-# names; read here without importing that package, whose ``__init__`` loads the comparison modules.
-_BASELINE = Path(__file__).resolve().parent.parent / "fidelity" / "baseline" / "notion.json"
-
-
-def _published_operations_not_served() -> tuple[tuple[str, re.Pattern[str]], ...]:
-    """The operations Notion publishes and no route here serves, as (method, path pattern): the
-    baseline's ``missing_operation`` rows, each ``{}`` one path segment. Read off that file rather
-    than listed here, so an operation Notion adds reaches ``unmatched_path`` once the baseline
-    acknowledges it; a route added here wins over ``unmatched_path`` whatever the file says."""
-    operations = []
-    for row in json.loads(_BASELINE.read_text())["acknowledged"]:
-        if row["kind"] == "missing_operation":
-            method, path = row["path"].split(" ", 1)
-            pattern = "[^/]+".join(re.escape(part) for part in path.split("{}"))
-            operations.append((method, re.compile(pattern)))
-    return tuple(operations)
-
-
-_PUBLISHED_NOT_SERVED = _published_operations_not_served()
+# The operations Notion publishes and no route here serves (see ``backlot.published``); a route
+# added here wins over ``unmatched_path`` whatever the baseline says.
+_PUBLISHED_NOT_SERVED = published.not_served("notion")
 # The three operations Notion's document puts behind `basicAuth` rather than the `bearerAuth`
 # every other operation inherits (read 2026-09-28): its OAuth client endpoints.
 _CLIENT_AUTH_OPERATIONS = frozenset(
@@ -859,12 +1139,12 @@ async def unmatched_path(request: Request, rest: str) -> JSONResponse:
     so the URL is the first thing that API checks.
 
     A published operation exists for that check whether or not Backlot serves it. On 2026-09-28
-    each of the 53 the baseline lists as ``missing_operation`` (see
-    :func:`_published_operations_not_served`) answered the format's 401 with no header and the
-    token's 401 with `Bearer nope`, the two a served route answers, apart from the three OAuth
-    client endpoints and their own refusal (see :func:`_invalid_client`). A request that clears
-    the credential and the version on one of the other fifty gets the URL's 400 here, as
-    Backlot has no operation to run: that is the gap each of those rows acknowledges.
+    each of the 53 the baseline lists as ``missing_operation`` (see ``backlot.published``) answered
+    the format's 401 with no header and the token's 401 with `Bearer nope`, the two a served route
+    answers, apart from the three OAuth client endpoints and their own refusal (see
+    :func:`_invalid_client`). A request that clears the credential and the version on one of the
+    other fifty gets the URL's 400 here, as Backlot has no operation to run: that is the gap each of
+    those operations acknowledges.
 
     The method is part of the URL that check reads: `GET /v1/search` and `GET /v1/pages`, both POST
     routes, `DELETE`, `PUT`, `PATCH` and `OPTIONS` on `/v1/users/me`, a GET route, and `PUT` on
@@ -889,7 +1169,7 @@ async def unmatched_path(request: Request, rest: str) -> JSONResponse:
     path under `/notion` where its slash redirect fires, since this route matches every other.
     """
     path = request.url.path.removeprefix("/notion")
-    if any(m == request.method and p.fullmatch(path) for m, p in _PUBLISHED_NOT_SERVED):
+    if published.includes(_PUBLISHED_NOT_SERVED, request.method, path):
         if (request.method, path) in _CLIENT_AUTH_OPERATIONS:
             return _invalid_client(request)
         if (refusal := _refusal(request, auth.resolve_bearer(request))) is not None:

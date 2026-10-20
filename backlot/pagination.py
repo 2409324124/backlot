@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import base64
 from typing import Annotated
-from urllib.parse import quote
+from urllib.parse import quote, quote_plus
 
 from fastapi import Query
 from pydantic import BeforeValidator
@@ -232,9 +232,16 @@ def clamp_page(
     return p, pp
 
 
-def _page_url(url_no_query: str, params: dict) -> str:
-    """One page url in a `Link` header, `<…>`-wrapped with its query percent-encoded."""
-    q = "&".join(f"{k}={quote(str(v), safe='')}" for k, v in params.items())
+def _page_url(url_no_query: str, params: dict, *, quote_via=quote_plus) -> str:
+    """One page url in a `Link` header, `<…>`-wrapped with its query form-encoded.
+
+    A space is `+` and everything else outside the unreserved set is percent-encoded, as real
+    writes it whichever way the request spelt the space: measured on api.github.com on 2026-10-13,
+    `search/issues?q=repo:psf/requests%20is:issue` links `q=repo%3Apsf%2Frequests+is%3Aissue`, and
+    `issues?labels=Needs%20Info` links `labels=Needs+Info`. ``quote_via`` lets
+    :func:`github_code_search_link_header` write the space otherwise.
+    """
+    q = "&".join(f"{k}={quote_via(str(v), safe='')}" for k, v in params.items())
     return f"<{url_no_query}?{q}>"
 
 
@@ -283,9 +290,9 @@ def github_link_header(
     The rels come in one fixed order whichever of them a page has — prev, next, last, first — which
     is the order real emits across all four of those pages.
 
-    Values are percent-encoded because a param value is arbitrary text — a search `q` carries
-    spaces and colons — and a URI cannot hold them raw. A client that follows the link has to
-    arrive at the query it was paging, not at a truncated one.
+    Values are encoded as :func:`_page_url` writes them, because a param value is arbitrary text —
+    a search `q` carries spaces and colons — and a URI cannot hold them raw. A client that follows
+    the link has to arrive at the query it was paging, not at a truncated one.
     """
     last_page = max(1, (total + per_page - 1) // per_page)
     if max_page is not None:
@@ -344,6 +351,13 @@ def github_code_search_link_header(
       spelt: no `per_page` in the query links `per_page=30`, `?per_page=500` on 1,808 hits links
       `per_page=100` (its cap) and `?per_page=0` links `per_page=30`, where a listing omits an
       unsent size and echoes a sent one verbatim. This cell it shares with the cursor listing.
+    * a space in `q` is percent-encoded in every rel, whichever way the request spelt it: on
+      2026-10-13 `?q=repo:psf/requests+def+language:python` linked
+      `q=repo%3Apsf%2Frequests%20def%20language%3Apython`.
+    * the query is written `q`, then `page`, then `per_page`, on every rel and whatever order the
+      request sent them in: on 2026-10-14 each of the six orders of `q=repo:psf/requests+def`,
+      `per_page=5` and `page=2` linked next as `q=repo%3Apsf%2Frequests%20def&page=3&per_page=5`,
+      with prev, first and last differing only in the page number.
 
     `/search/issues` shares none of that and pages by :func:`github_link_header`. A result set that
     fits one page carries no header, which is the one rule all three surfaces share.
@@ -360,7 +374,7 @@ def github_code_search_link_header(
         return None
 
     def link(p: int) -> str:
-        return _page_url(url_no_query, {**params, "per_page": per_page, "page": p})
+        return _page_url(url_no_query, {**params, "page": p, "per_page": per_page}, quote_via=quote)
 
     parts = []
     if page < last_page:
@@ -429,6 +443,8 @@ def confluence_page_links(
     after: str = "",
     cursor: str | None = None,
     sent_cursor: str | None = None,
+    reached: int | None = None,
+    head: str = "",
 ) -> dict:
     """The `next` and `prev` every paged Confluence listing answers, literal for literal.
 
@@ -438,19 +454,24 @@ def confluence_page_links(
 
     - each link carries its own marker, `next=true` or `prev=true`, which nothing else names;
     - `next` is answered whenever the rows served have not reached `total`, not "the page came back
-      full", so a three-space site answers `?limit=3` no `next` and `?limit=2` a `start=2`. An
-      empty page advances nothing, so `?limit=0` answers a link to the page it is on rather than
-      withholding one, where a `start` past `total` answers none. The rows are counted from `start`
-      on every listing but the CQL search, which counts them from its cursor
-      (:func:`backlot.routers.atlassian._cql_cursor`);
+      full", so a three-space site answers `?limit=3` no `next` and `?limit=2` a `start=2`. On
+      every listing but the CQL search the rows are counted from `start`: an empty page advances
+      nothing, so `?limit=0` answers a `next` linking to the page it is on, and a `start` past
+      `total` answers none. The CQL search's page is not positioned by `start`
+      (:func:`backlot.routers.atlassian._cql_position`); it passes ``reached``, the number of
+      matches up to the end of its page, a page that served none counting as reaching one match on
+      (measured 2026-10-04), and its `next` carries the cursor
+      :func:`backlot.routers.atlassian._cql_cursor` picks;
     - `prev` walks back by `limit` clamped at zero, and its own `limit` is the number of rows
       actually skipped, so `?start=1` at the default 25 answers `limit=1&start=0`, and
       `?limit=5&start=2` answers `limit=2&start=0` on all six (measured 2026-09-23);
     - `next` is built before `prev`, because real emits `_links` alphabetically and a caller
       reading key order sees `next` first.
 
-    ``before`` and ``after`` are the request's other parameters, split where
-    :func:`backlot.routers.atlassian._confluence_carried` says real puts them.
+    ``head``, ``before`` and ``after`` are the request's other parameters, split where
+    :func:`backlot.routers.atlassian._confluence_carried` says real puts them. ``head`` leads
+    `next` and `prev`, ahead of the marker; the CQL search, whose `prev` leads with
+    ``sent_cursor``, passes none.
 
     ``cursor`` and ``sent_cursor`` are the CQL search's. ``cursor`` rides `next` alone, between the
     marker and `limit`. ``sent_cursor`` is the one the request brought, and it changes `prev`,
@@ -462,8 +483,8 @@ def confluence_page_links(
     lead = (f"cursor={cursor}&" if cursor else "") + before
     tail = f"&{after}" if after else ""
     nxt = start + size
-    if nxt < total:
-        links["next"] = f"{path}?next=true&{lead}limit={limit}&start={nxt}{tail}"
+    if (nxt if reached is None else reached) < total:
+        links["next"] = f"{path}?{head}next=true&{lead}limit={limit}&start={nxt}{tail}"
     if sent_cursor:
         links["prev"] = (
             f"{path}?cursor={sent_cursor}&{before}prev=true&limit={limit}"
@@ -472,6 +493,6 @@ def confluence_page_links(
     elif start > 0:
         prev_start = max(0, start - limit)
         links["prev"] = (
-            f"{path}?{before}prev=true&limit={start - prev_start}&start={prev_start}{tail}"
+            f"{path}?{head}{before}prev=true&limit={start - prev_start}&start={prev_start}{tail}"
         )
     return links

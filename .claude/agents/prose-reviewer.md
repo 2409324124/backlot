@@ -28,7 +28,7 @@ the body with `gh pr view <n> --json body` or from the prompt, and `AGENTS.md`, 
    naming both places and which one to keep.
 4. **Length.** A comment longer than the code it explains, or a doc paragraph that restates the code
    line by line, is a finding with the shorter wording proposed in the resolution.
-5. **Documentation rules.** README.md stays at or under 130 lines and states no count of sources.
+5. **Documentation rules.** README.md stays at or under 180 lines and states no count of sources.
    `docs/supported-sources.md` is generated; a hand edit between its markers is a `block`. Every
    relative link resolves. The served surface is not called "read-only".
 6. **The PR body.** Every template section is filled. It describes the finished state, not the rounds
@@ -36,6 +36,12 @@ the body with `gh pr view <n> --json body` or from the prompt, and `AGENTS.md`, 
    with measurements in a table rather than a paragraph. The measurement section names a live call,
    introspection or generated client and a date. The body ends at the template's checklist: a
    signature, a "Generated with" line or a session link after it is a finding.
+
+A debloat pull request (a `claude/debloat-` or `claude/rehearsal-debloat-` branch, or one the prompt
+calls debloat) follows `.claude/skills/backlot-debloat/SKILL.md` step 8 for its body: its
+measurement section carries the invariance proof instead of a vendor call, and it lists candidates
+left for a later run. Neither is a finding. Its rewrites shorten on purpose; judge them against that
+skill's rule 5 — a rewrite that drops what rule 5 keeps is drift.
 
 ## What you do not flag
 
