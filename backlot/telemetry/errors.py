@@ -72,7 +72,7 @@ _JIRA = [
 ]
 # Confluence prefixes most messages with the Java exception's class, so these are not anchored.
 _CONFLUENCE = [
-    (r"^No content found with id", "content_not_found"),
+    (r"No content found with id", "content_not_found"),
     (r"No space (found )?with key", "space_not_found"),
     (r"cql query parameter is required", "cql_required"),
     (r"^Unauthorized$", "unauthenticated"),
