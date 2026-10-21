@@ -203,12 +203,14 @@ class Namer:
         if source == "slack":
             return Named(source, canonical(route_path), IMPLEMENTED)
         key = canonical(route_path)
+        # An operation the vendor's contract does not describe has no vendor id, and is named by
+        # its path template (`wiki/rest/api/content/{}`), which a refactor of the route leaves be.
         for m in (method, "GET") if method == "HEAD" else (method,):
             hit = self._by_key.get(source, {}).get((m, key))
             if hit:
                 op_id, status = hit
-                return Named(source, op_id or route.name, status)
-        return Named(source, route.name, EXTRA)
+                return Named(source, op_id or key, status)
+        return Named(source, key, EXTRA)
 
     def _best(self, source: str, rest: str, method: str) -> _Template | None:
         """The vendor template ``rest`` fits with the most literal segments, the served one first

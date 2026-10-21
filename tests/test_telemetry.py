@@ -387,6 +387,14 @@ GITHUB = "/github/repos/acme/docs-site"
             {"headers": {"x-amz-copy-source": "/acme-artifacts/k.txt"}},
             ("s3", "CopyObject", "refused", 400, "InvalidArgument", "unsupported"),
         ),
+        # A read the vendor's published contract no longer describes has no vendor id; it is
+        # named by its path template.
+        (
+            "GET",
+            "/atlassian/wiki/rest/api/content/999999",
+            {},
+            ("confluence", "wiki/rest/api/content/{}", "extra", 404, "content_not_found", "client"),
+        ),
         # Google Docs is mounted at /docs/v1, beside FastAPI's own /docs page.
         (
             "GET",
