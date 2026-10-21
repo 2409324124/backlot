@@ -2720,6 +2720,79 @@ def test_github_deleting_the_installation_token_is_answered_as_a_served_route(
         assert second.headers["x-ratelimit-used"] == first.headers["x-ratelimit-used"], headers
 
 
+_TEAMS_COLLABORATORS_PROTECTION = (
+    "orgs/{org}/teams",
+    "repos/{org}/gateway/collaborators",
+    "repos/{org}/gateway/teams",
+    "repos/{org}/gateway/branches/main/protection",
+)
+_REFUSED_COUNTED = (401, "Requires authentication", None, True)
+_REFUSED_UNCOUNTED = (401, "Requires authentication", None, False)
+
+
+@pytest.mark.parametrize("path", _TEAMS_COLLABORATORS_PROTECTION)
+@pytest.mark.parametrize(
+    "headers, answer",
+    [
+        ({}, _REFUSED_COUNTED),
+        ({"X-GitHub-Api-Version": "2022-11-28"}, _REFUSED_COUNTED),
+        ({"X-GitHub-Api-Version": "1999-01-01"}, _REFUSED_COUNTED),
+        ({"Authorization": "Foo bar"}, _REFUSED_UNCOUNTED),
+        ({"Authorization": "Foo bar", "X-GitHub-Api-Version": "1999-01-01"}, _REFUSED_UNCOUNTED),
+        ({"Authorization": "Digest x", "X-GitHub-Api-Version": "1999-01-01"}, _REFUSED_UNCOUNTED),
+        ({"Authorization": "Bearer\tnope", "X-GitHub-Api-Version": "1999-01-01"},
+         _REFUSED_UNCOUNTED),
+        ({"Authorization": "Basic eDp5", "X-GitHub-Api-Version": "1999-01-01"},
+         (400, "Bad Request", None, True)),
+    ],
+)  # fmt: skip
+def test_github_teams_collaborators_and_protection_refuse_no_credential_first(
+    gh_client, gh_org, path, headers, answer
+):
+    """Each row is real's answer as `_refuse_an_anonymous_caller` records it: the status, the
+    message, the version echo and whether the five `x-ratelimit-*` ride on it."""
+    c, _ = gh_client
+    r = c.get(f"/github/{path.format(org=gh_org)}", headers=headers)
+    status, message, echo, five = answer
+    assert (r.status_code, r.json()["message"]) == (status, message), headers
+    assert r.headers.get("x-github-api-version-selected") == echo, headers
+    assert ("x-ratelimit-limit" in r.headers) is five, headers
+
+
+@pytest.mark.parametrize(
+    "path, status, docs",
+    [
+        ("orgs/{org}/teams", 401, "https://docs.github.com/rest"),
+        ("repos/{org}/gateway/collaborators", 401, "https://docs.github.com/rest"),
+        ("repos/{org}/gateway/teams", 404,
+         "https://docs.github.com/rest/repos/repos#list-repository-teams"),
+        ("repos/{org}/gateway/branches/main/protection", 404,
+         "https://docs.github.com/rest/branches/branch-protection#get-branch-protection"),
+    ],
+)  # fmt: skip
+def test_github_a_basic_value_naming_no_token_is_each_routes_own_answer(
+    gh_client, gh_org, path, status, docs
+):
+    """`Basic eDp5` (`x:y`) names no token, so real answers it as each route answers a caller with
+    no credential, with the echo and the five: the 401 on the org's teams and on collaborators, the
+    404 on a repository's teams and a branch's protection (see `_refuse_an_anonymous_caller`)."""
+    c, _ = gh_client
+    r = c.get(f"/github/{path.format(org=gh_org)}", headers={"Authorization": "Basic eDp5"})
+    assert (r.status_code, r.json()["documentation_url"]) == (status, docs)
+    assert r.headers["x-github-api-version-selected"] == "2022-11-28"
+    assert "x-ratelimit-limit" in r.headers
+
+
+def test_github_code_search_refuses_a_header_without_a_credential_uncounted(gh_client):
+    """Real answers `Foo bar` on `/search/code` with the 401 and none of the five, where no
+    `Authorization` carries them (see `_refuse_an_anonymous_caller`)."""
+    c, _ = gh_client
+    foo = c.get("/github/search/code", params={"q": "x"}, headers={"Authorization": "Foo bar"})
+    assert (foo.status_code, foo.json()["message"]) == (401, "Requires authentication")
+    assert "x-ratelimit-limit" not in foo.headers
+    assert "x-ratelimit-limit" in c.get("/github/search/code", params={"q": "x"}).headers
+
+
 def test_github_a_head_is_the_get_with_the_body_left_off(gh_client, gh_admin_h, gh_org):
     """Real answers a `HEAD` on each GitHub route measured as the `GET` with nothing in the body: the GET's
     status, its headers, `content-length` of the body the GET would have carried and `Link` where
@@ -4346,9 +4419,10 @@ def test_github_unsupported_api_version_is_refused_ahead_of_a_missing_credential
     (measured 2026-09-15, see `test_github_401_says_which_credential_failed`).
 
     The missing-credential half is only visible on a route real refuses an anonymous caller, since
-    it serves the public ones 200: `/user/repos` is the one Backlot serves, and real answers the
-    version's 400 there where a supported version is `Requires authentication` (measured 2026-09-17,
-    three runs of each).
+    it serves the public ones 200: on `/user/repos` real answers the version's 400 where a supported
+    version is `Requires authentication` (see `_validate_bad_credential`). Teams,
+    collaborators and branch protection refuse that caller ahead of the version instead
+    (`test_github_teams_collaborators_and_protection_refuse_no_credential_first`).
 
     The gateway sends no `Selected` echo on this 400; the pull and contents backend answer their
     own (``test_github_version_error_depends_on_endpoint_and_representation``). A 404 does carry
