@@ -2,9 +2,10 @@
 
 [← README](../README.md)
 
-Every setting is an env var with a `BACKLOT_` prefix, and a `.env` file in the working directory is
-read too — copy [`.env.example`](../.env.example) and edit. Defaults are what the server uses when
-the var is unset. There are eleven, and this page is all of them.
+Every setting is an env var with a `BACKLOT_` prefix but `DO_NOT_TRACK`, which is the cross-tool
+convention's own name, and a `.env` file in the working directory is read too — copy
+[`.env.example`](../.env.example) and edit. Defaults are what the server uses when the var is unset.
+There are twelve, and this page is all of them.
 
 ## Corpus and identity
 
@@ -43,8 +44,7 @@ What is sent, and what never is, is [docs/telemetry.md](telemetry.md).
 | Env var | Default | What it does |
 |---|---|---|
 | `BACKLOT_TELEMETRY` | `true` | `false` turns usage telemetry off. `backlot serve --disable-telemetry`, `backlot mcp --disable-telemetry` and `backlot.serve(telemetry=False)` set it for the server they start |
-
-`DO_NOT_TRACK=1` turns it off as well.
+| `DO_NOT_TRACK` | unset | Any value but `0` or `false` turns usage telemetry off, as it does in many developer tools |
 
 ## SQLite
 

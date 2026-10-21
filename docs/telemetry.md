@@ -24,7 +24,7 @@ It is anonymous and coarse by design. It counts calls, never callers. The counts
 | `backlot mcp --disable-telemetry` | The MCP bridge, for the server it starts when none is running |
 | `backlot.serve(telemetry=False)`, `backlot.serve_or_connect(telemetry=False)` | Python, for the server it starts |
 | `BACKLOT_TELEMETRY=false` | The environment, for any server started from it, Docker included |
-| `DO_NOT_TRACK=1` | The environment, as for `BACKLOT_TELEMETRY`: the convention many developer tools honour |
+| `DO_NOT_TRACK=1` | The environment or `.env`, as for `BACKLOT_TELEMETRY`: the convention many developer tools honour |
 
 Turn it off wherever Backlot runs for something other than your own use of it: a test suite, a CI job, a benchmark harness. A server that sends telemetry says so on stderr when it starts.
 

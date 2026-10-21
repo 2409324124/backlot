@@ -8,8 +8,6 @@ middleware is installed by ``backlot.main``.
 
 from __future__ import annotations
 
-import os
-
 from backlot.config import Settings
 
 DOCS = "https://github.com/brekkylab/backlot/blob/main/docs/telemetry.md"
@@ -32,5 +30,4 @@ def enabled(settings: Settings) -> bool:
     """Whether this process sends telemetry: on unless ``BACKLOT_TELEMETRY`` is false or
     ``DO_NOT_TRACK``, the convention many developer tools honour, is set to anything but ``0`` or
     ``false``."""
-    do_not_track = os.environ.get("DO_NOT_TRACK", "").strip().lower() not in ("", "0", "false")
-    return settings.telemetry and not do_not_track
+    return settings.telemetry and settings.do_not_track.strip().lower() in ("", "0", "false")
