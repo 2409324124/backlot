@@ -113,11 +113,12 @@ async def _validate_bad_credential(request: Request) -> None:
 
     Real resolves a presented credential before it looks at ``X-GitHub-Api-Version``: a bad bearer
     with an unsupported version pinned is "Bad credentials", not the version's 400 (measured against
-    api.github.com 2026-09-15 on ``/repos/{owner}/{repo}`` and ``/rate_limit``). A request carrying
-    no credential at all still meets the version check first, measured on ``/user/repos``, a served
-    route real refuses an anonymous caller: an unsupported version there is the version's 400 and a
-    supported one is "Requires authentication" (2026-09-17, three runs of each on cache-busted
-    URLs). The routes :func:`_refuse_an_anonymous_caller` names refuse that caller ahead of both. So this only fires for a token that arrived and failed to resolve;
+    api.github.com 2026-09-15 on ``/repos/{owner}/{repo}`` and ``/rate_limit``). A request
+    carrying no credential at all still meets the version check first, measured on ``/user/repos``,
+    a served route real refuses an anonymous caller: an unsupported version there is the version's
+    400 and a supported one is "Requires authentication" (2026-09-17, three runs of each on
+    cache-busted URLs). The routes :func:`_refuse_an_anonymous_caller` names refuse that caller
+    ahead of both. So this only fires for a token that arrived and failed to resolve;
     :func:`_validate_path_owner` answers the missing-credential case in its own place, after the
     version check.
     """
@@ -512,18 +513,19 @@ async def _refuse_an_anonymous_caller(request: Request) -> None:
     as :func:`refuse_an_unserved_operation` refuses one on a `GET` it does not serve: ahead of the
     version and of the owner, repository or branch the path names, with no version echo.
 
-    Measured against api.github.com on 2026-10-18 and 2026-10-21 with no token, each request on
-    its own cache-busted URL, on `psf`, `psf/requests` and its `main` branch. On `/orgs/{org}/teams`,
-    `/repos/{owner}/{repo}/collaborators`, `/repos/{owner}/{repo}/teams` and
-    `/repos/{owner}/{repo}/branches/{branch}/protection`, no `Authorization` was the 401 "Requires
-    authentication" with the five `x-ratelimit-*` and no `X-GitHub-Api-Version-Selected`, with no
-    version, `2022-11-28` or `1999-01-01`, and ahead of an organization, a repository and a branch
-    that do not exist. `Foo bar` with or without `1999-01-01`, and `Digest x` and `Bearer<TAB>nope`
-    pinned to it on collaborators, were that 401 without the five; so was `Foo bar` on
-    `/search/code`. A `Basic` value naming no token (`Basic eDp5`) was the version's 400 pinned to
-    `1999-01-01`, and otherwise each route's own answer with the echo and the five: the 401 on the
-    first two, and the 404 on a repository's teams and a branch's protection
-    (:data:`_NOT_FOUND_FOR_A_BASIC_VALUE_WITHOUT_A_TOKEN`).
+    Measured against api.github.com with no token on 2026-10-18 and 2026-10-21, each request on its
+    own cache-busted URL, on `psf`, `psf/requests` and its `main` branch. On `/orgs/{org}/teams`,
+    `/repos/{owner}/{repo}/collaborators`, `/repos/{owner}/{repo}/teams`,
+    `/repos/{owner}/{repo}/branches/{branch}/protection` and `/search/code`, no `Authorization` was
+    the 401 "Requires authentication" with the five `x-ratelimit-*` and no
+    `X-GitHub-Api-Version-Selected`, with no version or `1999-01-01`, and on the first four with
+    `2022-11-28` too and ahead of an organization, a repository and a branch that do not exist.
+    `Foo bar` with or without `1999-01-01`, and `Digest x` and `Bearer<TAB>nope` pinned to it, were
+    that 401 without the five on each, where `token` with no value was `Bad credentials` without the
+    five (:func:`_validate_bad_credential`). A `Basic` value naming no token (`Basic eDp5`) was the
+    version's 400 pinned to `1999-01-01` on the first four, and otherwise each route's own answer
+    with the echo and the five: the 401 on the first two, and the 404 on a repository's teams and a
+    branch's protection (:data:`_NOT_FOUND_FOR_A_BASIC_VALUE_WITHOUT_A_TOKEN`).
     """
     route = getattr(request.scope.get("route"), "path", None)
     if route not in _REFUSE_AN_ANONYMOUS_CALLER_FIRST:
