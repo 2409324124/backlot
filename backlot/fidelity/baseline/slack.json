@@ -3,7 +3,7 @@
   "endpoints": [
     "https://raw.githubusercontent.com/slackapi/slack-api-specs/master/web-api/slack_web_openapi_v2.json"
   ],
-  "measured": "2026-10-20",
+  "measured": "2026-10-21",
   "operations": [
     {
       "operation": "GET /admin.apps.approved.list",
@@ -562,25 +562,10 @@
       "id": "reactions.list",
       "status": "implemented",
       "params": {
-        "cursor": {
-          "kind": "missing_param",
-          "severity": "gap",
-          "note": "Cursor paging on this method. Backlot pages it with `count` alone."
-        },
         "full": {
           "kind": "missing_param",
           "severity": "gap",
           "note": "Asks for the complete item rather than a reference. Backlot serves the complete message either way, built by the same `_message` that `conversations.history` uses, so there is no reduced form for this to switch off."
-        },
-        "limit": {
-          "kind": "missing_param",
-          "severity": "gap",
-          "note": "Cursor paging on this method. Backlot pages it with `count` alone."
-        },
-        "page": {
-          "kind": "missing_param",
-          "severity": "gap",
-          "note": "Page paging on this method. Backlot pages it with `count` alone."
         },
         "token": {
           "kind": "missing_param",

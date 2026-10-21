@@ -163,7 +163,12 @@ _P_DELETE = [qp("channel", required=True), qp("ts", required=True)]
 _P_PERMALINK = [qp("channel", required=True), qp("message_ts", required=True)]
 _P_REACTION = [qp("channel"), qp("timestamp"), qp("name", required=True)]
 _P_REACTION_GET = [qp("channel"), qp("timestamp")]
-_P_REACTION_LIST = [qp("count", "integer")]
+_P_REACTION_LIST = [
+    qp("count", "integer"),
+    qp("page", "integer"),
+    qp("limit", "integer"),
+    qp("cursor"),
+]
 
 # conversations.history page cap (thread roots). Slack recommends limit<=200; capping here bounds
 # how many authors a client resolves per call so history stays fast even with a small users.list.
@@ -1684,25 +1689,34 @@ async def reactions_list(request: Request):
     scene the corpus describes rather than something this caller did, so reading the overlay's own
     patches is what keeps the answer about them.
 
-    `count`, `page` and `limit` go through `_numbers`, so a value real cannot read is refused
-    here as it is on every other method that reads a number. Only `count` is then honoured: this
-    answers one page, and paging by `page` or `limit` is a recorded gap in the baseline, as are
-    `cursor`, `full` and `user`. They are validated rather than honoured because the two are
-    different claims — real refuses `page=abc` whatever it does with `page=2`.
+    Measured 2026-10-21: the page is `limit` items long and carries `response_metadata`, with no
+    `paging` object. `count` and `page` are read and refused by the same rule but change neither
+    the page nor its size — `count=1` and `count=2` each answered all 100 of the default page,
+    where `limit=2` answered two. Reading an argument is not honouring it: real refuses
+    `page=abc` whatever it does with `page=2`.
 
-    Not measured on this method: the token in `.env` has no `reactions:read`, so `missing_scope`
-    answers ahead of any argument, and the other is revoked. The rule is the one measured on the
-    methods that do read numbers.
+    `count`, `page` and `limit` are refused in that order whichever was sent first, and ahead of
+    both an undecodable `cursor` and an unknown `user`. `limit` takes the integer rule here, so
+    `1.5` is refused where a paged read method would serve one item, and a `limit` at or below
+    zero is the default page rather than every item: `0`, `00`, `-1` and `-2` each answered the
+    same 100 items and the same cursor as no `limit`, where `1000` answered all 247 and an empty
+    cursor. `full` is a recorded gap.
     """
     conn = auth.conn(request)
     caller, err = _caller_or_error(request)
     if err is not None:
         return err
     counts, err = _numbers(
-        request, ("count", 100), ("page", 1), ("limit", get_settings().default_page_size)
+        request,
+        ("count", 100),
+        ("page", 1),
+        ("limit", get_settings().default_page_size, False),
     )
     if err is not None:
         return err
+    offset = decode_cursor_or_none(_param(request, "cursor"))
+    if offset is None:
+        return _err("invalid_cursor")
     author, _uid_, _bot = _writer(caller)
     ids = auth.visible_ids(request, caller)
     patch = overlay.table_names("slack")["patch"]
@@ -1726,20 +1740,10 @@ async def reactions_list(request: Request):
                 "message": _message(row),
             }
         )
-    count = counts["count"]
-    total = len(items)
-    return {
-        "ok": True,
-        "items": items[:count],
-        # `pages` follows from the other two rather than being fixed at 1, which contradicted a
-        # `total` larger than one page.
-        "paging": {
-            "count": count,
-            "total": total,
-            "page": 1,
-            "pages": (total + count - 1) // count if count else 1,
-        },
-    }
+    limit = counts["limit"] if counts["limit"] > 0 else get_settings().default_page_size
+    page = items[offset : offset + limit]
+    cursor = next_cursor(offset, len(page), len(items))
+    return {"ok": True, "items": page, "response_metadata": {"next_cursor": cursor}}
 
 
 # --- helpers --------------------------------------------------------------------
@@ -2073,14 +2077,19 @@ _SLACK_INTEGER = re.compile(r"[0-9]+|-[1-9][0-9]*")
 _SLACK_NUMBER = re.compile(r"-?(?:[0-9]+(?:[.][0-9]+)?|[.][0-9]+)(?:[eE]-?[0-9]+)?\n?")
 
 
-def _slack_number(key: str, raw: str) -> int | None:
+def _slack_number(key: str, raw: str, *, decimal: bool | None = None) -> int | None:
     """The value of one numeric argument by the rule on `_SLACK_INTEGER`, or None where real
-    refuses it. A `limit` is its integer part (`1.5` is 1, `3.99999` is 3, `-1.5` is -1), and one
-    too large for a float (`1e400`) is zero, which `_limit` serves as no `limit`, as real served
-    every item. An integer part at or past 2**63 wraps around 2**64, so `9223372036854775808` and
-    `1e19` are negative and `1e300` is zero, and one below -2**63 stays negative: the reading that
-    every row of the measurement on `_limit` agrees with."""
-    if key == "limit":
+    refuses it. A decimal argument is its integer part (`1.5` is 1, `3.99999` is 3, `-1.5` is -1),
+    and one too large for a float (`1e400`) is zero, which `_limit` serves as no `limit`, as real
+    served every item. An integer part at or past 2**63 wraps around 2**64, so
+    `9223372036854775808` and `1e19` are negative and `1e300` is zero, and one below -2**63 stays
+    negative: the reading that every row of the measurement on `_limit` agrees with.
+
+    Which of the two rules a key takes is a property of the method, not of the name. `limit` is
+    decimal on the paged read methods and an integer on `reactions.list`, where `1.5`, `2e0` and
+    `1.e1` are each refused (measured 2026-10-21). `decimal` names the rule; left None it follows
+    the name, which is what every paged method wants."""
+    if key == "limit" if decimal is None else decimal:
         if not _SLACK_NUMBER.fullmatch(raw):
             return None
         if _SLACK_INTEGER.fullmatch(raw) and -(2**63) <= int(raw) < 2**63:
@@ -2097,10 +2106,13 @@ def _slack_number(key: str, raw: str) -> int | None:
 
 
 def _numbers(
-    request: Request, *params: tuple[str, int], sort_dir_ok: bool | None = None
+    request: Request,
+    *params: tuple[str, int] | tuple[str, int, bool],
+    sort_dir_ok: bool | None = None,
 ) -> tuple[dict[str, int], JSONResponse | None]:
     """The numeric arguments `params` names as `(key, default)`, each read by `_slack_number` and
-    capped at `max_page_size`, and the `invalid_arguments` that names every one real refuses.
+    capped at `max_page_size`, and the `invalid_arguments` that names every one real refuses. A
+    third element is that key's `decimal`, for a method that reads it by the other rule.
 
     Real puts one line per refused field in one answer, in the order `params` lists them
     whichever was sent first, and on the search methods an unknown `sort_dir` adds its line after
@@ -2109,9 +2121,9 @@ def _numbers(
     `empty_ok` half of the rule on `_SORT_DIRS`; None leaves `sort_dir` unread."""
     values: dict[str, int] = {}
     messages: list[str] = []
-    for key, default in params:
+    for key, default, *rule in params:
         raw = _param(request, key)
-        n = default if raw is None else _slack_number(key, raw)
+        n = default if raw is None else _slack_number(key, raw, decimal=rule[0] if rule else None)
         if n is None:
             messages.append(f"[ERROR] must provide a number [json-pointer:/{key}]")
             n = default

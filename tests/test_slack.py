@@ -3064,23 +3064,48 @@ def test_reactions_list_is_the_callers_own(wclient, tokens):
     assert j["ok"] is True
     listed = [i["message"]["ts"] for i in j["items"] if i["type"] == "message"]
     assert mine in listed and theirs not in listed
-    # A number real cannot read is refused here as on every other method that reads one, and the
-    # refusal names each field. `page` and `limit` are validated without being honoured: refusing
-    # `page=abc` and paging by `page=2` are different claims, and only the first is made.
+    # The answer carries a cursor and no `paging` object.
+    assert "paging" not in j and j["response_metadata"]["next_cursor"] == ""
+    # A number real cannot read is refused, and the refusal names each field in this order
+    # whichever was sent first. `page` is validated without being honoured: refusing `page=abc`
+    # and paging by `page=2` are different claims, and only the first is made.
     refused = wclient.post(
-        "/slack/api/reactions.list", headers=ava, data={"count": "abc", "page": "-0"}
+        "/slack/api/reactions.list", headers=ava, data={"page": "-0", "count": "abc"}
     ).json()
     assert refused["ok"] is False and refused["error"] == "invalid_arguments"
     assert refused["response_metadata"]["messages"] == [
         "[ERROR] must provide a number [json-pointer:/count]",
         "[ERROR] must provide a number [json-pointer:/page]",
     ]
-    # a readable one still answers
+    # `limit` is an integer on this method, where a paged reader would serve its integer part.
+    assert wclient.post("/slack/api/reactions.list", headers=ava, data={"limit": "1.5"}).json()[
+        "response_metadata"
+    ]["messages"] == ["[ERROR] must provide a number [json-pointer:/limit]"]
+    # `limit` sizes the page and `count` does not, and the cursor walks the rest.
+    wclient.post(
+        "/slack/api/reactions.add",
+        headers=ava,
+        data={"channel": cid, "timestamp": theirs, "name": "eyes"},
+    )
+    one = wclient.post(
+        "/slack/api/reactions.list", headers=ava, data={"limit": "1", "count": "2"}
+    ).json()
+    assert [i["message"]["ts"] for i in one["items"]] == [mine]
+    rest = wclient.post(
+        "/slack/api/reactions.list",
+        headers=ava,
+        data={"limit": "1", "cursor": one["response_metadata"]["next_cursor"]},
+    ).json()
+    assert [i["message"]["ts"] for i in rest["items"]] == [theirs]
+    # A `limit` at or below zero is the default page, not an empty one.
+    for value in ("0", "-1"):
+        zero = wclient.post("/slack/api/reactions.list", headers=ava, data={"limit": value}).json()
+        assert [i["message"]["ts"] for i in zero["items"]] == [mine, theirs]
     assert (
-        wclient.post(
-            "/slack/api/reactions.list", headers=ava, data={"count": "1", "limit": "1.5"}
-        ).json()["ok"]
-        is True
+        wclient.post("/slack/api/reactions.list", headers=ava, data={"cursor": "bogus"}).json()[
+            "error"
+        ]
+        == "invalid_cursor"
     )
 
 
