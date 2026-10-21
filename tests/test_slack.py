@@ -3064,6 +3064,24 @@ def test_reactions_list_is_the_callers_own(wclient, tokens):
     assert j["ok"] is True
     listed = [i["message"]["ts"] for i in j["items"] if i["type"] == "message"]
     assert mine in listed and theirs not in listed
+    # A number real cannot read is refused here as on every other method that reads one, and the
+    # refusal names each field. `page` and `limit` are validated without being honoured: refusing
+    # `page=abc` and paging by `page=2` are different claims, and only the first is made.
+    refused = wclient.post(
+        "/slack/api/reactions.list", headers=ava, data={"count": "abc", "page": "-0"}
+    ).json()
+    assert refused["ok"] is False and refused["error"] == "invalid_arguments"
+    assert refused["response_metadata"]["messages"] == [
+        "[ERROR] must provide a number [json-pointer:/count]",
+        "[ERROR] must provide a number [json-pointer:/page]",
+    ]
+    # a readable one still answers
+    assert (
+        wclient.post(
+            "/slack/api/reactions.list", headers=ava, data={"count": "1", "limit": "1.5"}
+        ).json()["ok"]
+        is True
+    )
 
 
 def test_reactions_answer_over_get_too(wclient, tokens):

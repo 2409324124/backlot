@@ -1684,15 +1684,23 @@ async def reactions_list(request: Request):
     scene the corpus describes rather than something this caller did, so reading the overlay's own
     patches is what keeps the answer about them.
 
-    `count` is read through `_numbers`, so a value real cannot read is refused here the way it is
-    on the search methods. `page`, `cursor`, `limit`, `full` and `user` are not read at all and so
-    are not refused either; they are recorded gaps in the baseline.
+    `count`, `page` and `limit` go through `_numbers`, so a value real cannot read is refused
+    here as it is on every other method that reads a number. Only `count` is then honoured: this
+    answers one page, and paging by `page` or `limit` is a recorded gap in the baseline, as are
+    `cursor`, `full` and `user`. They are validated rather than honoured because the two are
+    different claims — real refuses `page=abc` whatever it does with `page=2`.
+
+    Not measured on this method: the token in `.env` has no `reactions:read`, so `missing_scope`
+    answers ahead of any argument, and the other is revoked. The rule is the one measured on the
+    methods that do read numbers.
     """
     conn = auth.conn(request)
     caller, err = _caller_or_error(request)
     if err is not None:
         return err
-    counts, err = _numbers(request, ("count", 100))
+    counts, err = _numbers(
+        request, ("count", 100), ("page", 1), ("limit", get_settings().default_page_size)
+    )
     if err is not None:
         return err
     author, _uid_, _bot = _writer(caller)

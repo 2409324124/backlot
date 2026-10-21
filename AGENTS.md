@@ -38,8 +38,7 @@ docs, `pyproject.toml` keywords.
 
 ## Documentation rules (`tests/test_docs.py` enforces all of these)
 
-- README.md stays within the line cap `tests/test_docs.py` enforces (`_README_MAX_LINES`).
-  If a change needs more room, the content belongs in `docs/` — raising the cap is not the fix.
+- README.md stays ≤ 180 lines. If a change needs more room, the content belongs in `docs/`.
 - Never state a source count in README.md. Counts go stale; the generated inventory carries the
   real one.
 - Every relative link in every markdown file must resolve on disk. Do not link a path a stacked PR
