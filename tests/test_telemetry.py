@@ -101,12 +101,20 @@ def _calls(send) -> list[dict]:
     return [dict(key) | {"count": n} for key, n in counts.items()]
 
 
-def test_it_is_on_unless_backlot_telemetry_or_do_not_track_says_off(hello, capsys):
+def test_it_is_on_unless_backlot_telemetry_or_do_not_track_says_off(
+    hello, capsys, tmp_path, monkeypatch
+):
+    for on in (None, "0", ""):
+        with _env(BACKLOT_TELEMETRY=None, DO_NOT_TRACK=on):
+            get_settings.cache_clear()
+            assert enabled(get_settings()), on
+    # Read from `.env` as every setting is.
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / ".env").write_text("DO_NOT_TRACK=1\n", encoding="utf-8")
     with _env(BACKLOT_TELEMETRY=None, DO_NOT_TRACK=None):
         get_settings.cache_clear()
-        assert enabled(get_settings())
-    with _env(DO_NOT_TRACK="0"):
-        assert enabled(get_settings())
+        assert not enabled(get_settings())
+    monkeypatch.undo()
     with _env(BACKLOT_TELEMETRY="1", DO_NOT_TRACK=None), _ExportTo(UNREACHABLE):
         capsys.readouterr()
         with client_for(hello):
@@ -349,6 +357,34 @@ GITHUB = "/github/repos/acme/docs-site"
             {},
             ("gmail", "gmail.users.drafts.list", "missing", 404, None, "unsupported"),
         ),
+        # A route's `{param}` or `{rest:path}` does not take a literal of an operation it does
+        # not serve: the vendor's router matches the literal.
+        (
+            "GET",
+            f"{GITHUB}/issues/comments",
+            {},
+            ("github", "issues/list-comments-for-repo", "missing", 404, "not_found", "unsupported"),
+        ),
+        (
+            "GET",
+            f"{GITHUB}/branches/main/protection/required_signatures",
+            {},
+            (
+                "github",
+                "repos/get-commit-signature-protection",
+                "missing",
+                404,
+                "branch_not_found",
+                "unsupported",
+            ),
+        ),
+        # x-amz-copy-source tells CopyObject from PutObject.
+        (
+            "PUT",
+            "/s3/acme-artifacts/k2.txt",
+            {"headers": {"x-amz-copy-source": "/acme-artifacts/k.txt"}},
+            ("s3", "CopyObject", "refused", 400, "InvalidArgument", "unsupported"),
+        ),
         # Google Docs is mounted at /docs/v1, beside FastAPI's own /docs page.
         (
             "GET",
@@ -384,8 +420,10 @@ GITHUB = "/github/repos/acme/docs-site"
     ],
 )
 def test_a_call_is_named_by_the_baseline(client, method, path, kwargs, expected):
+    kwargs = dict(kwargs)
+    headers = ADMIN | kwargs.pop("headers", {})
     calls = _calls(
-        lambda: client.request(method, path, headers=ADMIN, follow_redirects=False, **kwargs)
+        lambda: client.request(method, path, headers=headers, follow_redirects=False, **kwargs)
     )
     assert len(calls) == 1, calls
     c = calls[0]
@@ -481,6 +519,152 @@ def test_a_fragment_that_spreads_others_is_named_in_bounded_time():
     assert time.perf_counter() - began < 1
 
 
+J = "/atlassian/rest/api/3"
+W = "/atlassian/wiki/rest/api"
+ISSUE = "PLAD294FC-1825"
+JSON = {"Content-Type": "application/json"}
+OLD_VERSION = {"X-GitHub-Api-Version": "1999-01-01"}
+
+
+# One request per message-to-slug row and per alternative inside it, each sent to Backlot, so a
+# router whose words drift from its row shows here. GitHub's rate-limit row is the spent-window
+# test's; Linear's `unsupported_filter` is raised only for filter fields its schema does not
+# declare, so no request reaches it.
+@pytest.mark.parametrize(
+    "method, path, kwargs, expected",
+    [
+        ("GET", "/github/repos/acme/nosuch", {}, "not_found"),
+        ("GET", "/github/search/code?q=x", {"headers": {}}, "requires_authentication"),
+        ("GET", GITHUB, {"headers": {"Authorization": "Bearer nope"}}, "bad_credentials"),
+        ("GET", "/github/search/issues", {}, "validation_failed"),
+        ("GET", "/github/search/issues?q=x&page=11&per_page=100", {}, "search_result_window"),
+        ("GET", "/github/search/code?q=x&page=11&per_page=100", {}, "search_result_window"),
+        ("GET", f"{GITHUB}/git/blobs/abc", {}, "invalid_sha"),
+        ("GET", f"{GITHUB}/commits/nosuchref", {}, "no_commit_for_sha"),
+        ("GET", f"{GITHUB}/contents/README.md?ref=nosuchref", {}, "no_commit_for_ref"),
+        ("GET", f"{GITHUB}/branches/nosuch", {}, "branch_not_found"),
+        ("GET", GITHUB, {"headers": OLD_VERSION}, "unsupported_api_version"),
+        (
+            "GET",
+            f"{GITHUB}/contents/README.md",
+            {"headers": OLD_VERSION},
+            "unsupported_api_version",
+        ),
+        ("GET", f"{J}/issue/NOPE-1", {}, "issue_not_found"),
+        ("GET", f"{J}/project/NOPE/role", {}, "project_not_found"),
+        ("GET", f"{J}/project/12345/role", {}, "project_not_found"),
+        ("GET", f"{J}/issue/{ISSUE}/comment?orderBy=bogus", {}, "invalid_order_by"),
+        ("GET", f"{J}/project/search?orderBy=bogus", {}, "invalid_order_by"),
+        ("GET", f"{J}/search/jql", {}, "unbounded_jql"),
+        ("GET", f"{J}/search/jql?jql=x&maxResults=0", {}, "invalid_max_results"),
+        ("GET", f"{J}/search/jql?jql=x&nextPageToken=garbage", {}, "invalid_next_page_token"),
+        ("POST", f"{J}/search/jql", {"json": {"bogus": 1}}, "invalid_payload"),
+        ("POST", f"{J}/search/jql", {"headers": JSON, "content": b""}, "invalid_payload"),
+        ("POST", f"{J}/search/jql", {"headers": JSON, "content": b"{"}, "invalid_payload"),
+        ("GET", f"{J}/issue/{ISSUE}/comment?maxResults=abc", {}, "invalid_parameter"),
+        (
+            "GET",
+            f"{J}/search/jql?jql=x&reconcileIssues=" + ",".join(map(str, range(1, 52))),
+            {},
+            "invalid_parameter",
+        ),
+        ("GET", f"{J}/nopesuchroute", {}, "no_endpoint"),
+        (
+            "POST",
+            f"{J}/search/jql",
+            {"headers": {"Content-Type": "text/plain"}, "content": b"x"},
+            "unsupported_media_type",
+        ),
+        ("GET", f"{J}/serverInfo", {"headers": {"Accept": "text/csv"}}, "not_acceptable"),
+        ("DELETE", f"{J}/serverInfo", {}, "method_not_allowed"),
+        ("OPTIONS", f"{J}/serverInfo", {"headers": {}}, "unauthenticated"),
+        (
+            "GET",
+            f"{J}/serverInfo",
+            {"headers": {"Authorization": "Bearer nope"}},
+            "unauthenticated",
+        ),
+        ("GET", f"{W}/content/999999", {}, "content_not_found"),
+        ("GET", f"{W}/content?spaceKey=NOPE", {}, "space_not_found"),
+        ("GET", f"{W}/space/NOPE", {}, "space_not_found"),
+        ("GET", f"{W}/search", {}, "cql_required"),
+        (
+            "GET",
+            f"{W}/space",
+            {"headers": {"Authorization": "Basic !!!notbase64"}},
+            "unauthenticated",
+        ),
+        ("GET", f"{W}/space", {"headers": {}}, "forbidden"),
+        ("GET", f"{W}/search?cql=type=page", {"headers": {}}, "forbidden"),
+        ("GET", f"{W}/nopesuchroute", {"headers": {"Accept": "application/json"}}, "no_endpoint"),
+        ("GET", f"{W}/space?limit=abc", {}, "invalid_parameter"),
+        ("GET", f"{W}/space?limit=-1", {}, "invalid_parameter"),
+        ("GET", f"{W}/content?type=bogus", {}, "content_type_not_found"),
+    ],
+)
+def test_each_message_slug_is_one_backlot_sends(client, method, path, kwargs, expected):
+    kwargs = dict(kwargs)
+    headers = kwargs.pop("headers", ADMIN)
+    calls = _calls(lambda: client.request(method, path, headers=headers, **kwargs))
+    assert [c.get("backlot.error_code") for c in calls] == [expected], calls
+
+
+@pytest.mark.parametrize(
+    "payload, headers, expected",
+    [
+        ({"query": "{"}, LINEAR, "graphql_parse"),
+        ({"query": '{ issue(id: "nope") { id } }'}, LINEAR, "entity_not_found"),
+        ({"query": "{ __typename }"}, {}, "authentication_required"),
+        ({"query": "{ nosuch }"}, LINEAR, "graphql_validation"),
+        ({"query": '{ issue(id: "x", bogus: 1) { id } }'}, LINEAR, "graphql_validation"),
+        ({"query": 'query($x: Nope) { issue(id: "x") { id } }'}, LINEAR, "graphql_validation"),
+        ({"query": "{ issue { id } }"}, LINEAR, "graphql_validation"),
+        ({"query": "query($x: String!) { issue(id: $x) { id } }"}, LINEAR, "graphql_validation"),
+        (
+            {
+                "query": 'query($x: String = "a") { issue(id: $x) { id } }',
+                "variables": {"x": None},
+            },
+            LINEAR,
+            "graphql_validation",
+        ),
+        ({"query": "mutation { x }"}, LINEAR, "graphql_validation"),
+        ({"query": "{ ...F }"}, LINEAR, "graphql_validation"),
+        ({"query": "{ issues @nope { nodes { id } } }"}, LINEAR, "graphql_validation"),
+        (
+            {"query": "query A { viewer { id } } query A { viewer { id } }"},
+            LINEAR,
+            "graphql_validation",
+        ),
+        ({"query": "{ issue(id: 5) { id } }"}, LINEAR, "graphql_validation"),
+        ({}, LINEAR, "graphql_request"),
+        ({"query": "{ viewer { id } }", "variables": "{"}, LINEAR, "graphql_request"),
+        ({"query": "query A { viewer { id } }", "operationName": "B"}, LINEAR, "graphql_request"),
+        (
+            {"query": "query A { viewer { id } } query B { viewer { id } }"},
+            LINEAR,
+            "graphql_request",
+        ),
+    ],
+)
+def test_each_graphql_message_slug_is_one_backlot_sends(client, payload, headers, expected):
+    calls = _calls(lambda: client.post("/linear/graphql", headers=headers, json=payload))
+    assert [c.get("backlot.error_code") for c in calls] == [expected], calls
+
+
+def test_every_message_slug_has_a_request_that_sends_it():
+    sent = {
+        row[-1]
+        for t in (
+            test_each_message_slug_is_one_backlot_sends,
+            test_each_graphql_message_slug_is_one_backlot_sends,
+        )
+        for row in t.pytestmark[0].args[1]
+    } | {"rate_limited", "unsupported_filter"}
+    tables = errors._GITHUB + errors._JIRA + errors._CONFLUENCE + errors._GRAPHQL
+    assert {slug for _, slug in tables} <= sent
+
+
 def test_how_a_call_authenticated_is_counted_without_its_credential(client, hello):
     tokens = __import__("yaml").safe_load(hello.tokens_path.read_text(encoding="utf-8"))
     user = tokens["users"][0]["token"]
@@ -499,8 +683,10 @@ def test_how_a_call_authenticated_is_counted_without_its_credential(client, hell
             {"params": {"X-Amz-Credential": "AKIAEXAMPLE/20261019"}},
             ("presigned", "user"),
         ),
+        ("GET", GITHUB, {"params": {"AWSAccessKeyId": "AKIAEXAMPLE"}}, ("presigned", "user")),
         ("GET", GITHUB, {"params": {"hapikey": user}}, ("api_key", "user")),
         ("POST", "/slack/api/auth.test", {"data": {"token": user}}, ("bearer", "user")),
+        ("GET", "/slack/api/auth.test", {"params": {"token": user}}, ("bearer", "user")),
     ]
     for method, path, kwargs, expected in cases:
         (c,) = _calls(lambda: client.request(method, path, **kwargs))
@@ -513,12 +699,54 @@ def test_how_a_call_authenticated_is_counted_without_its_credential(client, hell
 
 
 def test_a_spent_github_window_is_a_rate_limit(hello):
-    with client_for(hello) as c:
+    with (
+        _env(BACKLOT_TELEMETRY="1", DO_NOT_TRACK=None),
+        _ExportTo(UNREACHABLE),
+        client_for(hello) as c,
+    ):
         for _ in range(100):
             if c.get("/github/search/issues?q=x", headers=ADMIN).status_code != 200:
                 break
         (call,) = _calls(lambda: c.get("/github/search/issues?q=x", headers=ADMIN))
-    assert (call["http.response.status_code"], call["backlot.error_class"]) == (403, "rate_limit")
+    assert (
+        call["http.response.status_code"],
+        call["backlot.error_code"],
+        call["backlot.error_class"],
+    ) == (403, "rate_limited", "rate_limit")
+
+
+def test_a_403_with_a_window_left_is_auth(client):
+    """The control for the spent window: a window left, and a `0` on another header."""
+    from fastapi.responses import JSONResponse
+
+    def forbidden():
+        return JSONResponse(
+            {"message": "Forbidden"},
+            status_code=403,
+            headers={"x-ratelimit-remaining": "12", "x-control": "0"},
+        )
+
+    client.app.add_api_route("/github/telemetry-forbidden", forbidden)
+    try:
+        (call,) = _calls(lambda: client.get("/github/telemetry-forbidden", headers=ADMIN))
+    finally:
+        client.app.router.routes.pop()
+    assert (call["http.response.status_code"], call["backlot.error_class"]) == (403, "auth")
+
+
+@pytest.mark.parametrize(
+    "path, counted",
+    [
+        ("/health", 0),
+        ("/_meta/users", 0),
+        ("/openapi.json", 0),
+        ("/docs", 0),
+        # Google Docs is mounted beside FastAPI's own /docs page, and is counted.
+        ("/docs/v1/documents/nosuch", 1),
+    ],
+)
+def test_backlots_own_routes_are_not_counted(client, path, counted):
+    assert len(_calls(lambda: client.get(path, headers=ADMIN))) == counted
 
 
 def test_each_part_of_a_google_batch_is_a_call_of_its_own(client):
@@ -690,8 +918,9 @@ def test_the_exporter_posts_each_interval_and_survives_a_dead_endpoint(collector
     deadline = time.monotonic() + 5
     while len(bodies) < 2 and time.monotonic() < deadline:
         time.sleep(0.05)
-    ticking.stop()
+    # Before stop(), whose own flush would send the same call.
     assert len(bodies) == 2
+    ticking.stop()
 
     for i in range(MAX_SERIES + 10):
         recorder.record({"backlot.operation": f"op{i}"}, 1)

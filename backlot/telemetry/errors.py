@@ -44,12 +44,15 @@ _GITHUB = [
     (r"^No commit found for the ref ", "no_commit_for_ref"),
     (r"^Branch not found$", "branch_not_found"),
     (r"^API rate limit exceeded", "rate_limited"),
-    (r"^Bad Request$", "unsupported_api_version"),
+    (
+        r'^(Bad Request$|The version you specified in the "X-GitHub-Api-Version")',
+        "unsupported_api_version",
+    ),
 ]
 _JIRA = [
     (r"^Issue does not exist or you do not have permission to see it", "issue_not_found"),
-    (r"^No project could be found with key ", "project_not_found"),
-    (r"^The field to order by must be one of", "invalid_order_by"),
+    (r"^No project could be found with (key|id) ", "project_not_found"),
+    (r"^The field to order by (must|should) be one of", "invalid_order_by"),
     (r"^Unbounded JQL queries are not allowed", "unbounded_jql"),
     (r"^The maxResults parameter must be between", "invalid_max_results"),
     (r"^The provided nextPageToken is invalid", "invalid_next_page_token"),
@@ -57,29 +60,40 @@ _JIRA = [
         r"^(Invalid request payload|No content to map|There was an error parsing JSON)",
         "invalid_payload",
     ),
-    (r"^Failed to convert ", "invalid_parameter"),
+    (r"^(Failed to convert |The max number of issues to reconcile is )", "invalid_parameter"),
     (r"^No endpoint ", "no_endpoint"),
-    (r"^Unsupported Media Type", "unsupported_media_type"),
+    (r"^Content-Type '.*' is not supported", "unsupported_media_type"),
+    (r"^Acceptable representations: ", "not_acceptable"),
+    (r"^Method '\w+' is not supported", "method_not_allowed"),
     (
         r"^(Client must be authenticated|Failed to parse Connect Session Auth Token)",
         "unauthenticated",
     ),
 ]
+# Confluence prefixes most messages with the Java exception's class, so these are not anchored.
 _CONFLUENCE = [
     (r"^No content found with id", "content_not_found"),
-    (r"^No space (found )?with key", "space_not_found"),
-    (r"^cql required", "cql_required"),
+    (r"No space (found )?with key", "space_not_found"),
+    (r"cql query parameter is required", "cql_required"),
     (r"^Unauthorized$", "unauthenticated"),
-    (r"^No endpoint ", "no_endpoint"),
-    (r"FORBIDDEN", "forbidden"),
+    (r"^null for uri: ", "no_endpoint"),
+    (r"FORBIDDEN|^Current user not permitted to use Confluence", "forbidden"),
+    (r"Failed to convert value|cannot be less than zero", "invalid_parameter"),
+    (r"Cannot find custom content type", "content_type_not_found"),
 ]
 _GRAPHQL = [
     (r"^Syntax Error", "graphql_parse"),
     (r"^Entity not found", "entity_not_found"),
     (r"^unsupported ", "unsupported_filter"),
-    (r"^(Authentication required|Please provide a valid API key)", "authentication_required"),
+    (r"^Authentication required", "authentication_required"),
     (
-        r"^(Cannot query field|Unknown argument|Unknown type|Field |Variable |Argument |Schema is not configured)",
+        r"^(Must provide |Variables are invalid JSON|POST body sent invalid JSON|Unknown operation named )",
+        "graphql_request",
+    ),
+    (
+        r"^(Cannot query field|Unknown argument|Unknown type|Unknown fragment|Unknown directive|Field "
+        r"|Variable |Argument |Schema is not configured|There can be only one operation|Expected value"
+        r"|String cannot represent)",
         "graphql_validation",
     ),
 ]
@@ -103,7 +117,9 @@ def error_code(source: str, status: int, body: bytes) -> str:
     try:
         doc = json.loads(body)
     except ValueError:
-        return ""
+        # Jira answers a missing credential with the bare sentence as text.
+        text = body[:512].decode("utf-8", "replace").strip()
+        return _slug(text, _JIRA) if source == "jira" and text else ""
     if not isinstance(doc, dict):
         return ""
     if source == "slack":
@@ -139,7 +155,9 @@ def error_code(source: str, status: int, body: bytes) -> str:
     if source == "hubspot":
         return doc["category"] if isinstance(doc.get("category"), str) else ""
     if source == "jira":
-        messages = doc.get("errorMessages") or [doc.get("detail") or doc.get("message")]
+        messages = doc.get("errorMessages") or [
+            doc.get("detail") or doc.get("message") or doc.get("error")
+        ]
         return _slug(messages[0] if messages else None, _JIRA) if any(messages) else ""
     if source == "confluence":
         message = doc.get("message") or doc.get("detail")

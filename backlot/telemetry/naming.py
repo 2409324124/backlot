@@ -182,13 +182,19 @@ class Namer:
         # A catch-all route (`/{rest:path}`) answers what no route serves; a 405 matched the path
         # under another method. Neither is a served operation.
         methods = getattr(route, "methods", None) or set() if route is not None else set()
+        rest = path[len(strip) :] if path.startswith(strip) else path
         if "{rest" not in getattr(route, "path", "{rest") and (
             method in methods or (method == "HEAD" and "GET" in methods)
         ):
+            # A route's `{param}` can take a literal segment of an operation it does not serve
+            # (`issues/{issue_number}` takes `issues/comments`). The vendor's router matches the
+            # literal, so a baseline row with more literals than the route names the call.
+            best = self._best(source, rest, method)
+            if best is not None and best.literals > _literals(route.path, strip):
+                return Named(source, best.id, best.status)
             return self._served(source, strip, method, route)
-        return self._unrouted(
-            source, path[len(strip) :] if path.startswith(strip) else path, method
-        )
+        best = self._best(source, rest, method)
+        return Named(source, best.id, best.status) if best else Named(source, "unmatched", UNKNOWN)
 
     def _served(self, source: str, strip: str, method: str, route: Any) -> Named:
         route_path = (
@@ -204,7 +210,9 @@ class Namer:
                 return Named(source, op_id or route.name, status)
         return Named(source, route.name, EXTRA)
 
-    def _unrouted(self, source: str, rest: str, method: str) -> Named:
+    def _best(self, source: str, rest: str, method: str) -> _Template | None:
+        """The vendor template ``rest`` fits with the most literal segments, the served one first
+        among equals."""
         segments = tuple(canonical(rest).split("/")) if canonical(rest) else ()
         methods = self._templates.get(source, {})
         # Slack names a method by its path and answers it under either verb.
@@ -223,9 +231,7 @@ class Namer:
                     -_PREFERENCE[best.status],
                 ):
                     best = t
-        if best is None:
-            return Named(source, "unmatched", UNKNOWN)
-        return Named(source, best.id, best.status)
+        return best
 
     def _s3_call(
         self, method: str, rest: str, query: Mapping[str, str], headers: Mapping[str, str]
@@ -279,6 +285,13 @@ class Namer:
         states = {fields.get(r, IMPLEMENTED) for r in roots}
         support = IMPLEMENTED if states <= {IMPLEMENTED} else MISSING
         return Named(source, "query." + ",".join(roots), support)
+
+
+def _literals(route_path: str, strip: str) -> int:
+    key = canonical(
+        route_path[len(strip) :] if strip and route_path.startswith(strip) else route_path
+    )
+    return sum(seg != "{}" for seg in key.split("/")) if key else 0
 
 
 def _under(path: str, prefix: str) -> bool:

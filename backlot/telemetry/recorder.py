@@ -265,8 +265,8 @@ class Exporter:
             self._thread.join(timeout)
         remaining = deadline - time.monotonic()
         if remaining > 0.05:
-            # On a thread of its own: httpx resolves the host outside its timeout, and a resolver
-            # held to 6 s made this wait 6.02 s. The thread is left behind at the bound.
+            # On a thread of its own: httpx resolves the host outside its timeout, so a stalled
+            # resolver would hold the caller past the bound. The thread is left behind at it.
             final = threading.Thread(target=self.flush, kwargs={"timeout": remaining}, daemon=True)
             final.start()
             final.join(remaining)
