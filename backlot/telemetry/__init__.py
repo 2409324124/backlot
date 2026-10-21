@@ -28,6 +28,6 @@ def notice(endpoint: str) -> str:
 
 def enabled(settings: Settings) -> bool:
     """Whether this process sends telemetry: on unless ``BACKLOT_TELEMETRY`` is false or
-    ``DO_NOT_TRACK``, the convention many developer tools honour, is set to anything but ``0`` or
-    ``false``."""
+    ``DO_NOT_TRACK``, the convention many developer tools honour, is set to any non-empty value but
+    ``0`` or ``false``."""
     return settings.telemetry and settings.do_not_track.strip().lower() in ("", "0", "false")

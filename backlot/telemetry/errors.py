@@ -70,7 +70,8 @@ _JIRA = [
         "unauthenticated",
     ),
 ]
-# Confluence prefixes most messages with the Java exception's class, so these are not anchored.
+# Confluence prefixes most messages with the Java exception's class, so the rows for those are not
+# anchored.
 _CONFLUENCE = [
     (r"No content found with id", "content_not_found"),
     (r"No space (found )?with key", "space_not_found"),
@@ -117,9 +118,10 @@ def error_code(source: str, status: int, body: bytes) -> str:
     try:
         doc = json.loads(body)
     except ValueError:
-        # Jira answers a missing credential with the bare sentence as text.
+        # Jira answers a missing credential with the bare sentence as text; its HTML pages (the
+        # `(null)` 400, the dead-link 404) carry no message.
         text = body[:512].decode("utf-8", "replace").strip()
-        return _slug(text, _JIRA) if source == "jira" and text else ""
+        return _slug(text, _JIRA) if source == "jira" and text and not text.startswith("<") else ""
     if not isinstance(doc, dict):
         return ""
     if source == "slack":

@@ -281,6 +281,8 @@ def test_a_failure_is_classed_by_its_answer(source, support, status, code, spent
         ),
         ("linear", 200, b'{"errors":[{"message":"Entity not found: Issue"}]}', "entity_not_found"),
         ("linear", 400, b'{"errors":[{"message":"x","extensions":[1]}]}', "unrecognized"),
+        ("jira", 401, b"Client must be authenticated to access this resource.", "unauthenticated"),
+        ("jira", 400, b"<!DOCTYPE html><html><head><title>(null)</title></head></html>", ""),
     ],
 )
 def test_an_error_code_is_the_envelopes_own_identifier(source, status, body, expected):
@@ -564,7 +566,7 @@ OLD_VERSION = {"X-GitHub-Api-Version": "1999-01-01"}
         ("GET", f"{J}/issue/{ISSUE}/comment?maxResults=abc", {}, "invalid_parameter"),
         (
             "GET",
-            f"{J}/search/jql?jql=x&reconcileIssues=" + ",".join(map(str, range(1, 52))),
+            f"{J}/search/jql?jql=x&" + "&".join(f"reconcileIssues={i}" for i in range(1, 52)),
             {},
             "invalid_parameter",
         ),
@@ -637,7 +639,9 @@ def test_each_message_slug_is_one_backlot_sends(client, method, path, kwargs, ex
             "graphql_validation",
         ),
         ({"query": "{ issue(id: 5) { id } }"}, LINEAR, "graphql_validation"),
+        ({"query": "{ issue(id: null) { id } }"}, LINEAR, "graphql_validation"),
         ({}, LINEAR, "graphql_request"),
+        ([], LINEAR, "graphql_request"),
         ({"query": "{ viewer { id } }", "variables": "{"}, LINEAR, "graphql_request"),
         ({"query": "query A { viewer { id } }", "operationName": "B"}, LINEAR, "graphql_request"),
         (
