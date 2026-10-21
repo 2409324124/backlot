@@ -1298,6 +1298,9 @@ def paged_slack(tmp_path_factory):
         yield c, {"Authorization": f"Bearer {s.admin_token}"}
 
 
+_NEGATIVE_PAST_A_FLOAT = ("-1e400", "-" + "9" * 4301)
+
+
 @pytest.mark.parametrize(
     "method, limit, want",
     [
@@ -1305,16 +1308,19 @@ def paged_slack(tmp_path_factory):
             (m, v, _EVERY)
             for m in ("conversations.list", "conversations.members")
             for v in ("-1", "-1.5", "-5", "-9223372036854775809", "-1e19", "1e19", "9.3e18")
+            + _NEGATIVE_PAST_A_FLOAT
         ),
         *(
             ("conversations.history", v, 1)
             for v in ("-1", "-1.5", "-2", "-9223372036854775808", "-1e19", "1e19", "9.3e18")
+            + _NEGATIVE_PAST_A_FLOAT
         ),
         *(("users.list", v, 0) for v in ("-1", "-1.5")),
         *(
             ("users.list", v, _FATAL)
             for v in ("-2", "-5", "-9223372036854775808", "-9223372036854775809", "-1e19")
             + ("9223372036854775808", "9.3e18", "1e19")
+            + _NEGATIVE_PAST_A_FLOAT
         ),
         *(
             (m, v, _EVERY)
