@@ -968,13 +968,14 @@ async def api_test(request: Request):
     arguments it was sent, as `args`. Several real clients call it at construction/connect time
     (e.g. llama-index's `SlackReader.__init__`), so Backlot must answer it rather than 404.
 
-    A credential sent is read as on every other method (``_caller_or_error``), and one that does
-    not resolve is refused ahead of an `error` argument; with none, the request is served. The
-    query's arguments come first in `args`, then the body's, the body's value kept where both send
-    a name, and the token read is `token`: in the place of the body's `token` field, an empty one
-    included, and last when it came in the bearer header alone. A non-empty `error` answers
-    `ok: false` with that error, `null` for a body's that is not UTF-8, and `args` beside it.
-    Measured against slack.com/api on 2026-10-13 and 2026-10-20."""
+    A credential sent is read as on every other method (``_caller_or_error``) and refused ahead of
+    an `error` argument when it does not resolve, and so is a `token` query parameter
+    ``auth.slack_query_token_refused`` refuses, one that resolves included; with none, the request
+    is served. The query's arguments come first in `args`, then the body's, and the token read is
+    `token`: in the place of the body's `token` field, an empty one included, and last when it came
+    in the bearer header alone. A non-empty `error` answers `ok: false` with that error, `null` for
+    a body's that is not UTF-8, and `args` beside it. Measured against slack.com/api on 2026-10-13
+    and 2026-10-20."""
     if auth.slack_query_token_refused(request) or auth.slack_token(request) is not None:
         _, refusal = _caller_or_error(request)
         if refusal is not None:
