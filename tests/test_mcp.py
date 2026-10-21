@@ -54,9 +54,10 @@ from tests._helpers import POSIX_SIGNALS, python_child_env, readline_within  # n
 
 
 def _docker_runs_linux_containers() -> bool:
-    """Whether a Docker daemon answers here and runs Linux containers, the only kind
-    ``ghcr.io/sooperset/mcp-atlassian`` publishes an image for. Docker on ``windows-latest`` answers
-    too, but runs Windows containers, so the pull finds no image for it and the server never starts.
+    """Whether a Docker daemon answers here and runs Linux containers. The index of
+    ``ghcr.io/sooperset/mcp-atlassian:latest`` lists ``linux/amd64`` and ``linux/arm64`` images only
+    (fetched 2026-10-20), and Docker on ``windows-latest`` answers but runs Windows containers, so
+    the pull there finds no image and the server never starts.
     """
     if not shutil.which("docker"):
         return False
@@ -172,7 +173,7 @@ async def _call(params, tool_pred, args, ok_pred) -> bool:
         pytest.param("docker", subprocess.TimeoutExpired("docker", 10), False, id="timeout"),
     ],
 )
-def test_the_atlassian_server_runs_only_where_docker_runs_linux_containers(
+def test_the_atlassian_test_runs_only_where_docker_runs_linux_containers(
     monkeypatch, docker, info, runs
 ):
     calls = []
