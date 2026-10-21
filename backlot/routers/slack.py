@@ -1910,19 +1910,20 @@ _SLACK_NUMBER = re.compile(r"-?(?:[0-9]+(?:[.][0-9]+)?|[.][0-9]+)(?:[eE]-?[0-9]+
 
 def _slack_number(key: str, raw: str) -> int | None:
     """The value of one numeric argument by the rule on `_SLACK_INTEGER`, or None where real
-    refuses it. A `limit` is its integer part (`1.5` is 1, `3.99999` is 3, `-1.5` is -1), and one
-    too large for a float (`1e400`) is zero, which `_limit` serves as no `limit`, as real served
-    every item. An integer part at or past 2**63 wraps around 2**64, so `9223372036854775808` and
-    `1e19` are negative and `1e300` is zero, and one below -2**63 stays negative: the reading that
-    every row of the measurement on `_limit` agrees with."""
+    refuses it. A `limit` is its integer part (`1.5` is 1, `3.99999` is 3, `-1.5` is -1). One too
+    large for a float is zero when it is positive (`1e400`), which `_limit` serves as no `limit`, as
+    real served every item, and -2**63 when it is negative, which each method serves as it serves
+    `-2`. An integer part at or past 2**63 wraps around 2**64, so `9223372036854775808`
+    and `1e19` are negative and `1e300` is zero, and one below -2**63 stays negative: the reading
+    that every row of the measurement on `_limit` agrees with."""
     if key == "limit":
         if not _SLACK_NUMBER.fullmatch(raw):
             return None
         if _SLACK_INTEGER.fullmatch(raw) and (n := _within_64_bits(raw)) is not None:
             return n
         x = float(raw)
-        if not math.isfinite(x):
-            return 0
+        if math.isinf(x):
+            return 0 if x > 0 else -(2**63)
         n = int(x)
         return (n + 2**63) % 2**64 - 2**63 if n >= 2**63 else n
     if not _SLACK_INTEGER.fullmatch(raw):
@@ -1935,7 +1936,9 @@ def _within_64_bits(raw: str) -> int | None:
     Its digits, its zeros in front dropped, are counted before `int` sees them, which raises past
     4300 of them; real refuses a `count` of 4301 nines as one past 2**63 and serves such a `limit`
     as one too large for a float, on each of the seven methods that read one, by `GET`, and on
-    `conversations.list` and `search.messages` by a form `POST` (slack.com/api, 2026-10-20)."""
+    `conversations.list` and `search.messages` by a form `POST` (slack.com/api, 2026-10-20). Those
+    nines after a `-` are a `limit` served as a negative one too large for a float, on the four
+    methods `_limit` names (2026-10-21)."""
     digits = raw.lstrip("-").lstrip("0") or "0"
     if len(digits) > 19:
         return None
@@ -1985,8 +1988,8 @@ def _limit(request: Request) -> tuple[int, JSONResponse | None]:
     answers, every item and an empty `next_cursor`, on collections of 8 to 21.
 
     A negative `limit` is returned as it is, for each method to serve as real does (measured
-    2026-10-12, one workspace of 21 members and 8 public channels, `-1` to `-1e19`):
-    `conversations.list` and `conversations.members` serve every item, as for no `limit`;
+    2026-10-12, one workspace of 21 members and 8 public channels, `-1` to `-1e19`, and 2026-10-21,
+    `-1e400`): `conversations.list` and `conversations.members` serve every item, as for no `limit`;
     `conversations.history` serves one message; `users.list` serves no members and a cursor for
     `-1`, and answers `fatal_error` for anything lower. On `users.list`, measured 2026-10-16 on the
     same workspace, the cursor `-1` serves goes on from the second member, as the one `limit=1`
