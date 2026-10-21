@@ -68,6 +68,22 @@ def _one_part(name: str, value: str) -> bytes:
 _ONE_PART = _one_part("x", "y")
 
 
+def _send(client, path: str, method: str, query: str, authorization, form, t: dict):
+    """``method`` to ``/slack/api/<path>`` with ``query``, an `Authorization` header and a body,
+    each formatted with ``t``: a ``form`` that is a (name, value) pair is a multipart body's one
+    part, and a string an urlencoded body."""
+    headers = {} if authorization is None else {"Authorization": authorization.format(**t)}
+    body = {}
+    if isinstance(form, tuple):
+        headers["Content-Type"] = _MULTIPART
+        body["content"] = _one_part(form[0], form[1].format(**t))
+    elif form is not None:
+        headers["Content-Type"] = _FORM
+        body["content"] = form.format(**t)
+    url = f"/slack/api/{path}?{query.format(**t)}" if query else f"/slack/api/{path}"
+    return getattr(client, method)(url, headers=headers, **body)
+
+
 def test_admin_slack_crawls_all(client, admin_h, ro_conn):
     assert crawl_slack(client, admin_h) == db_count(ro_conn, "slack")
 
@@ -138,19 +154,9 @@ def test_slack_api_test_reads_a_credential_and_echoes_it(
 ):
     """`api.test` answers each row as slack.com/api answered it (``slack.api_test`` dates the
     measurement): ``want`` is what a served request echoes, a refused one's error, or a pair of
-    the two for an error answer. ``_TOKEN`` stands for the admin token the row sent, and a
-    ``form`` that is a (name, value) pair is a multipart body's one part."""
+    the two for an error answer. ``_TOKEN`` stands for the admin token the row sent."""
     t = {"admin": tokens_yaml["admin_token"], "bogus": "xoxb-not-a-real-token"}
-    headers = {} if authorization is None else {"Authorization": authorization.format(**t)}
-    body = {}
-    if isinstance(form, tuple):
-        headers["Content-Type"] = _MULTIPART
-        body["content"] = _one_part(form[0], form[1].format(**t))
-    elif form is not None:
-        headers["Content-Type"] = _FORM
-        body["content"] = form.format(**t)
-    url = f"/slack/api/api.test?{query.format(**t)}" if query else "/slack/api/api.test"
-    r = getattr(client, method)(url, headers=headers, **body)
+    r = _send(client, "api.test", method, query, authorization, form, t)
 
     def echo(args):
         return {k: t["admin"] if v == _TOKEN else v for k, v in args.items()}
@@ -367,24 +373,13 @@ def test_slack_reads_the_token_where_real_reads_it(
     `auth.slack_token` and `auth.slack_query_token_refused` record, and `slack.read_post_body` for
     the name and the value of a form field, urlencoded or multipart: ``answer`` is the `user_id` a
     served request names, or the error a refused one answers. The rows with a person's token in
-    one place and the admin's in the other tell the form field's order from the header's. A
-    ``form`` that is a (name, value) pair is sent as the one part of a multipart body."""
+    one place and the admin's in the other tell the form field's order from the header's."""
     t = {
         "admin": tokens_yaml["admin_token"],
         "ava": tokens["ava@acme.com"],
         "bogus": "xoxb-not-a-real-token",
     }
-    headers = {} if authorization is None else {"Authorization": authorization.format(**t)}
-    body = {}
-    if isinstance(form, tuple):
-        name, value = form
-        headers["Content-Type"] = _MULTIPART
-        body["content"] = _one_part(name, value.format(**t))
-    elif form is not None:
-        headers["Content-Type"] = "application/x-www-form-urlencoded"
-        body["content"] = form.format(**t)
-    url = f"/slack/api/auth.test?{query.format(**t)}"
-    j = getattr(client, method)(url, headers=headers, **body).json()
+    j = _send(client, "auth.test", method, query, authorization, form, t).json()
     if answer in ("invalid_auth", "not_authed"):
         assert j == {"ok": False, "error": answer}
     else:
@@ -1383,6 +1378,9 @@ def paged_slack(tmp_path_factory):
         yield c, {"Authorization": f"Bearer {s.admin_token}"}
 
 
+_NEGATIVE_PAST_A_FLOAT = ("-1e400", "-" + "9" * 4301)
+
+
 @pytest.mark.parametrize(
     "method, limit, want",
     [
@@ -1390,16 +1388,19 @@ def paged_slack(tmp_path_factory):
             (m, v, _EVERY)
             for m in ("conversations.list", "conversations.members")
             for v in ("-1", "-1.5", "-5", "-9223372036854775809", "-1e19", "1e19", "9.3e18")
+            + _NEGATIVE_PAST_A_FLOAT
         ),
         *(
             ("conversations.history", v, 1)
             for v in ("-1", "-1.5", "-2", "-9223372036854775808", "-1e19", "1e19", "9.3e18")
+            + _NEGATIVE_PAST_A_FLOAT
         ),
         *(("users.list", v, 0) for v in ("-1", "-1.5")),
         *(
             ("users.list", v, _FATAL)
             for v in ("-2", "-5", "-9223372036854775808", "-9223372036854775809", "-1e19")
             + ("9223372036854775808", "9.3e18", "1e19")
+            + _NEGATIVE_PAST_A_FLOAT
         ),
         *(
             (m, v, _EVERY)

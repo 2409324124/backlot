@@ -594,16 +594,29 @@ framework's 405 carries a `request_id` in the body and `x-notion-request-id` on 
 value; real's differs per response and this one is derived from the request, so a corpus served
 twice answers the same id.
 
+A request is read as the real API reads it before anything is looked up. A JSON body is read first,
+ahead of the credential and the version, as Express reads one: a body that does not parse is
+`invalid_json`, a charset or a `Content-Encoding` it cannot read is its 415 and a body past 512000
+bytes its 413, and a body sent as anything but `application/json` is not read at all. The query
+string is parsed as Node's `qs` parses one, so a repeated key is `Conflicting values` and a
+bracketed one an object, each value is read as Notion's validator reads it (`01` is 1, `0x10` is 16,
+`TRUE` is `true`), and a member a route does not take is refused by name, on a `GET`'s body as on
+its query string; `pages/{id}` and `comments` serve an unknown query parameter, as on real. A
+refusal quotes a value back as JSON cut after 55 UTF-16 units. A list starts at the item a
+`start_cursor` names and hands back the next item's id as its cursor (a data source query's is
+`s:<session>:<row>`), and a `page_size` of 0, past 100 or below 0 is the whole page, the empty page
+or a refusal, route by route as real answers it.
+
 | Endpoint | Notes |
 |---|---|
-| `POST search` | |
+| `POST search` | `filter` narrows to an object type and to the trash, which is empty here; `sort` is refused where real refuses it and otherwise not applied |
 | `pages/{id}` | |
 | `blocks/{id}` | |
 | `blocks/{id}/children` | |
 | `databases/{id}` | Version-aware: `data_sources` from `2025-09-03`, inline `properties` before it |
 | `POST databases/{id}/query` | Versions before `2025-09-03` only |
 | `data_sources/{id}` | `2025-09-03` and later only |
-| `POST data_sources/{id}/query` | `2025-09-03` and later only |
+| `POST data_sources/{id}/query` | `2025-09-03` and later only. `filter` and `sorts` are refused where real refuses them, a property the data source does not have included, and are not applied; `filter_properties` narrows each row |
 | `users[/{id}]` | |
 | `users/me` | |
 | `comments` | |
@@ -744,15 +757,17 @@ than a `not_found` for something the caller never named.
 A POST's body is read before the method runs, ahead of its credential and its arguments, as the real
 Web API reads it. A body with no Content-Type is `missing_post_type`, one under a media type other
 than `application/json`, `text/plain`, `application/x-www-form-urlencoded` and
-`multipart/form-data`, spelt so, is `invalid_post_type` unless it reads as a form, which a
-Content-Type starting with the form type in any case does, or as multipart, which one whose media
-type is a prefix of `multipart/form-data` in any case does (`multipart/form; boundary=b` and
-`; boundary=b` are read, `multipart/form-datax; boundary=b` is not); a charset other than `utf-8`,
-`utf8` or `iso-8859-1` outside a form or multipart type is `invalid_charset`, and a form or
-multipart body real cannot read is `invalid_form_data`, `invalid_arg_name` or `invalid_array_arg`. A
-multipart body is read as HHVM reads one, which is how real reads it: a part's name follows a
-urlencoded form's name rules, its value is taken as sent, `+` and `%XX` included, and its `token` is
-read as a form's is; an argument the body sends is read ahead of the same name in the query string.
+`multipart/form-data`, spelt so, is `invalid_post_type` unless it carries an argument read as a form
+(a Content-Type starting with the form type in any case is read as one) or as multipart (a media
+type that is a prefix of `multipart/form-data` in any case, with a boundary:
+`multipart/form; boundary=b` and `; boundary=b` are read, `multipart/form-datax; boundary=b` is
+not); a charset other than `utf-8`, `utf8` or `iso-8859-1` outside a form or multipart type is
+`invalid_charset`, and a form or multipart body real cannot read is `invalid_form_data`,
+`invalid_arg_name` or `invalid_array_arg`. A multipart body is read as HHVM reads one, which real's
+answers match: a part's name follows a urlencoded form's name rules but for the spaces, tabs and
+line breaks after a `[`, which are dropped (`a[ b` is `a_b`, where a form's is `invalid_arg_name`),
+its value is taken as sent, `+` and `%XX` included, and its `token` is read as a form's is; an
+argument the body sends is read ahead of the same name in the query string.
 
 A `GET`, `POST`, `PUT`, `PATCH` or `DELETE` to a path under `/slack/api` that is none of the methods
 above is answered as real answers it, but for the requests the next paragraph names. A method

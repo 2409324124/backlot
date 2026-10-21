@@ -338,11 +338,11 @@ def slack_query_token_refused(request: Request) -> bool:
     2021; Backlot answers as such an app. The user token of an app created on 2026-09-17 drew
     these answers from slack.com/api on 2026-10-11 and 2026-10-13, on each method
     ``routers.slack`` authenticates. The parameter's last value is the one read. A non-empty
-    value is refused whatever else the request carries, valid or bogus, but a ``token`` form
-    field, and a space or a tab is not empty. An empty one, or ``?token`` with no ``=``, is
-    refused beside a token :func:`slack_token` reads, and changes nothing otherwise: alone it is
-    ``not_authed``, and so it is beside a header :func:`slack_bearer_token` does not read
-    (``bearer <t>``, ``Basic <c>``). A ``token`` form field, an empty one included, takes the
+    value is refused whatever else the request carries, valid or bogus, unless a ``token`` form
+    field takes its place (below); a space or a tab is not empty. An empty one, or ``?token`` with
+    no ``=``, is refused beside a token :func:`slack_token` reads, and changes nothing otherwise:
+    alone it is ``not_authed``, and so it is beside a header :func:`slack_bearer_token` does not
+    read (``bearer <t>``, ``Basic <c>``). A ``token`` form field, an empty one included, takes the
     parameter's place, which is then refused as an empty one is: real answered ``?token=<valid>``
     beside an empty field, urlencoded or a multipart part, with ``not_authed``, and beside it and a
     valid bearer header with ``invalid_auth``, on 2026-10-20. ``?TOKEN=<t>`` is not this parameter.
