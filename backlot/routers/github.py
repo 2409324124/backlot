@@ -466,6 +466,11 @@ async def refuse_an_unserved_operation(request: Request) -> None:
     401 "You must be logged in to do that.". Pinned to `1999-01-01`, `GET /user/packages`,
     `DELETE /user/keys/1`, `POST /user/gpg_keys` and `GET /gists/starred` were the version's 400,
     counted. Here it is :func:`_require`'s 401 after the version, carrying both.
+
+    A `Basic` value holding a token in one of real's shapes (``backlot.auth._GITHUB_TOKEN_SHAPE``)
+    that resolves to no one is "Bad credentials" with neither the echo nor the five, ahead of the
+    version: on 2026-10-25 the base64 of `x:ghp_<36 A>`, with and without `1999-01-01`, was that 401
+    on ten operations, `DELETE /installation/token` and `PATCH /repos/{owner}/{repo}` among them.
     """
     if not is_an_unserved_operation(request.method, request.scope["path"]):
         return
