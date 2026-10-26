@@ -886,8 +886,9 @@ def rate_limit_caller(request: Request) -> tuple[str, bool]:
     Either bearer scheme followed by a tab rather than a space (``auth.github_scheme_then_a_tab``)
     is counted in that same window, though it is answered as Bad credentials: an unknown scheme and
     then a bad bearer after a tab, on `/repos/psf/requests`, read `used` 4 and 5, while the
-    address's anonymous window stayed at 8 (2026-10-14). Any other credential that does not resolve
-    is keyed with the address here but never counted — see :func:`refused_without_a_window`. Callers
+    address's anonymous window stayed at 8 (2026-10-14). So is a `Basic` token
+    ``auth.github_basic_token_counted`` holds for: six such 401s in a row read `used` 3 through 8
+    there (2026-10-25). Any other credential that does not resolve is keyed with the address here but never counted — see :func:`refused_without_a_window`. Callers
     that draw real's line themselves check `request.headers` for the presence of `Authorization`
     directly instead of asking `auth.github_credential`, which is `None` for a header real serves as
     anonymous — see `refuse_a_trailing_slash_on_github`."""
@@ -896,7 +897,9 @@ def rate_limit_caller(request: Request) -> tuple[str, bool]:
         return f"token:{token}", True
     host = request.client.host if request.client is not None else "anonymous"
     if "authorization" in request.headers and (
-        token is None or auth.github_scheme_then_a_tab(request)
+        token is None
+        or auth.github_scheme_then_a_tab(request)
+        or auth.github_basic_token_counted(request)
     ):
         return f"unparseable:{host}", False
     return f"host:{host}", False
@@ -936,9 +939,14 @@ def refused_without_a_window(request: Request) -> bool:
     `used: 0`, `resource: core` and a `reset` an hour after `Date`, while the same two after a space
     answered the same 401 with none of the five. Once that window was spent, the two after a tab on
     a public repository, and the first on `/user/repos`, were its 403, as an unknown scheme was,
-    where the bearer after a space was still the 401.
+    where the bearer after a space was still the 401. So does a `Basic` token
+    ``auth.github_basic_token_counted`` holds for, on every route (2026-10-25).
     """
-    return refused_a_credential(request) and not auth.github_scheme_then_a_tab(request)
+    return (
+        refused_a_credential(request)
+        and not auth.github_scheme_then_a_tab(request)
+        and not auth.github_basic_token_counted(request)
+    )
 
 
 def rate_limit_headers(request: Request, status_code: int, *, count: bool = True) -> dict[str, str]:

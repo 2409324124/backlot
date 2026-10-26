@@ -58,6 +58,12 @@ _GITHUB_BASE64 = re.compile(r"(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z
 # importers give each user, which stands for a real token here though real serves it as no
 # credential.
 _GITHUB_TOKEN_SHAPE = re.compile(r"gh[pous]_[A-Za-z0-9]{36}|usr-[0-9a-f]{20}")
+# Two more shapes real refuses out of a `Basic` value, but counted, in the window a `Basic` value
+# naming no token is counted in: 40 lower-case hexadecimal digits, and one of the four prefixes of
+# `_GITHUB_TOKEN_SHAPE` in any other case, then 36 ASCII letters or digits (2026-10-25).
+_GITHUB_COUNTED_TOKEN_SHAPE = re.compile(
+    r"[0-9a-f]{40}|(?!gh[pous]_)[gG][hH][pPoOuUsS]_[A-Za-z0-9]{36}"
+)
 
 
 def github_credential(request: Request) -> str | None:
@@ -102,6 +108,14 @@ def github_credential(request: Request) -> str | None:
     ``x:ghp_<37 A>``, ``x:ghp_<35 A>_``, ``x:github_pat_<82 A>`` and ``ghp_<36 A>:x`` was the 200
     (2026-10-24 and 2026-10-25).
 
+    Two more shapes are the 401 out of a `Basic` value, but counted, with the five of the window a
+    `Basic` value naming no token is counted in (:data:`_GITHUB_COUNTED_TOKEN_SHAPE`): the base64 of
+    ``x:<40 a>``, ``x:<40 0>``, ``x:<40 f>``, ``<40 a>``, ``<40 a>:`` and ``<40 a>:x-oauth-basic``,
+    and of ``x:GHP_<36 A>``, ``x:Ghp_<36 A>``, ``x:gHp_<36 A>``, ``x:ghP_<36 A>``, ``x:GHO_<36 A>``
+    and ``x:GHP_<36 a>``. ``x:<40 g>``, ``x:<40 A>``, ``x:<40 F>``, forty of ``aB``, ``x:<39 a>``,
+    ``x:<41 a>``, ``x:GHA_<36 A>``, ``x:GHP_<35 A>``, ``x:GHP_<37 A>`` and ``<40 a>:x`` were the 200
+    (2026-10-25).
+
     So real splits the scheme off at the first space, tab or comma, reads the password of a `Basic`
     value that decodes, or its user when there is no colon or the password is empty or
     `x-oauth-basic`, and serves one whose token does not resolve as no credential at all, as it does
@@ -133,10 +147,29 @@ def github_credential(request: Request) -> str | None:
             return None if github_scheme_then_a_tab(request) else ""
         user, _, password = base64.b64decode(value).decode("utf-8", "replace").partition(":")
         token = user if password in ("", "x-oauth-basic") else password
-        if acl(request).resolve(token) is not None or _GITHUB_TOKEN_SHAPE.fullmatch(token):
+        if (
+            acl(request).resolve(token) is not None
+            or _GITHUB_TOKEN_SHAPE.fullmatch(token)
+            or _GITHUB_COUNTED_TOKEN_SHAPE.fullmatch(token)
+        ):
             return token
         return None
     return None
+
+
+def github_basic_token_counted(request: Request) -> bool:
+    """Whether the request's `Authorization` is `Basic` naming a token of
+    :data:`_GITHUB_COUNTED_TOKEN_SHAPE` that resolves to no one: the "Bad credentials" 401 real
+    counts in the window a `Basic` value naming no token is counted in, carrying its five
+    `x-ratelimit-*`. A `Bearer` with the same token is the 401 with none of the five."""
+    if repeated_authorization(request) or github_scheme(request)[0] != "basic":
+        return False
+    token = github_credential(request)
+    return (
+        bool(token)
+        and _GITHUB_COUNTED_TOKEN_SHAPE.fullmatch(token) is not None
+        and acl(request).resolve(token) is None
+    )
 
 
 def github_scheme(request: Request) -> tuple[str, str]:

@@ -2623,6 +2623,11 @@ def test_github_a_wrong_method_is_not_dressed_as_a_measured_answer(gh_client, gh
 
 
 _TOKEN_SHAPED = {"Authorization": "Basic " + base64.b64encode(b"x:ghp_" + b"A" * 36).decode()}
+#: The two shapes real refuses out of a `Basic` value in a counted window.
+_COUNTED_TOKEN_SHAPED = [
+    {"Authorization": "Basic " + base64.b64encode(b"x:" + b"a" * 40).decode()},
+    {"Authorization": "Basic " + base64.b64encode(b"x:GHP_" + b"A" * 36).decode()},
+]
 
 
 #: (method, path, whether it is refused, the status a caller it does not refuse gets). The first
@@ -2775,6 +2780,12 @@ _NO_CREDENTIAL_ROWS = [
             (_TOKEN_SHAPED, (401, "Bad credentials", None, False)),
             ({**_TOKEN_SHAPED, **_V1999}, (401, "Bad credentials", None, False)),
         ]
+    ),
+    *(
+        (route, headers, (401, "Bad credentials", None, True))
+        for route in _NO_CREDENTIAL_ROUTES
+        for shaped in _COUNTED_TOKEN_SHAPED
+        for headers in (shaped, {**shaped, **_V1999})
     ),
     *(
         (route, headers, answer)
@@ -6945,3 +6956,40 @@ def test_github_a_trailing_slash_is_404_not_a_redirect(gh_client, gh_admin_h, gh
             headers={"Authorization": "Basic Zm9vOmJhcg=="},
         ).headers
     )
+
+
+@pytest.mark.parametrize("headers", _COUNTED_TOKEN_SHAPED)
+@pytest.mark.parametrize(
+    "path", ["rate_limit", "user/repos", "repos/{org}/gateway", "zen", "repos/{org}/gateway/teams"]
+)
+def test_github_a_counted_basic_token_shape_is_bad_credentials_in_the_basic_window(
+    gh_client, gh_org, headers, path
+):
+    """A `Basic` value naming forty lower-case hexadecimal digits, or `GHP_` and 36 letters, is
+    real's "Bad credentials" on each route, with the five `x-ratelimit-*` at `limit: 60`, no
+    version echo, pinned or not, and counted in the window a `Basic` value naming no token is
+    counted in, not the address's: the measurement on `backlot.auth.github_credential`."""
+    c, _ = gh_client
+    url = f"/github/{path.format(org=gh_org)}"
+    for extra in ({}, _V1999):
+        r = c.get(url, headers={**headers, **extra})
+        assert (r.status_code, r.json()["message"]) == (401, "Bad credentials"), extra
+        assert r.headers.get("x-github-api-version-selected") is None
+        assert r.headers["x-ratelimit-limit"] == "60"
+    if path == "rate_limit":
+        return
+    shared = {"Authorization": "Basic eDp5"}
+    before = int(c.get(url, headers=shared).headers["x-ratelimit-used"])
+    c.get(url, headers=headers)
+    after = int(c.get(url, headers=shared).headers["x-ratelimit-used"])
+    assert after == before + 2
+    assert c.get("/github/rate_limit").json()["resources"]["core"]["used"] == 0
+
+
+def test_github_a_counted_basic_token_shape_as_a_bearer_has_no_window(gh_client):
+    """The same forty digits after `Bearer` are the 401 with none of the five, as any bearer that
+    does not resolve is (see `backlot.auth.github_basic_token_counted`)."""
+    c, _ = gh_client
+    r = c.get("/github/rate_limit", headers={"Authorization": "Bearer " + "a" * 40})
+    assert (r.status_code, r.json()["message"]) == (401, "Bad credentials")
+    assert "x-ratelimit-limit" not in r.headers

@@ -175,7 +175,10 @@ not base64, are credentials that do not resolve, though that `Basic` value is no
 header a tab sets apart; a `Basic` value whose base64 holds, as its password or as its user beside
 an empty password or `x-oauth-basic`, a token that resolves or one shaped like real's (`ghp_`,
 `gho_`, `ghu_` or `ghs_` and 36 ASCII letters or digits) or like Backlot's (`usr-` and 20
-hexadecimal digits) is that token; and one that holds anything else is no credential at all.
+hexadecimal digits) is that token; so is one of 40 lower-case hexadecimal digits, or one of those
+four prefixes in another case and 36 ASCII letters or digits, whose "Bad credentials" carries the
+five and is counted in the window a `Basic` value naming no token is counted in; and one that
+holds anything else is no credential at all.
 
 **Every response carries the five `x-ratelimit-*` headers** real puts on every answer its API gives,
 the errors included: `limit` at real's numbers (60 an hour for a caller with no credential, 5000 for
