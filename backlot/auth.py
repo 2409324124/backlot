@@ -110,11 +110,15 @@ def github_credential(request: Request) -> str | None:
 
     Two more shapes are the 401 out of a `Basic` value, but counted, with the five of the window a
     `Basic` value naming no token is counted in (:data:`_GITHUB_COUNTED_TOKEN_SHAPE`): the base64 of
-    ``x:<40 a>``, ``x:<40 0>``, ``x:<40 f>``, ``<40 a>``, ``<40 a>:`` and ``<40 a>:x-oauth-basic``,
-    and of ``x:GHP_<36 A>``, ``x:Ghp_<36 A>``, ``x:gHp_<36 A>``, ``x:ghP_<36 A>``, ``x:GHO_<36 A>``
-    and ``x:GHP_<36 a>``. ``x:<40 g>``, ``x:<40 A>``, ``x:<40 F>``, forty of ``aB``, ``x:<39 a>``,
-    ``x:<41 a>``, ``x:GHA_<36 A>``, ``x:GHP_<35 A>``, ``x:GHP_<37 A>`` and ``<40 a>:x`` were the 200
-    (2026-10-25).
+    ``x:<40 a>``, ``x:<40 0>``, ``x:<40 f>``, ``x:0123456789abcdef0123456789abcdef01234567``,
+    ``<40 a>``, ``<40 a>:`` and ``<40 a>:x-oauth-basic``, and of ``x:GHP_<36 A>``, ``x:Ghp_<36 A>``,
+    ``x:gHp_<36 A>``, ``x:ghP_<36 A>``, ``x:GHO_<36 A>``, ``x:GHS_<36 A>``, ``x:GHU_<36 A>`` and
+    ``x:GHP_<36 a>``. ``x:<40 g>``, ``x:<40 A>``, ``x:<40 F>``, ``x:<40 ->``, ``x:<40 _>``, forty of
+    ``aB``, ``x:<39 a>``, ``x:<41 a>``, ``x:GHA_<36 A>``, ``x:GHR_<36 A>``, ``x:GHP_<35 A>``,
+    ``x:GHP_<37 A>``, ``x:GHP_<35 A>_`` and ``<40 a>:x`` were the 200, and so were
+    ``x:gh<U+017F>_<36 A>`` and ``x:GH<U+017F>_<36 A>``, a long s for the `s`, and
+    ``x:GHP_<35 A><U+212A>`` and ``x:<39 a><U+212A>``, each ending in the Kelvin sign (2026-10-25
+    and 2026-10-26).
 
     So real splits the scheme off at the first space, tab or comma, reads the password of a `Basic`
     value that decodes, or its user when there is no colon or the password is empty or
