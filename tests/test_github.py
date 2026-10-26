@@ -6638,6 +6638,18 @@ def test_github_every_response_carries_the_five_ratelimit_headers_and_rate_limit
         basic_tab = c.get("/github/user/repos", headers={"Authorization": "Basic\t!!!!"})
         assert basic_tab.json()["message"] == "Requires authentication"
         assert int(_ratelimit(basic_tab)["used"]) == int(_ratelimit(tab)["used"]) + 1
+        # and so is a `Basic` value naming forty lower-case hex digits, or `GHP_` and 36 letters,
+        # though it is refused as Bad credentials (see `backlot.auth.github_credential`)
+        used = int(_ratelimit(basic_tab)["used"])
+        for value in ("x:" + "a" * 40, "x:GHP_" + "A" * 36):
+            shaped = c.get(
+                "/github/user/repos",
+                headers={"Authorization": "Basic " + base64.b64encode(value.encode()).decode()},
+            )
+            assert shaped.json()["message"] == "Bad credentials"
+            assert _ratelimit(shaped)["limit"] == "60"
+            assert int(_ratelimit(shaped)["used"]) == used + 1
+            used += 1
         assert int(_ratelimit(c.get("/github/user/repos"))["used"]) == address + 1
 
         # a minute on, the two search windows are new ones where `core`'s is the one it was
@@ -6993,3 +7005,41 @@ def test_github_a_counted_basic_token_shape_as_a_bearer_has_no_window(gh_client)
     r = c.get("/github/rate_limit", headers={"Authorization": "Bearer " + "a" * 40})
     assert (r.status_code, r.json()["message"]) == (401, "Bad credentials")
     assert "x-ratelimit-limit" not in r.headers
+
+
+@pytest.mark.parametrize("headers", _COUNTED_TOKEN_SHAPED)
+@pytest.mark.parametrize(
+    "method, path, pinned, resource, limit, counted",
+    [
+        ("PATCH", "repos/{org}/gateway", False, "core", "60", True),
+        ("PUT", "teams/1/repos/{org}/gateway", False, "core", "60", True),
+        ("DELETE", "user/keys/1", False, "core", "60", True),
+        ("POST", "repos/{org}/gateway/forks", False, "core", "60", True),
+        ("GET", "orgs/{org}/teams", False, "core", "60", True),
+        ("GET", "repos/{org}/gateway/collaborators", False, "core", "60", True),
+        ("GET", "repos/{org}/gateway/branches/main/protection", False, "core", "60", True),
+        ("GET", "search/issues?q=x", False, "search", "10", True),
+        ("GET", "search/issues?q=x", True, "search", "10", True),
+        ("DELETE", "installation/token", False, "core", "60", False),
+    ],
+)
+def test_github_a_counted_basic_token_shape_past_the_issue_table(
+    gh_client, gh_org, headers, method, path, pinned, resource, limit, counted
+):
+    """Past the routes the issue measured, the two shapes are real's 401 "Bad credentials" with the
+    five and no version echo, counted in the `Basic` window, but `DELETE /installation/token`,
+    which is not counted (see `backlot.routers.github.refused_without_a_window`)."""
+    c, _ = gh_client
+    url = f"/github/{path.format(org=gh_org)}"
+    extra = {"X-GitHub-Api-Version": "1999-01-01"} if pinned else {}
+    first = c.request(method, url, headers={**headers, **extra})
+    second = c.request(method, url, headers={**headers, **extra})
+    for r in (first, second):
+        assert (r.status_code, r.json()["message"]) == (401, "Bad credentials")
+        assert r.headers.get("x-github-api-version-selected") is None
+        assert (r.headers["x-ratelimit-limit"], r.headers["x-ratelimit-resource"]) == (
+            limit,
+            resource,
+        )
+    step = int(second.headers["x-ratelimit-used"]) - int(first.headers["x-ratelimit-used"])
+    assert step == (1 if counted else 0)

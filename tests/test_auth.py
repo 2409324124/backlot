@@ -305,6 +305,11 @@ _A36 = "A" * 36
         (f"Basic b64(x:GHP_{'A' * 35})", None),
         (f"Basic b64(x:GHP_{'A' * 37})", None),
         (f"Basic b64(x:GHP_{'A' * 35}_)", None),
+        # the shapes are ASCII: no long s (U+017F) for `s`, no Kelvin sign (U+212A) for a letter
+        (f"Basic b64(x:gh\u017f_{_A36})", None),
+        (f"Basic b64(x:GH\u017f_{_A36})", None),
+        (f"Basic b64(x:GHP_{'A' * 35}\u212a)", None),
+        (f"Basic b64(x:{'a' * 39}\u212a)", None),
         # no base64 after a tab, and no comma anywhere
         ("Basic\t!!!!", None),
         ("Basic\ta", None),

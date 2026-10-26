@@ -940,7 +940,10 @@ def refused_without_a_window(request: Request) -> bool:
     answered the same 401 with none of the five. Once that window was spent, the two after a tab on
     a public repository, and the first on `/user/repos`, were its 403, as an unknown scheme was,
     where the bearer after a space was still the 401. So does a `Basic` token
-    ``auth.github_basic_token_counted`` holds for, on every route (2026-10-25).
+    ``auth.github_basic_token_counted`` holds for, on every route (2026-10-25): past the issue's
+    table, `PATCH`, `PUT`, `DELETE` and `POST` on unserved operations, an organization's teams, a
+    repository's collaborators, a branch's protection and `/search/issues` pinned or not were each
+    counted, and `DELETE /installation/token` was the 401 with the five but not counted (2026-10-26).
     """
     return (
         refused_a_credential(request)
