@@ -120,11 +120,11 @@ def github_credential(request: Request) -> str | None:
     value that decodes, or its user when there is no colon or the password is empty or
     `x-oauth-basic`, and serves one whose token does not resolve as no credential at all, as it does
     an unknown scheme, unless that token is shaped like one of real's (:data:`_GITHUB_TOKEN_SHAPE`,
-    which takes Backlot's too). A `Basic` value that does not decode is no credential either where
-    :func:`github_scheme_then_a_tab` holds. A space and a tab are the only whitespace it trims:
-    ``Bearer <NBSP>``, ``Bearer <t><NBSP>``, ``Bearer <NBSP><t>``, ``Bearer <t><NEL>``,
-    ``Bearer <t><0x1F>``, ``Basic <NBSP>`` and base64, and the base64 of ``x:<t>`` followed by a
-    no-break space were each the 401 (2026-10-16).
+    which takes Backlot's too, or :data:`_GITHUB_COUNTED_TOKEN_SHAPE`). A `Basic` value that does
+    not decode is no credential either where :func:`github_scheme_then_a_tab` holds. A space and a
+    tab are the only whitespace it trims: ``Bearer <NBSP>``, ``Bearer <t><NBSP>``,
+    ``Bearer <NBSP><t>``, ``Bearer <t><NEL>``, ``Bearer <t><0x1F>``, ``Basic <NBSP>`` and base64,
+    and the base64 of ``x:<t>`` followed by a no-break space were each the 401 (2026-10-16).
 
     More than one `Authorization` header is the 401 whatever each holds, with none of the five
     `x-ratelimit-*`: on `/rate_limit` and `/search/issues`, ``Bearer <t>`` with a second copy, and

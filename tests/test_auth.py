@@ -266,6 +266,8 @@ _A36 = "A" * 36
         (f"Basic b64(x:gHp_{_A36})", f"gHp_{_A36}"),
         (f"Basic b64(x:ghP_{_A36})", f"ghP_{_A36}"),
         (f"Basic b64(x:GHO_{_A36})", f"GHO_{_A36}"),
+        (f"Basic b64(x:GHS_{_A36})", f"GHS_{_A36}"),
+        (f"Basic b64(x:GHU_{_A36})", f"GHU_{_A36}"),
         (f"Basic b64(x:GHP_{'a' * 36})", f"GHP_{'a' * 36}"),
         # served as no credential at all
         ("Basic abcd", None),

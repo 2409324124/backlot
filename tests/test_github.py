@@ -6808,6 +6808,15 @@ def test_github_rate_limit_refuses_an_anonymous_caller_too_and_the_switch_turns_
             assert digest.status_code == 401
         tab_spent = c.get("/github/user/repos", headers={"Authorization": "Bearer\tnope"})
         assert (tab_spent.status_code, tab_spent.json()) == (403, refused.json())
+        # a `Basic` value of the two counted shapes is counted in that window too, but stays its own
+        # 401 once it is spent where a space follows `Basic`, and is the refusal after a tab
+        for value in (b"x:" + b"a" * 40, b"x:GHP_" + b"A" * 36):
+            encoded = base64.b64encode(value).decode()
+            shaped = c.get("/github/user/repos", headers={"Authorization": "Basic " + encoded})
+            assert (shaped.status_code, shaped.json()["message"]) == (401, "Bad credentials")
+            assert _ratelimit(shaped) == _ratelimit(tab_spent)
+            tabbed = c.get("/github/user/repos", headers={"Authorization": "Basic\t" + encoded})
+            assert (tabbed.status_code, tabbed.json()) == (403, refused.json())
 
         # `Bearer nope` is its own 401 on both spent windows, not the refusal
         bad_bearer = c.get("/github/user/repos", headers={"Authorization": "Bearer nope"})
@@ -6974,13 +6983,12 @@ def test_github_a_trailing_slash_is_404_not_a_redirect(gh_client, gh_admin_h, gh
 @pytest.mark.parametrize(
     "path", ["rate_limit", "user/repos", "repos/{org}/gateway", "zen", "repos/{org}/gateway/teams"]
 )
-def test_github_a_counted_basic_token_shape_is_bad_credentials_in_the_basic_window(
+def test_github_a_counted_basic_token_shape_is_bad_credentials_on_each_route(
     gh_client, gh_org, headers, path
 ):
     """A `Basic` value naming forty lower-case hexadecimal digits, or `GHP_` and 36 letters, is
-    real's "Bad credentials" on each route, with the five `x-ratelimit-*` at `limit: 60`, no
-    version echo, pinned or not, and counted in the window a `Basic` value naming no token is
-    counted in, not the address's: the measurement on `backlot.auth.github_credential`."""
+    real's "Bad credentials" on each route, with the five `x-ratelimit-*` at `limit: 60` and no
+    version echo, pinned or not: the measurement on `backlot.auth.github_credential`."""
     c, _ = gh_client
     url = f"/github/{path.format(org=gh_org)}"
     for extra in ({}, _V1999):
@@ -6988,14 +6996,6 @@ def test_github_a_counted_basic_token_shape_is_bad_credentials_in_the_basic_wind
         assert (r.status_code, r.json()["message"]) == (401, "Bad credentials"), extra
         assert r.headers.get("x-github-api-version-selected") is None
         assert r.headers["x-ratelimit-limit"] == "60"
-    if path == "rate_limit":
-        return
-    shared = {"Authorization": "Basic eDp5"}
-    before = int(c.get(url, headers=shared).headers["x-ratelimit-used"])
-    c.get(url, headers=headers)
-    after = int(c.get(url, headers=shared).headers["x-ratelimit-used"])
-    assert after == before + 2
-    assert c.get("/github/rate_limit").json()["resources"]["core"]["used"] == 0
 
 
 def test_github_a_counted_basic_token_shape_as_a_bearer_has_no_window(gh_client):
@@ -7023,12 +7023,12 @@ def test_github_a_counted_basic_token_shape_as_a_bearer_has_no_window(gh_client)
         ("DELETE", "installation/token", False, "core", "60", False),
     ],
 )
-def test_github_a_counted_basic_token_shape_past_the_issue_table(
+def test_github_a_counted_basic_token_shape_carries_each_rows_window(
     gh_client, gh_org, headers, method, path, pinned, resource, limit, counted
 ):
-    """Past the routes the issue measured, the two shapes are real's 401 "Bad credentials" with the
-    five and no version echo, counted in the `Basic` window, but `DELETE /installation/token`,
-    which is not counted (see `backlot.routers.github.refused_without_a_window`)."""
+    """The two shapes are real's 401 "Bad credentials" with the five and no version echo on each
+    row, and counted on each but `DELETE /installation/token` (see
+    `backlot.routers.github.refused_without_a_window`)."""
     c, _ = gh_client
     url = f"/github/{path.format(org=gh_org)}"
     extra = {"X-GitHub-Api-Version": "1999-01-01"} if pinned else {}
