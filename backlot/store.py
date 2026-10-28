@@ -258,7 +258,13 @@ PATCHABLE = {
 # overlay holds parts for in a table reads that table's from the overlay alone (`parts_for`): a
 # spreadsheet's sheets are written together, so a read never mixes a written sheet with a corpus
 # one, whatever the write did to which sheets there are.
-SATELLITES = {"google_drive": {"gdrive_sheets": ("file_id",), "gdrive_spreadsheets": ("file_id",)}}
+SATELLITES = {
+    "google_drive": {
+        "gdrive_sheets": ("file_id",),
+        "gdrive_spreadsheets": ("file_id",),
+        "gdrive_doc_bodies": ("file_id",),
+    }
+}
 
 
 def id_columns(source_type: str) -> tuple[str, ...]:
@@ -322,7 +328,7 @@ ID_SEED = {
     # synth.gdrive_file_id's docstring for the digest-bytes reasoning and idx_gdrive_id's
     # schema comment for the collision argument and the folder-id disjointness.
     "google_drive": (synth.gdrive_file_id, None),
-    # A transcript's own 24-hex id. A BYO record may still provide one (its `transcript_id`), which
+    # A transcript's own ULID. A BYO record may still provide one (its `transcript_id`), which
     # wins the way a provided github number does; the seed fills every row that gives none.
     "fireflies": (synth.fireflies_id, None),
 }
@@ -491,6 +497,11 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_gdrive_sheets_id ON gdrive_sheets(file_id,
 -- every spreadsheet a corpus states; a workbook created through the API states its own.
 CREATE TABLE IF NOT EXISTS gdrive_spreadsheets (
     file_id TEXT PRIMARY KEY, properties TEXT NOT NULL
+);
+
+-- A document's stored body (`backlot.gdocs`).
+CREATE TABLE IF NOT EXISTS gdrive_doc_bodies (
+    file_id TEXT PRIMARY KEY, body TEXT NOT NULL
 );
 
 -- `path` names the file THIS row is (only kind='file' rows have one). `changed_paths` is the other
@@ -962,9 +973,9 @@ CREATE TABLE IF NOT EXISTS principals (
 CREATE TABLE IF NOT EXISTS fireflies_users (
     email TEXT PRIMARY KEY REFERENCES principals(id), served_id TEXT NOT NULL
 );
--- `synth.fireflies_user_id` is 24 hex characters (96 bits) -- like gmail/notion's own served ids,
--- the raw seed is stored as-is and a collision (vanishingly unlikely at any real scale) fails the
--- import loudly through this index rather than resolving silently.
+-- `synth.fireflies_user_id` is a ULID, 80 of whose bits vary -- the raw seed is stored as-is and a
+-- collision (vanishingly unlikely at any real scale) fails the import loudly through this index
+-- rather than resolving silently.
 CREATE UNIQUE INDEX IF NOT EXISTS idx_fireflies_user_served ON fireflies_users(served_id);
 
 CREATE TABLE IF NOT EXISTS group_members (
@@ -2789,6 +2800,24 @@ def gdrive_replace_sheets(conn, file_id: str, rows) -> None:
         "VALUES (?, ?, ?, ?, ?)",
         [(file_id, *r) for r in rows],
     )
+
+
+def gdrive_doc_body_for(conn, file_id: str) -> list | None:
+    """A document's stored body (`backlot.gdocs`), or None when it states no structure. No ACL
+    clause, for the reason :func:`gdrive_sheets_for` gives."""
+    rows = parts_for(conn, "google_drive", "gdrive_doc_bodies", (file_id,), order_by="file_id")
+    return json.loads(rows[0]["body"]) if rows else None
+
+
+def gdrive_replace_doc_body(conn, file_id: str, body: list | None) -> None:
+    """Set a file's stored body to ``body``, or to none, so a re-import that stops stating
+    paragraphs stops serving them."""
+    conn.execute("DELETE FROM gdrive_doc_bodies WHERE file_id = ?", [file_id])
+    if body is not None:
+        conn.execute(
+            "INSERT INTO gdrive_doc_bodies (file_id, body) VALUES (?, ?)",
+            [file_id, json.dumps(body, ensure_ascii=False)],
+        )
 
 
 # A Gmail thread is listed once, under its root. ``thread_id`` holds the ROOT'S OWN served id (see

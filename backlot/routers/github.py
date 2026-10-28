@@ -547,14 +547,23 @@ _PUBLISHED_NOT_SERVED = published.operations(
     for op in published.missing_operations("github")
     if op not in _NOT_ROUTED
 )
+#: The two operations api.github.com routes though its description does not publish them,
+#: matched one segment at a time: `GET /agents/automations/{available-tools,available-triggers,1}`
+#: and `…/1/tasks` were 401 "Requires authentication" with no credential, 401 "Bad credentials"
+#: for `Bearer nope` and 404 with a token, where `…/1/nosuch` and `…/x/y/z` were 404 for every
+#: credential (maintainer's measurement, 2026-10-28).
+_ROUTED_UNPUBLISHED = published.operations(
+    ("GET /agents/automations/{}", "GET /agents/automations/{}/tasks")
+)
 
 
 async def refuse_an_unserved_operation(request: Request) -> None:
-    """Refuse a request whose method and path are an operation of :data:`_PUBLISHED_NOT_SERVED` as
-    real refuses it before running it: no `Authorization` header, or one that carries no
-    credential (:func:`_a_header_without_a_credential`), then a credential that does not resolve,
-    then a version real does not have, then a `Basic` value that names no token. A request none of
-    those refuse goes on to the router's own 404 or 405, an operation Backlot cannot run.
+    """Refuse a request whose method and path are an operation of :data:`_PUBLISHED_NOT_SERVED` or
+    :data:`_ROUTED_UNPUBLISHED` as real refuses it before running it: no `Authorization` header, or
+    one that carries no credential (:func:`_a_header_without_a_credential`), then a credential that
+    does not resolve, then a version real does not have, then a `Basic` value that names no token.
+    A request none of those refuse goes on to the router's own 404 or 405, an operation Backlot
+    cannot run.
 
     Measured against api.github.com on 2026-10-14, one cache-busted request each. With
     `Bearer nope`, every operation the baseline lists answered "Bad credentials", but the
@@ -628,7 +637,7 @@ async def refuse_an_unserved_operation(request: Request) -> None:
 
 
 #: The served routes real refuses a caller with no credential on ahead of everything else, as it
-#: refuses an operation of :data:`_PUBLISHED_NOT_SERVED` (see :func:`_refuse_an_anonymous_caller`).
+#: refuses an unserved operation (see :func:`_refuse_an_anonymous_caller`).
 _REFUSE_AN_ANONYMOUS_CALLER_FIRST = frozenset(
     {
         "/github/orgs/{org}/teams",
@@ -686,16 +695,15 @@ async def _refuse_an_anonymous_caller(request: Request) -> None:
         raise HTTPException(status_code=404, detail="Not Found")
 
 
-#: The methods whose 401 for no credential at all, on an operation of :data:`_PUBLISHED_NOT_SERVED`,
-#: carries none of the five `x-ratelimit-*` (see :func:`refuse_an_unserved_operation`).
+#: The methods whose 401 for no credential at all, on an unserved operation, carries none of the
+#: five `x-ratelimit-*` (see :func:`refuse_an_unserved_operation`).
 _UNCOUNTED_METHODS = frozenset({"PATCH", "PUT", "DELETE"})
 
 
 def _a_header_without_a_credential(request: Request) -> bool:
     """Whether the request carries an `Authorization` header that real reads no credential from on
-    an operation of :data:`_PUBLISHED_NOT_SERVED`: one ``auth.github_scheme_then_a_tab`` holds for,
-    whatever it names, or one ``auth.github_credential`` reads as no credential, but a `Basic`
-    value."""
+    an unserved operation: one ``auth.github_scheme_then_a_tab`` holds for, whatever it names, or
+    one ``auth.github_credential`` reads as no credential, but a `Basic` value."""
     if "authorization" not in request.headers:
         return False
     if auth.github_scheme_then_a_tab(request):
@@ -705,11 +713,14 @@ def _a_header_without_a_credential(request: Request) -> bool:
 
 
 def is_an_unserved_operation(method: str, path: str) -> bool:
-    """Whether ``method`` on the `/github` ``path`` is in :data:`_PUBLISHED_NOT_SERVED`. The path is
-    the scope's, decoded but whole, not ``request.url.path`` (``backlot.main._REPARSED``), which
-    would take `/zen%23` for `/zen`, where real answered `GET /zen%23` and `POST …/forks%23` with
-    the 404 on 2026-10-14."""
-    return published.includes(_PUBLISHED_NOT_SERVED, method, path.removeprefix("/github"))
+    """Whether ``method`` on the `/github` ``path`` is in :data:`_PUBLISHED_NOT_SERVED` or
+    :data:`_ROUTED_UNPUBLISHED`. The path is the scope's, decoded but whole, not
+    ``request.url.path`` (``backlot.main._REPARSED``), which would take `/zen%23` for `/zen`, where
+    real answered `GET /zen%23` and `POST …/forks%23` with the 404 on 2026-10-14."""
+    path = path.removeprefix("/github")
+    return published.includes(_PUBLISHED_NOT_SERVED, method, path) or published.includes(
+        _ROUTED_UNPUBLISHED, method, path
+    )
 
 
 def refused_an_unserved_operation(request: Request) -> bool:
@@ -1193,9 +1204,8 @@ def _accept_types(request: Request) -> list[str]:
     types: list[str] = []
     zero_diffs: set[int] = set()
     has_patch = False
-    for member in request.headers.get("accept", "").split(","):
-        media_type, _, params = member.partition(";")
-        media_type = media_type.strip()
+    for member in _accept_members(request):
+        media_type, params = member[1], member[3] or ""
         m = _GITHUB_MEDIA.fullmatch(media_type)
         if m is not None:
             if m[2] == "diff" and _zero_q(params):
@@ -1263,18 +1273,22 @@ def _accept_q(params: str) -> str | None:
 
 
 def _q_weight(params: str, unread: float | None = None) -> float:
-    """The weight a member's parameters give it: 1 with no `q`, else its `q` (:func:`_accept_q`)
-    read as a finite number, else ``unread``, or with no ``unread`` the number the value starts
-    with, or 0 where it starts with none."""
+    """The weight a member's parameters give it: 1 with no `q`; else with ``unread``, as on
+    contents, whatever ``float()`` reads of its `q` (:func:`_accept_q`), `inf` and `nan` too, and
+    ``unread`` where it reads nothing; else its `q` read as a finite number, the number the value
+    starts with, or 0 where it starts with none. Measured on 2026-10-27: on contents `q=inf` came
+    ahead of a member at 1 and `q=nan` stayed between the members on either side of it
+    (:func:`_ordered_accept`), and on the pull and the readme `q=nan` ranked at zero."""
     value = _accept_q(params)
     if value is None:
         return 1.0
     try:
         weight = float(value)
     except ValueError:
-        weight = math.nan
-    if math.isfinite(weight):
-        return weight
+        pass
+    else:
+        if unread is not None or math.isfinite(weight):
+            return weight
     if unread is not None:
         return unread
     lead = _Q_LEAD.match(value)
@@ -1282,15 +1296,44 @@ def _q_weight(params: str, unread: float | None = None) -> float:
 
 
 def _ordered_accept(request: Request, unread: float | None = None) -> list[tuple[str, float]]:
-    """Members in the order `_representation_content_type` measures."""
+    """Members in the order `_representation_content_type` measures, each spelt as it echoes them:
+    with ``unread`` as contents does, without it as the pull and the readme do
+    (:data:`_ACCEPT_MEMBER`)."""
     members = []
-    for member in request.headers.get("accept", "").split(","):
-        media_type, _, params = member.partition(";")
-        media_type = media_type.strip()
-        if media_type:
-            members.append((media_type, _q_weight(params, unread)))
-    members.sort(key=lambda m: (-m[1], m[0].count("*")))
+    for m in _accept_members(request):
+        if unread is None:
+            echoed = m[1] + m[2].replace(" ", "")
+        else:
+            echoed = m[1] + m[2] if m[3] is not None else m[1]
+        members.append((echoed, _q_weight(m[3] or "", unread)))
+    # A NaN does not cross another member; the runs on either side still sort. All six
+    # permutations of nan, 0 and 0.5 on contents kept that boundary on 2026-10-27.
+    start = 0
+    for end in [i for i, (_, weight) in enumerate(members) if math.isnan(weight)] + [len(members)]:
+        members[start:end] = sorted(members[start:end], key=lambda m: (-m[1], m[0].count("*")))
+        start = end + 1
     return members
+
+
+# One `Accept` member as api.github.com read it on 2026-10-27 on `pulls/7619` of `psf/requests` and
+# its `README.md` through `readme` and `contents`: white space before it, its type (the visible
+# ASCII up to the first other character or `;`), spaces and tabs, and parameters only where a `;`
+# comes next. Anything else after the type ends the member, parameters and all: `diff x;q=0` was
+# the diff and `*/*\xa0;q=0.1` a `*/*` at full weight. Of those spaces and tabs the pull and the
+# readme echoed the tabs (`diff \t,` as `diff\t`, `diff\t\xa0\t,` as `diff\t`), and contents
+# echoed them all where a `;` came next and none where it did not (`raw \t;q=0.5` as `raw \t`,
+# `raw\t,` as `raw`).
+_ACCEPT_MEMBER = re.compile(r"([!-:<-~]*)([ \t]*)(?:;(.*))?", re.S)
+
+
+def _accept_members(request: Request) -> list[re.Match]:
+    """``Accept``'s members (:data:`_ACCEPT_MEMBER`), each header sent trimmed of spaces and tabs at
+    both ends and the headers joined with commas in the order sent: real answered `Accept` sent
+    twice as that one header, and echoed `application/json, application/vnd.github.diff` and a tab
+    without the tab."""
+    joined = ",".join(value.strip(" \t") for value in request.headers.getlist("accept"))
+    members = (_ACCEPT_MEMBER.match(member.lstrip()) for member in joined.split(","))
+    return [m for m in members if m[1]]
 
 
 def _wildcard_leads(request: Request, unread: float | None = None) -> bool:
@@ -1307,7 +1350,7 @@ def _wildcard_leads(request: Request, unread: float | None = None) -> bool:
     (``unread`` 1) and not on the pull, the readme or the blob. Code search serves `text-match`
     beside a heavier `*/*` too, and does not ask."""
     members = _ordered_accept(request, unread)
-    return bool(members) and members[0][0] == "*/*"
+    return bool(members) and members[0][0].strip() == "*/*"
 
 
 def _representation_content_type(request: Request, unread: float | None = None) -> str:
@@ -1335,8 +1378,8 @@ def _representation_content_type(request: Request, unread: float | None = None) 
     `q=+0.9`, `q=inf` and `q=-0.9` it ranked as `q=0` does on the pull
     (`application/json;q=abc, text/plain;q=0, …` kept that order), and under those, `q= 0.9` and
     `q=nan` below a raw at `q=0.5` on the readme; on contents all of those seven but `q=nan` ranked
-    above the raw (``unread`` 1). Not modelled: `q=nan` on contents, and `*/ *`, which the pull
-    echoed as `*/`."""
+    above the raw, `q=inf` as infinity and the rest at ``unread`` 1 (:func:`_q_weight`). A member's
+    spaces and tabs echo as :data:`_ACCEPT_MEMBER` says."""
     members = _ordered_accept(request, unread)
     return ",".join(media_type for media_type, _ in members) + "; charset=utf-8"
 

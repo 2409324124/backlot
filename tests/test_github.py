@@ -2649,11 +2649,13 @@ _COUNTED_TOKEN_SHAPED = [
 #: (method, path, whether it is refused, the status a caller it does not refuse gets). The first
 #: nine are in `backlot.routers.github._PUBLISHED_NOT_SERVED`, the eighth as the `/orgs/{}` path
 #: `/organizations/{id}` is rewritten to and the ninth on a path whose slash-terminated spelling a
-#: route matches; the next two are baseline rows that `_ROUTED_AS` and `_NOT_ROUTED` keep out of it;
-#: the two after them are no operation, though a parsed URL ends the first at its decoded `#` and a
-#: `missing_param` row of the baseline spells the second's path; the next is a method GitHub does
-#: not publish on a path whose `PATCH` it does, which real answered a bad bearer with its 404; and
-#: the last is no GitHub request at all.
+#: route matches; the next five are in it too, but the last two, in `_ROUTED_UNPUBLISHED`; the next
+#: two are baseline rows that `_ROUTED_AS` and `_NOT_ROUTED` keep out of it; the two after them are
+#: no operation, though a parsed URL ends the first at its decoded `#` and a `missing_param` row of
+#: the baseline spells the second's path; the next is a method GitHub does not publish on a path
+#: whose `PATCH` it does, which real answered a bad bearer with its 404; the two after it are paths
+#: under `/agents/automations/{}` that real answered 404 for every credential; and the last is no
+#: GitHub request at all.
 _UNSERVED_ROWS = [
     ("PATCH", "/github/repos/{org}/codebase", True, 405),
     ("DELETE", "/github/repos/{org}/codebase", True, 405),
@@ -2664,11 +2666,23 @@ _UNSERVED_ROWS = [
     ("GET", "/github/repos/{org}/codebase/actions/artifacts/1/zip", True, 404),
     ("GET", "/github/organizations/1/settings/billing/usage", True, 404),
     ("POST", "/github/repos/{org}/codebase/git/trees", True, 404),
+    ("POST", "/github/repos/{org}/codebase/issues/1/artifacts", True, 404),
+    ("PUT", "/github/agents/repos/{org}/codebase/pulls/1/agent-merge", True, 404),
+    (
+        "POST",
+        "/github/repos/{org}/codebase/security-advisories/GHSA-gc5v-m9x4-r6x2/comments",
+        True,
+        404,
+    ),
+    ("GET", "/github/agents/automations/available-tools", True, 404),
+    ("GET", "/github/agents/automations/1/tasks", True, 404),
     ("GET", "/github/repos/{org}/codebase/actions/artifacts/1/tar", False, 404),
     ("POST", "/github/repos/{org}/codebase/releases/1/assets", False, 404),
     ("GET", "/github/zen%23", False, 404),
     ("GET", "/github/repos/{org}/codebase/issues%3Fsince", False, 404),
     ("PUT", "/github/orgs/{org}", False, 405),
+    ("GET", "/github/agents/automations/1/nosuch", False, 404),
+    ("GET", "/github/agents/automations/x/y/z", False, 404),
     ("GET", "/zen", False, 404),
 ]
 
@@ -2684,7 +2698,10 @@ def test_github_an_unserved_operation_is_refused_for_its_credential_first(
     value that names no token, each carrying the version echo. A row not refused is the
     router's answer for any caller. Real was measured on each row but the last with a bad bearer, an
     unknown scheme and a bearer after a tab, on each refused row with each header below, and with no
-    header on the first six.
+    header on the first six. On the five refused rows after `git/trees`, two of those headers have
+    no answer of real's: a bearer after a tab that resolves was not sent on the three writes, and
+    `Basic Zm9vOmJhcg==` on the three under `/agents` was answered 403 "API rate limit exceeded"
+    with no `x-ratelimit-*`.
     """
     c, _ = gh_client
     url = path.format(org=gh_org)
@@ -4560,6 +4577,7 @@ def test_github_unsupported_api_version_is_refused_ahead_of_a_missing_credential
         ],
         ("pulls/1", "application/vnd.github.diff, application/json", False, False),
         ("pulls/1", "application/json, application/vnd.github.diff", False, False),
+        ("pulls/1", ("application/json", "application/vnd.github.diff"), False, False),
         ("pulls/1", "application/vnd.github.v3.diff+json", False, False),
         ("pulls/1", "application/vnd.github.DIFF", True, False),
         ("pulls/1", "Application/vnd.github.diff", False, False),
@@ -4592,14 +4610,14 @@ def test_github_unsupported_api_version_is_refused_ahead_of_a_missing_credential
 def test_github_version_error_depends_on_endpoint_and_representation(
     gh_client, gh_admin_h, gh_org, path, accept, backend, backend_on_head
 ):
-    """Which of the two 400s an unsupported version draws, by route, Accept and GET or HEAD
-    (``backlot.routers.github._validate_api_version``)."""
+    """Which of the two 400s an unsupported version draws, by route, Accept (a tuple is sent as
+    that many headers) and GET or HEAD (``backlot.routers.github._validate_api_version``)."""
     c, _ = gh_client
     url = f"/github/repos/{gh_org}/gateway/{path}"
+    accepts = [accept] if isinstance(accept, str) else list(accept or ())
     for pinned in ("1999-01-01", "garbage", "2022-11-29"):
-        headers = {**gh_admin_h, "X-GitHub-Api-Version": pinned}
-        if accept is not None:
-            headers["Accept"] = accept
+        headers = [*gh_admin_h.items(), ("X-GitHub-Api-Version", pinned)]
+        headers += [("Accept", value) for value in accepts]
         head = c.head(url, headers=headers)
         assert head.status_code == 400 and head.content == b""
         assert (head.headers.get("X-GitHub-Api-Version-Selected") == "") is backend_on_head
@@ -4639,8 +4657,8 @@ def test_github_backend_version_error_order(gh_client, path):
 
 
 def _sent_raw(client, path: str, headers: dict[str, bytes]):
-    """A GET on ``path`` with each header's bytes as they are, which
-    ``tests.test_atlassian._sent_as`` says why the TestClient does not."""
+    """A GET on ``path`` with each header's bytes as they are, which ``tests._helpers.sent_as``
+    says why the TestClient does not."""
     import asyncio
 
     import httpx
@@ -5071,6 +5089,9 @@ def test_github_pull_accept_diff_returns_a_unified_diff(diff_pr, gh_admin_h, gh_
 # What api.github.com served a pull for each `Accept` at 2022-11-28 (see `_accept_types` and
 # `_wildcard_leads`).
 _PULL_SERVED_AS = {
+    "*/*\t;q=0.9, application/vnd.github.diff;q=0.5": "json",
+    "*/*\xa0;q=0.1, application/vnd.github.diff;q=0.5": "json",
+    "application/vnd.github.diff x;q=0, application/json": "diff",
     "application/vnd.github.DIFF": "json",
     "APPLICATION/VND.GITHUB.DIFF": "json",
     "Application/vnd.github.diff": "diff",
@@ -5175,6 +5196,83 @@ def test_github_pull_is_served_as_the_representation_accept_names(diff_pr):
 
 
 _PULL_CONTENT_TYPE = [
+    (
+        "application/json;q=nan, text/plain;q=0, application/vnd.github.diff;q=0.5",
+        "application/vnd.github.diff,application/json,text/plain",
+    ),
+    (
+        "text/plain;q=0, application/json;q=nan, application/vnd.github.diff;q=0.5",
+        "application/vnd.github.diff,text/plain,application/json",
+    ),
+    ("*/ *, application/vnd.github.diff", "application/vnd.github.diff,*/"),
+    (
+        "application/vnd.github.diff\t, application/json",
+        "application/vnd.github.diff\t,application/json",
+    ),
+    (
+        "application/json\t, application/vnd.github.diff",
+        "application/json\t,application/vnd.github.diff",
+    ),
+    (
+        "application/vnd.github.diff\t;q=0.5, application/json",
+        "application/json,application/vnd.github.diff\t",
+    ),
+    (
+        "application/vnd.github.diff \t, application/json",
+        "application/vnd.github.diff\t,application/json",
+    ),
+    (
+        "application/vnd.github.diff\t , application/json",
+        "application/vnd.github.diff\t,application/json",
+    ),
+    (
+        "\tapplication/vnd.github.diff, application/json",
+        "application/vnd.github.diff,application/json",
+    ),
+    (
+        "application/vnd.github.diff , application/json",
+        "application/vnd.github.diff,application/json",
+    ),
+    (
+        "application/vnd.github.diff\xa0, application/json",
+        "application/vnd.github.diff,application/json",
+    ),
+    (
+        "application/vnd.github.diff\xa0\t, application/json",
+        "application/vnd.github.diff,application/json",
+    ),
+    (
+        "application/vnd.github.diff\t\xa0\t, application/json",
+        "application/vnd.github.diff\t,application/json",
+    ),
+    (
+        "application/vnd.github.diff\t \t, application/json",
+        "application/vnd.github.diff\t\t,application/json",
+    ),
+    (
+        "application/vnd.github.diff\tx, application/json",
+        "application/vnd.github.diff\t,application/json",
+    ),
+    (
+        "application/vnd.github.diff\xa0;q=0.5, application/json",
+        "application/vnd.github.diff,application/json",
+    ),
+    (
+        "application/json, application/vnd.github.diff\t",
+        "application/json,application/vnd.github.diff",
+    ),
+    (
+        "application/json, application/vnd.github.diff\t\xa0",
+        "application/json,application/vnd.github.diff\t",
+    ),
+    (
+        "\xa0application/vnd.github.diff, application/json",
+        "application/vnd.github.diff,application/json",
+    ),
+    (
+        "application/vnd.github.diff;q=0.9, application/json;q=0.5e1",
+        "application/json,application/vnd.github.diff",
+    ),
     ("application/vnd.github.v3.diff", "application/vnd.github.v3.diff"),
     ("Application/vnd.github.diff", "Application/vnd.github.diff"),
     ("application/vnd.github.diff;foo=bar", "application/vnd.github.diff"),
@@ -5331,6 +5429,84 @@ def test_github_pull_representation_content_type_echoes_accept(diff_pr):
     "suffix, accept, expected",
     [
         (
+            "readme",
+            "application/json;q=nan, text/plain;q=0, application/vnd.github.raw;q=0.5",
+            "application/vnd.github.raw,application/json,text/plain",
+        ),
+        (
+            "readme",
+            "text/plain;q=0, application/json;q=nan, application/vnd.github.raw;q=0.5",
+            "application/vnd.github.raw,text/plain,application/json",
+        ),
+        *[
+            (
+                "contents/README.md",
+                f"application/vnd.github.raw;q=0.5, application/json;q={nan}",
+                "application/vnd.github.raw,application/json",
+            )
+            for nan in ("nan", "NaN", "NAN", '"nan"')
+        ],
+        (
+            "contents/README.md",
+            "application/json;q=nan, application/vnd.github.raw;q=0.5, text/plain;q=0",
+            "application/json,application/vnd.github.raw,text/plain",
+        ),
+        (
+            "contents/README.md",
+            "text/plain;q=0, application/json;q=nan, application/vnd.github.raw;q=0.5",
+            "text/plain,application/json,application/vnd.github.raw",
+        ),
+        (
+            "contents/README.md",
+            "text/plain;q=0, application/vnd.github.raw;q=0.5, application/json;q=nan",
+            "application/vnd.github.raw,text/plain,application/json",
+        ),
+        (
+            "contents/README.md",
+            "application/vnd.github.raw;q=0.5, application/json;q=nan, text/plain;q=0",
+            "application/vnd.github.raw,application/json,text/plain",
+        ),
+        (
+            "contents/README.md",
+            "application/vnd.github.raw;q=0.5, text/plain;q=0, application/json;q=nan",
+            "application/vnd.github.raw,text/plain,application/json",
+        ),
+        (
+            "contents/README.md",
+            "application/json;q=nan, application/vnd.github.raw;q=0",
+            "application/json,application/vnd.github.raw",
+        ),
+        (
+            "contents/README.md",
+            "application/vnd.github.raw;q=0, application/json;q=nan",
+            "application/vnd.github.raw,application/json",
+        ),
+        (
+            "contents/README.md",
+            "application/json;q=nan, text/plain;q=0, application/vnd.github.raw;q=0.5",
+            "application/json,application/vnd.github.raw,text/plain",
+        ),
+        (
+            "contents/README.md",
+            "application/vnd.github.raw\t, application/json",
+            "application/vnd.github.raw,application/json",
+        ),
+        (
+            "contents/README.md",
+            "application/vnd.github.raw \t;q=0.5, application/json",
+            "application/json,application/vnd.github.raw \t",
+        ),
+        (
+            "readme",
+            "application/vnd.github.raw \t;q=0.5, application/json",
+            "application/json,application/vnd.github.raw\t",
+        ),
+        (
+            "contents/README.md",
+            "application/vnd.github.raw, application/json;q=inf",
+            "application/json,application/vnd.github.raw",
+        ),
+        (
             "contents/README.md",
             "application/vnd.github.v3.raw+json",
             "application/vnd.github.v3.raw+json",
@@ -5390,6 +5566,52 @@ def test_github_content_raw_type_echoes_accept(
     assert r.status_code == 200
     assert r.headers["content-type"] == expected + "; charset=utf-8"
     assert r.text == _CODEBASE_README
+
+
+def test_github_repeated_accept_fields_are_read_together(diff_pr):
+    c, h, org, num = diff_pr
+    rows = [
+        (
+            ["application/json", "application/vnd.github.diff"],
+            "diff",
+            "application/json,application/vnd.github.diff; charset=utf-8",
+        ),
+        (
+            ["application/vnd.github.diff", "application/json"],
+            "diff",
+            "application/vnd.github.diff,application/json; charset=utf-8",
+        ),
+        (
+            ["application/vnd.github.patch", "application/vnd.github.diff;q=0"],
+            "diff",
+            "application/vnd.github.patch,application/vnd.github.diff; charset=utf-8",
+        ),
+        (
+            ["*/*;q=0.9", "application/vnd.github.diff;q=0.5"],
+            "json",
+            "application/json; charset=utf-8",
+        ),
+        (
+            ["application/json\t", "application/vnd.github.diff"],
+            "diff",
+            "application/json,application/vnd.github.diff; charset=utf-8",
+        ),
+    ]
+    served = {}
+    for accepts, kind, content_type in rows:
+        response = c.get(
+            f"/github/repos/{org}/diffable/pulls/{num}",
+            headers=[*h.items(), *(("Accept", value) for value in accepts)],
+        )
+        prefix = {"diff": "diff --git ", "json": "{"}[kind]
+        served[tuple(accepts)] = (
+            response.status_code,
+            response.headers["content-type"],
+            response.text.startswith(prefix),
+        )
+    assert served == {
+        tuple(accepts): (200, content_type, True) for accepts, _, content_type in rows
+    }
 
 
 def test_github_pull_accept_patch_returns_an_mbox_patch(diff_pr):

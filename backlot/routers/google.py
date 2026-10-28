@@ -35,6 +35,7 @@ from starlette.routing import Match
 from backlot import (
     auth,
     collation,
+    gdocs,
     gsheets,
     protojson,
     store,
@@ -3387,24 +3388,105 @@ def _drive_project_paths(entries: list[dict], paths, under: str, defaults: froze
     ]
 
 
+# Real Drive's key orders, measured 2026-10-27 with `fields=*` on 54 files of ten types, each
+# listed and then read by id: a listing's entries in one, a read by id in another, and a
+# listing's own top level in a third. A mask does not change them.
+_DRIVE_FILE_LIST_ORDER = (
+    "kind",
+    "fileExtension",
+    "md5Checksum",
+    "viewedByMe",
+    "mimeType",
+    "exportLinks",
+    "parents",
+    "iconLink",
+    "shared",
+    "lastModifyingUser",
+    "owners",
+    "webViewLink",
+    "webContentLink",
+    "size",
+    "spaces",
+    "id",
+    "name",
+    "starred",
+    "trashed",
+    "explicitlyTrashed",
+    "createdTime",
+    "modifiedTime",
+    "modifiedByMeTime",
+    "sharedWithMeTime",
+    "quotaBytesUsed",
+    "version",
+    "ownedByMe",
+    "fullFileExtension",
+    "capabilities",
+    "modifiedByMe",
+)
+_DRIVE_FILE_GET_ORDER = (
+    "kind",
+    "id",
+    "name",
+    "mimeType",
+    "starred",
+    "trashed",
+    "explicitlyTrashed",
+    "parents",
+    "spaces",
+    "version",
+    "webContentLink",
+    "webViewLink",
+    "iconLink",
+    "viewedByMe",
+    "createdTime",
+    "modifiedTime",
+    "modifiedByMeTime",
+    "modifiedByMe",
+    "sharedWithMeTime",
+    "owners",
+    "lastModifyingUser",
+    "shared",
+    "ownedByMe",
+    "capabilities",
+    "fullFileExtension",
+    "fileExtension",
+    "md5Checksum",
+    "size",
+    "quotaBytesUsed",
+    "exportLinks",
+)
+_DRIVE_LIST_TOP_ORDER = ("files", "kind", "nextPageToken", "incompleteSearch")
+
+
+def _drive_ordered(obj: dict, order: tuple[str, ...]) -> dict:
+    """`obj` with its keys in `order`. A key the order does not name is kept after them, in
+    its original order, so reordering never drops a key."""
+    out = {k: obj[k] for k in order if k in obj}
+    out.update({k: v for k, v in obj.items() if k not in out})
+    return out
+
+
 def _drive_project_one(obj: dict, fields: str | None) -> dict:
     """A single file resource trimmed to a ``files.get`` mask; the mask is validated (400 on a name
-    real refuses) before trimming, including nested object fields. Trimming a file read by id as
-    a listing's entries are trimmed is what makes one file look the same either way.
+    real refuses) before trimming, including nested object fields. A file read by id is trimmed as
+    a listing's entries are, so it carries the keys and values it carries in a listing, in the
+    order real gives a read.
 
     No mask answers the `_DRIVE_FILE_DEFAULT` keys alone, measured 2026-10-25. A mask that is empty
     or of spaces and tabs alone selects nothing, which is not the same as no mask: measured
     2026-09-23, `fields=` and `fields=%20` answer ``{}``, and `fields=%09` did too on 2026-10-20."""
     paths = _drive_mask(fields)
     if paths is None:
-        return {k: v for k, v in obj.items() if k in _DRIVE_FILE_DEFAULT}
-    _check_mask(
-        paths,
-        _DRIVE_FILE_FIELDS,
-        unserved=_DRIVE_FILE_UNSERVED,
-        subfields=_DRIVE_FILE_SUBFIELDS,
-    )
-    return _drive_trim_object(obj, paths, None, _DRIVE_FILE_DEFAULT)
+        trimmed = {k: v for k, v in obj.items() if k in _DRIVE_FILE_DEFAULT}
+    else:
+        _check_mask(
+            paths,
+            _DRIVE_FILE_FIELDS,
+            unserved=_DRIVE_FILE_UNSERVED,
+            subfields=_DRIVE_FILE_SUBFIELDS,
+        )
+        trimmed = _drive_trim_object(obj, paths, None, _DRIVE_FILE_DEFAULT)
+    return _drive_ordered(trimmed, _DRIVE_FILE_GET_ORDER)
 
 
 def _drive_fill_shared(conn, files: list[dict], stored: set[str]) -> None:
@@ -4066,6 +4148,9 @@ async def drive_files_list(request: Request):
         if any(p[0] == "files" for p in list_paths):
             tops.add("files")
         body = {k: v for k, v in body.items() if k in tops}
+    if "files" in body:
+        body["files"] = [_drive_ordered(e, _DRIVE_FILE_LIST_ORDER) for e in body["files"]]
+    body = _drive_ordered(body, _DRIVE_LIST_TOP_ORDER)
     if not body:
         return JSONResponse({})
     return JSONResponse(body)
@@ -4127,9 +4212,6 @@ async def drive_files_get(file_id: str, request: Request):
             raise gerr.not_downloadable()
         mime = row["mime_type"] or "application/octet-stream"
         return Response(row["content"].encode("utf-8"), media_type=mime)
-    # Same projection as files.list: a file resolved by id and the same file read out of a listing
-    # must come back identical, or caching/diffing behaves differently depending on which call
-    # produced the row.
     return _drive_project_one(
         _drive_file(conn, row, me=caller.email),
         gerr.first_repeat(request.query_params, "fields"),
@@ -4403,7 +4485,8 @@ _DOCS_COMMENTS_VIEW = protojson.Enum(
 
 @router.get("/docs/v1/documents/{document_id}")
 async def docs_get(document_id: str, request: Request):
-    """The document as Docs structural elements: one ``paragraph`` per line of the stored text."""
+    """The document as Docs structural elements: its stored body, or one ``paragraph`` per line of
+    its text when it states none (`backlot.gdocs`)."""
     # The credential, then the typed values, then the lookup -- `_typed_query` records the order.
     _require(request)
     # Validated and then unused: the body is the same whatever a value that is read selects, where
@@ -4421,11 +4504,9 @@ async def docs_get(document_id: str, request: Request):
         },
     )
     row = _editor_doc(request, document_id, expect="document")
-    content = [{"sectionBreak": {"sectionStyle": {}}}]
-    for line in (row["content"] or "").split("\n"):
-        content.append(
-            {"paragraph": {"elements": [{"textRun": {"content": line + "\n", "textStyle": {}}}]}}
-        )
+    body = store.gdrive_doc_body_for(auth.conn(request), document_id)
+    if body is None:
+        body = gdocs.from_text(row["content"] or "")
     # Real's order for an untabbed read (docs.googleapis.com, 2026-10-16, twelve Docs, six owned by
     # a Workspace member and six by a consumer account), the same under each `suggestionsViewMode`,
     # `includeTabsContent=false` and a `fields` mask naming the members in another order
@@ -4434,9 +4515,9 @@ async def docs_get(document_id: str, request: Request):
     # them; this server serves none of the four.
     return {
         "title": row["title"],
-        "body": {"content": content},
-        "documentStyle": {},
-        "namedStyles": {"styles": []},
+        "body": {"content": gdocs.indexed(body)},
+        "documentStyle": gdocs.document_style(),
+        "namedStyles": gdocs.named_styles(),
         "revisionId": synth._digest(document_id)[:24],
         "suggestionsViewMode": "SUGGESTIONS_INLINE",
         "documentId": document_id,

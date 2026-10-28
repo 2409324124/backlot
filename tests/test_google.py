@@ -15,6 +15,7 @@ import io
 import json
 import re
 import unicodedata
+from unittest.mock import ANY
 from urllib.parse import parse_qsl, quote, urlencode
 
 import httpx
@@ -27,6 +28,7 @@ from backlot.config import Settings
 from backlot.errors import google as gerr
 from tests._helpers import (
     client_for,
+    corpus_client,
     crawl_drive,
     crawl_gmail,
     db_count,
@@ -5230,7 +5232,8 @@ _CAPS_TRUE = {
 
 @pytest.fixture(scope="module")
 def owned_and_lent(tmp_path_factory):
-    """A file and a folder record of ava's and of mia's in folder `Plans`, each readable by both."""
+    """A file and a folder record of ava's and of mia's, and a PDF of mia's, in folder `Plans`,
+    each readable by both."""
     record = {
         "source_type": "google_drive",
         "folder": "Plans",
@@ -5238,8 +5241,11 @@ def owned_and_lent(tmp_path_factory):
         "readers": ["ava@acme.com", "mia@acme.com"],
         "visibility": "private",
     }
-    rows = [("mine", "Mine", "ava", None), ("theirs", "Theirs", "mia", None)]
-    rows += [("figures", "Figures", "ava", "folder"), ("drafts", "Drafts", "mia", "folder")]
+    folder = {"subtype": "folder"}
+    pdf = {"subtype": "pdf", "mime_type": "application/pdf"}
+    rows = [("mine", "Mine", "ava", {}), ("theirs", "Theirs", "mia", {})]
+    rows += [("figures", "Figures", "ava", folder), ("drafts", "Drafts", "mia", folder)]
+    rows += [("scan", "Scan.pdf", "mia", pdf)]
     return tiny_corpus(
         tmp_path_factory.mktemp("owned_and_lent"),
         [
@@ -5248,9 +5254,9 @@ def owned_and_lent(tmp_path_factory):
                 "doc_id": doc_id,
                 "title": title,
                 "author_email": f"{author}@acme.com",
-                **({"subtype": subtype} if subtype else {}),
+                **extra,
             }
-            for doc_id, title, author, subtype in rows
+            for doc_id, title, author, extra in rows
         ],
     )
 
@@ -5294,6 +5300,45 @@ def test_drive_owned_by_me_can_share_and_modified_by_me_follow_the_caller(
         assert (f["ownedByMe"], f["capabilities"]["canShare"], f["modifiedByMe"]) == (owned,) * 3
         assert f.get("modifiedByMeTime") == (f["modifiedTime"] if owned else None)
         assert {k for k, v in f["capabilities"].items() if v} == _CAPS_TRUE[kind, owned]
+
+
+def test_drive_key_order_differs_between_listing_and_read(owned_and_lent):
+    """Each item comes in real's listing order in a listing and in its read order when read by
+    id, with the same keys and values both ways, and the listing's own keys come in a third
+    order. Between them the items carry every key either order names: ava is a scoped caller,
+    so her own file carries `modifiedByMeTime`, what mia lent her `sharedWithMeTime`, and the
+    PDF the keys only a binary file has."""
+    list_order = (
+        "kind fileExtension md5Checksum viewedByMe mimeType exportLinks parents iconLink "
+        "shared lastModifyingUser owners webViewLink webContentLink size spaces id name "
+        "starred trashed explicitlyTrashed createdTime modifiedTime modifiedByMeTime "
+        "sharedWithMeTime quotaBytesUsed version ownedByMe fullFileExtension capabilities "
+        "modifiedByMe"
+    ).split()
+    get_order = (
+        "kind id name mimeType starred trashed explicitlyTrashed parents spaces version "
+        "webContentLink webViewLink iconLink viewedByMe createdTime modifiedTime "
+        "modifiedByMeTime modifiedByMe sharedWithMeTime owners lastModifyingUser shared "
+        "ownedByMe capabilities fullFileExtension fileExtension md5Checksum size "
+        "quotaBytesUsed exportLinks"
+    ).split()
+    s = owned_and_lent
+    tokens = yaml.safe_load(s.tokens_path.read_text(encoding="utf-8"))
+    ava = {"Authorization": f"Bearer {tok(tokens, 'ava@acme.com')}"}
+    with client_for(s, reload=True) as c:
+        listing = c.get(
+            "/drive/v3/files", headers=ava, params={"fields": "*", "pageSize": 100}
+        ).json()
+        assert {k for entry in listing["files"] for k in entry} == set(list_order)
+        for entry in listing["files"]:
+            assert list(entry) == [k for k in list_order if k in entry]
+            got = c.get(
+                f"/drive/v3/files/{entry['id']}", headers=ava, params={"fields": "*"}
+            ).json()
+            assert got == entry
+            assert list(got) == [k for k in get_order if k in got]
+        paged = c.get("/drive/v3/files", headers=ava, params={"pageSize": 2}).json()
+        assert list(paged) == ["files", "kind", "nextPageToken", "incompleteSearch"]
 
 
 _PER_CALLER = "ownedByMe,capabilities,modifiedByMe,modifiedByMeTime,modifiedTime"
@@ -6296,6 +6341,8 @@ def test_drive_get_honors_the_fields_mask(client, admin_h):
         f"/drive/v3/files/{row['id']}", headers=admin_h, params={"fields": mask}
     ).json()
     assert got == row
+    assert list(row) == ["mimeType", "webViewLink", "size", "id", "name", "modifiedTime"]
+    assert list(got) == ["id", "name", "mimeType", "webViewLink", "modifiedTime", "size"]
     r = client.get(
         f"/drive/v3/files/{row['id']}", headers=admin_h, params={"fields": "totallyBogusField"}
     )
@@ -6304,15 +6351,17 @@ def test_drive_get_honors_the_fields_mask(client, admin_h):
 
 def test_drive_files_answer_the_default_keys_with_no_mask(client, admin_h):
     """With no mask a file is `kind`, `id`, `name` and `mimeType`, listed and read by id, a folder
-    as well as a stored file."""
+    as well as a stored file, in a listing's order and in a read's."""
     listing = client.get("/drive/v3/files", headers=admin_h, params={"pageSize": 2}).json()
     folders = client.get(
         "/drive/v3/files", headers=admin_h, params={"q": f"mimeType='{FOLDER_MIME}'", "pageSize": 1}
     ).json()
     entries = listing["files"] + folders["files"]
-    assert len(entries) == 3 and all(set(x) == {"kind", "id", "name", "mimeType"} for x in entries)
+    assert [list(x) for x in entries] == [["kind", "mimeType", "id", "name"]] * 3
     for x in entries:
-        assert client.get(f"/drive/v3/files/{x['id']}", headers=admin_h).json() == x
+        got = client.get(f"/drive/v3/files/{x['id']}", headers=admin_h).json()
+        assert got == x
+        assert list(got) == ["kind", "id", "name", "mimeType"]
 
 
 def test_drive_folders_are_found_by_mime_type(client, admin_h):
@@ -6687,16 +6736,241 @@ def test_root_lists_folders_with_matching_ids(base, admin_h):
 
 
 def test_docs_get_returns_paragraph_text(base, admin_h):
+    """A document that states no structure is one plain paragraph per line, indexed and styled as
+    real serves a plain paragraph, with the `documentStyle` and `namedStyles` of a document
+    `documents.create` makes (`backlot.gdocs`)."""
     fid, _ = _drive_by_mime(base, admin_h, "application/vnd.google-apps.document")
     doc = httpx.get(f"{base}/docs/v1/documents/{fid}", headers=admin_h).json()
     assert doc["documentId"] == fid
-    text = "".join(
-        e["textRun"]["content"]
-        for el in doc["body"]["content"]
-        if "paragraph" in el
-        for e in el["paragraph"]["elements"]
-    )
+    content = doc["body"]["content"]
+    assert content[0] == {
+        "endIndex": 1,
+        "sectionBreak": {
+            "sectionStyle": {
+                "columnSeparatorStyle": "NONE",
+                "contentDirection": "LEFT_TO_RIGHT",
+                "sectionType": "CONTINUOUS",
+            }
+        },
+    }
+    at = 1
+    for el in content[1:]:
+        (run,) = el["paragraph"]["elements"]
+        end = at + len(run["textRun"]["content"].encode("utf-16-le")) // 2
+        assert el == {
+            "startIndex": at,
+            "endIndex": end,
+            "paragraph": {
+                "elements": [{"startIndex": at, "endIndex": end, "textRun": run["textRun"]}],
+                "paragraphStyle": {"namedStyleType": "NORMAL_TEXT", "direction": "LEFT_TO_RIGHT"},
+            },
+        }
+        assert run["textRun"]["textStyle"] == {}
+        at = end
+    text = "".join(el["paragraph"]["elements"][0]["textRun"]["content"] for el in content[1:])
     assert "Logo usage" in text  # SAMPLE "Brand guidelines v3"
+    assert doc["documentStyle"]["pageSize"] == {
+        "height": {"magnitude": 792, "unit": "PT"},
+        "width": {"magnitude": 612, "unit": "PT"},
+    }
+    styles = doc["namedStyles"]["styles"]
+    assert [s["namedStyleType"] for s in styles] == [
+        "NORMAL_TEXT",
+        *(f"HEADING_{n}" for n in range(1, 7)),
+        "TITLE",
+        "SUBTITLE",
+    ]
+    assert styles[0]["textStyle"]["weightedFontFamily"] == {"fontFamily": "Arial", "weight": 400}
+
+
+def test_docs_get_serves_stated_paragraphs_as_real_does(tmp_path):
+    """A document whose corpus states `paragraphs`, served as real served the same paragraphs
+    written through `batchUpdate` (`backlot.gdocs`): indices in UTF-16 code units, so the emoji
+    counts two; a `headingId` on a heading alone; adjacent runs of one style as one; a link
+    underlined in the link colour; and the newline in its paragraph's last run's style, but for a
+    link and the underline it brought. A document stating no paragraphs is read without the
+    characters `insertText` strips, `\r` among them."""
+    url = "https://example.com/"
+    link = {
+        "underline": True,
+        "foregroundColor": {
+            "color": {"rgbColor": {"red": 0.06666667, "green": 0.33333334, "blue": 0.8}}
+        },
+        "link": {"url": url},
+    }
+    record = {
+        "source_type": "google_drive",
+        "doc_id": "plan",
+        "title": "Quarterly plan",
+        "author_email": "owner@acme.com",
+        "paragraphs": [
+            {"style": "TITLE", "text": "Quarterly plan"},
+            {
+                "runs": [
+                    {"text": "Ship the "},
+                    {"text": "reader", "bold": True},
+                    {"text": " and", "bold": False},
+                    {"text": " the "},
+                    {"text": "writer", "italic": True},
+                    {"text": "."},
+                ]
+            },
+            {
+                "runs": [
+                    {"text": "See "},
+                    {"text": "the spec", "link": url},
+                    {"text": " and "},
+                    {"text": "old", "strikethrough": True},
+                    {"text": " "},
+                    {"text": "notes", "underline": True},
+                    {"text": "."},
+                ]
+            },
+            {"style": "HEADING_2", "text": "Risks \U0001f600"},
+            {"runs": [{"text": "Plain "}, {"text": "bold", "bold": True}]},
+            {"runs": [{"text": "End "}, {"text": "link", "link": url}]},
+            {
+                "runs": [
+                    {"text": "A "},
+                    {
+                        "text": "linkbold",
+                        "link": url,
+                        "bold": True,
+                        "italic": True,
+                        "strikethrough": True,
+                    },
+                ]
+            },
+            {"runs": [{"text": "pre "}, {"text": "ullink", "underline": True, "link": url}]},
+            {
+                "runs": [
+                    {"text": "a "},
+                    {"text": "ulb", "bold": True, "underline": True, "link": url},
+                ]
+            },
+            {"text": ""},
+        ],
+    }
+    prose = {
+        "source_type": "google_drive",
+        "doc_id": "crlf",
+        "title": "CRLF notes",
+        "author_email": "owner@acme.com",
+        "content": "one\r\ntwo\x01\ue000\t\x0b\uf900\ufdcf\ufdf0",
+    }
+
+    def para(start, end, runs, style="NORMAL_TEXT"):
+        elements, at = [], start
+        for content, text_style, width in runs:
+            elements.append(
+                {
+                    "startIndex": at,
+                    "endIndex": at + width,
+                    "textRun": {"content": content, "textStyle": text_style},
+                }
+            )
+            at += width
+        assert at == end
+        heading = {"headingId": ANY} if style != "NORMAL_TEXT" else {}
+        return {
+            "startIndex": start,
+            "endIndex": end,
+            "paragraph": {
+                "elements": elements,
+                "paragraphStyle": {
+                    **heading,
+                    "namedStyleType": style,
+                    "direction": "LEFT_TO_RIGHT",
+                },
+            },
+        }
+
+    with corpus_client(tmp_path, [record, prose]) as (client, settings):
+        h = {"Authorization": f"Bearer {settings.admin_token}"}
+        fid = served_id("google_drive", "plan")
+        doc = client.get(f"/docs/v1/documents/{fid}", headers=h).json()
+        crlf = client.get(f"/docs/v1/documents/{served_id('google_drive', 'crlf')}", headers=h)
+    assert doc["body"]["content"][1:] == [
+        para(1, 16, [("Quarterly plan\n", {}, 15)], "TITLE"),
+        para(
+            16,
+            48,
+            [
+                ("Ship the ", {}, 9),
+                ("reader", {"bold": True}, 6),
+                (" and the ", {}, 9),
+                ("writer", {"italic": True}, 6),
+                (".\n", {}, 2),
+            ],
+        ),
+        para(
+            48,
+            76,
+            [
+                ("See ", {}, 4),
+                ("the spec", link, 8),
+                (" and ", {}, 5),
+                ("old", {"strikethrough": True}, 3),
+                (" ", {}, 1),
+                ("notes", {"underline": True}, 5),
+                (".\n", {}, 2),
+            ],
+        ),
+        para(76, 85, [("Risks \U0001f600\n", {}, 9)], "HEADING_2"),
+        para(85, 96, [("Plain ", {}, 6), ("bold\n", {"bold": True}, 5)]),
+        para(96, 105, [("End ", {}, 4), ("link", link, 4), ("\n", {}, 1)]),
+        para(
+            105,
+            116,
+            [
+                ("A ", {}, 2),
+                ("linkbold", {"bold": True, "italic": True, "strikethrough": True, **link}, 8),
+                ("\n", {"bold": True, "italic": True, "strikethrough": True}, 1),
+            ],
+        ),
+        para(116, 127, [("pre ", {}, 4), ("ullink", link, 6), ("\n", {"underline": True}, 1)]),
+        para(
+            127,
+            133,
+            [
+                ("a ", {}, 2),
+                ("ulb", {"bold": True, **link}, 3),
+                ("\n", {"bold": True, "underline": True}, 1),
+            ],
+        ),
+        para(133, 134, [("\n", {}, 1)]),
+    ]
+    assert crlf.json()["body"]["content"][1:] == [
+        para(1, 5, [("one\n", {}, 4)]),
+        para(5, 14, [("two\t\x0b\uf900\ufdcf\ufdf0\n", {}, 9)]),
+    ]
+    headings = [
+        el["paragraph"]["paragraphStyle"]["headingId"]
+        for el in doc["body"]["content"][1:]
+        if "headingId" in el["paragraph"]["paragraphStyle"]
+    ]
+    assert len(headings) == len(set(headings)) == 2
+    assert all(re.fullmatch(r"h[.][a-z0-9]{12}", h) for h in headings)
+    # `==` above holds whatever order the members come in, so real's is asserted on its own.
+    content = doc["body"]["content"]
+    assert list(content[0]) == ["endIndex", "sectionBreak"]
+    assert list(content[1]) == ["startIndex", "endIndex", "paragraph"]
+    assert list(content[1]["paragraph"]["paragraphStyle"]) == [
+        "headingId",
+        "namedStyleType",
+        "direction",
+    ]
+    run, newline = content[7]["paragraph"]["elements"][1:]
+    assert list(run) == ["startIndex", "endIndex", "textRun"]
+    assert list(run["textRun"]["textStyle"]) == [
+        "bold",
+        "italic",
+        "underline",
+        "strikethrough",
+        "foregroundColor",
+        "link",
+    ]
+    assert list(newline["textRun"]["textStyle"]) == ["bold", "italic", "strikethrough"]
 
 
 @pytest.mark.parametrize(
