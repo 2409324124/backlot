@@ -410,13 +410,14 @@ def test_notion_json_carries_the_charset_and_the_headers_real_sends(client, noti
 def test_notion_answers_an_if_none_match_of_a_star_as_real_does(client, notion_h):
     """Each request below is answered as ``backlot.routers.notion.not_modified`` records real
     answering it: with the 304 ``backlot.main.report_notion_etag`` makes of the answer it stands
-    for, or with the status it gets without `If-None-Match`."""
+    for, under the `vary` ``backlot.main.report_notion_cors`` gives an answer with no
+    `content-type`, or with the status it gets without `If-None-Match`."""
     me, page = "/notion/v1/users/me", f"/notion/v1/pages/{synth.notion_id('nt-runbook')}"
     stands_for = {}
     for path in (me, page):
         headers = dict(client.get(path, headers=notion_h).headers)
         del headers["content-type"], headers["content-length"]
-        stands_for[path] = (304, b"", headers)
+        stands_for[path] = (304, b"", {**headers, "vary": "Origin"})
     star = ("If-None-Match", "*")
     wanted = {
         ("GET", me, (star,)): stands_for[me],
@@ -450,6 +451,119 @@ def test_notion_answers_an_if_none_match_of_a_star_as_real_does(client, notion_h
         r = sent_as(client, method, path, [*notion_h.items(), *sent], content=body)
         answer = (304, r.content, dict(r.headers)) if r.status_code == 304 else r.status_code
         answered[method, path, sent] = answer
+    assert answered == wanted
+
+
+_NOTION_CORS_HEADERS = {
+    "access-control-allow-origin": "*",
+    "access-control-allow-headers": (
+        "Authorization, Content-Type, Accept, Notion-Version, Notion-Beta, Idempotency-Key, "
+        "User-Agent, X-Notion-Mcp-Redirect-Uri, X-Notion-Mcp-Client-Id, "
+        "X-Notion-Mcp-Client-Name, X-Notion-Mcp-Client-Version"
+    ),
+    "access-control-allow-methods": "GET, POST, PATCH, PUT, DELETE, OPTIONS",
+    "access-control-expose-headers": "X-Notion-Request-Id, Retry-After",
+    "access-control-max-age": "0",
+}
+
+
+def test_notion_cors_headers_preflight_and_vary_are_reals(client, notion_h):
+    """Pins ``backlot.main.report_notion_cors`` and ``backlot.routers.notion.answers_cors``, each
+    row a request real answered that way."""
+    versioned = {"Notion-Version": DATA_SOURCES_VERSION}
+    origin = {"Origin": "https://example.com"}
+    asks = {"Access-Control-Request-Method": "POST"}
+    preflight = {**origin, **asks}
+    five, none = _NOTION_CORS_HEADERS, dict.fromkeys(_NOTION_CORS_HEADERS)
+    both, compression = "Origin, Accept-Encoding", "Accept-Encoding"
+    fresh = {"If-None-Match": "*"}
+    rows = [
+        ("GET", "/notion/v1/users/me", {**notion_h, **origin}, None, 200, five, both),
+        ("HEAD", "/notion/v1/users/me", {**notion_h, **origin}, None, 200, five, both),
+        ("GET", "/notion/v1/users/me", {**notion_h, **origin, **fresh}, None, 304, five, "Origin"),
+        ("HEAD", "/notion/v1/users/me", {**notion_h, **origin, **fresh}, None, 304, five, "Origin"),
+        ("GET", "/notion/v1/users/me", {**notion_h, **fresh}, None, 304, none, "Origin"),
+        ("GET", "/notion/v1/users/me", {**notion_h, "Origin": "null"}, None, 200, five, both),
+        ("GET", "/notion/v1/users/me", {**notion_h, "Origin": "\xa0"}, None, 200, five, both),
+        ("GET", "/notion/v1/users/me", {**versioned, **origin}, None, 401, five, both),
+        ("POST", "/notion/v1/search", {**notion_h, **_JSON, **origin}, b"{", 400, five, both),
+        ("GET", "/notion/v1/nonexistent_thing/xyz", {**notion_h, **origin}, None, 400, five, both),
+        ("GET", "/notion/v1/users/me", notion_h, None, 200, none, both),
+        ("GET", "/notion/v1/users/me", {**notion_h, "Origin": ""}, None, 200, none, both),
+        ("GET", "/notion/v1/users/me", {**notion_h, "Origin": " "}, None, 200, none, both),
+        (
+            "GET",
+            "/notion/v1/users/me",
+            (*notion_h.items(), ("Origin", ""), *origin.items()),
+            None,
+            200,
+            five,
+            both,
+        ),
+        (
+            "GET",
+            "/notion/v1/users/me",
+            (*notion_h.items(), ("Origin", ""), ("Origin", "")),
+            None,
+            200,
+            none,
+            both,
+        ),
+        (
+            "OPTIONS",
+            "/notion/v1/users/me",
+            (("Origin", ""), *preflight.items()),
+            None,
+            204,
+            five,
+            "Origin",
+        ),
+        ("TRACE", "/notion/v1/users/me", {**notion_h, **origin}, None, 405, none, None),
+        ("OPTIONS", "/notion/v1/search", preflight, None, 204, five, "Origin"),
+        ("OPTIONS", "/notion/v1/nonexistent_thing/xyz", preflight, None, 204, five, "Origin"),
+        (
+            "OPTIONS",
+            "/notion/v1/search",
+            {**origin, "Access-Control-Request-Method": ""},
+            None,
+            204,
+            five,
+            "Origin",
+        ),
+        ("OPTIONS", "/notion/v1/search", origin, None, 400, five, both),
+        ("OPTIONS", "/notion/v1/search", asks, None, 400, none, both),
+        ("OPTIONS", "/notion/v1/search", {**preflight, "Origin": ""}, None, 400, none, both),
+        *(
+            (method, "/notion/v1/users/me", {**notion_h, **preflight}, None, status, five, both)
+            for method, status in [
+                ("GET", 200),
+                ("HEAD", 200),
+                ("POST", 400),
+                ("PUT", 400),
+                ("PATCH", 400),
+                ("DELETE", 400),
+            ]
+        ),
+        ("POST", "/notion/v1/oauth/token", {**_JSON, **origin}, b"{}", 401, none, compression),
+        ("GET", "/notion/v1/oauth/token", {**notion_h, **origin}, None, 400, none, compression),
+        ("OPTIONS", "/notion/v1/oauth/token", preflight, None, 400, none, compression),
+        ("OPTIONS", "/notion/v1/oauth", preflight, None, 204, five, "Origin"),
+        ("GET", "/notion/v1", {**notion_h, **origin}, None, 400, none, compression),
+        ("OPTIONS", "/notion/v2/users/me", preflight, None, 400, none, compression),
+        ("OPTIONS", "/notion/v1/", preflight, None, 204, five, "Origin"),
+        ("OPTIONS", "/notion/v1/oauth/", preflight, None, 400, none, compression),
+        ("GET", "/notion/v1/%6Fauth/token", {**notion_h, **origin}, None, 400, five, both),
+        ("OPTIONS", "/notion/v1/oauth%2Ftoken", preflight, None, 204, five, "Origin"),
+        ("OPTIONS", "/notion/v1%2Fusers/me", preflight, None, 400, none, compression),
+    ]
+    answered, wanted = {}, {}
+    for method, path, headers, body, status, sent, vary in rows:
+        pairs = tuple(headers.items() if isinstance(headers, dict) else headers)
+        r = sent_as(client, method, path, pairs, body)
+        row = (method, path, pairs)
+        got = {name: r.headers.get(name) for name in _NOTION_CORS_HEADERS}
+        answered[row] = (r.status_code, got, r.headers.get("vary"))
+        wanted[row] = (status, sent, vary)
     assert answered == wanted
 
 
