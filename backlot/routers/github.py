@@ -783,7 +783,7 @@ def rate_limit_window(
 ) -> tuple[str, int]:
     """The window a request for ``resource`` lands in, and that window's limit for this caller.
 
-    A caller with no credential has no `code_search` window of its own: an anonymous
+    A request with no `Authorization` has no `code_search` window of its own: an anonymous
     `GET /rate_limit` reported it and `core` as one set of four numbers (`limit: 60, used: 29,
     remaining: 31, reset: 1789960795`) and a single anonymous `GET /repos/psf/requests` moved both
     from 29 to 30, so it is `core`'s window under both names (measured against api.github.com
@@ -1014,9 +1014,12 @@ TOKEN_RATE_LIMIT_EXCEEDED_DOCS = (
 )
 
 
-#: The anchor real names on that 403 for a `Basic` value naming no token, after a space, where a
-#: tab after `Basic`, `Digest x` and `Bearer<TAB>nope` named :data:`TOKEN_RATE_LIMIT_EXCEEDED_DOCS`
-#: (measured against api.github.com 2026-10-26).
+#: The page real names on that 403 for a `Basic` value naming no token after a space (`Basic eDp5`,
+#: `Basic Zm9vOmJhcg==`), where `Digest x`, `Foo bar`, `nope`, `Bearer<TAB>nope`, `token<TAB>nope`,
+#: `Basic<TAB>eDp5`, `Basic<TAB>!!!!` and `Basic<TAB>` and the base64 of `x:<40 a>` named
+#: :data:`TOKEN_RATE_LIMIT_EXCEEDED_DOCS`, and so did a token that resolves after `Basic` and a
+#: space (measured against api.github.com 2026-10-28 on `/repos/psf/requests`, the token on code
+#: search).
 BASIC_RATE_LIMIT_EXCEEDED_DOCS = (
     "https://docs.github.com/rest/overview/rate-limits-for-the-rest-api"
 )
@@ -1039,7 +1042,7 @@ def _rate_limit_exceeded_message(
 ) -> str:
     """Real's `message` on the spent-window 403.
 
-    A caller with no credential: this sentence, with the caller's own address, measured against
+    No `Authorization` header: this sentence, with the caller's own address, measured against
     api.github.com 2026-09-17 (the 61st anonymous `core` request in the hour and three more after
     it, `used: 60` pinned at `limit: 60` on each, `server: Varnish` where a served answer is
     `server: github.com`).
@@ -1055,7 +1058,7 @@ def _rate_limit_exceeded_message(
     An ``unparseable`` caller (:func:`rate_limit_caller`): the anonymous sentence, then the token's
     from "If you reach out", with the answer's own request id and `Date` (measured against
     api.github.com 2026-10-26 with `Basic eDp5`, `Digest x`, `Bearer<TAB>nope` and `Basic<TAB>`
-    and base64, on `/repos/psf/requests`, `/user/repos` and code search)."""
+    and base64 on `/repos/psf/requests`, and with `Basic eDp5` on `/user/repos` and code search)."""
     if not authenticated:
         host = request.client.host if request.client is not None else "anonymous"
         message = (
@@ -1103,6 +1106,10 @@ def rate_limit_refusal(request: Request) -> Response | None:
     window is at `limit: 0` (:func:`rate_limit_window`): `Basic eDp5` and `Basic Zm9vOmJhcg==`
     were the 403 with `used: 0`, pinned to a version or not and with no `q`, where `Digest x` and
     `Basic<TAB>eDp5` were the 401 "Requires authentication" with none of the five (2026-10-26).
+    That 401 comes ahead of the window for a header ``_a_header_without_a_credential`` holds for:
+    `Digest x`, `Foo bar`, `nope` and a tab after `Basic`, `Bearer` or `token` were the 401 with
+    the window those values share spent, and so was a token that resolves after a tab, with that
+    token's `code_search` window fresh and spent (2026-10-28).
     """
     if not get_settings().github_enforce_rate_limits:
         return None
@@ -1113,7 +1120,7 @@ def rate_limit_refusal(request: Request) -> Response | None:
     key, authenticated = rate_limit_caller(request)
     unparseable = key.startswith("unparseable:")
     resource = rate_limit_resource(request.url.path, 401 if not authenticated else 200, unparseable)
-    if resource == "code_search" and unparseable and _a_header_without_a_credential(request):
+    if resource == "code_search" and _a_header_without_a_credential(request):
         return None
     counted, limit = rate_limit_window(resource, authenticated, unparseable)
     windows = _rate_limit_windows(request.app)
@@ -2359,9 +2366,11 @@ async def get_rate_limit(request: Request):
 
     The three resources are the ones Backlot counts, of the fifteen real's authenticated answer
     carries (`graphql`, `integration_manifest`, `scim`, …) and the five its anonymous one does.
-    They are listed in the order that answer lists them in, which is not the same order for the two
-    callers (:data:`_RESOURCE_ORDER`), and a caller with no credential reads `core`'s own window
-    under `code_search` as well (:func:`rate_limit_window`).
+    They are listed in the order that answer lists them in, which is not the same order for a
+    request with no `Authorization` as for one with a token or a value real cannot parse
+    (:data:`_RESOURCE_ORDER`). A request with no `Authorization` reads `core`'s own window under
+    `code_search` as well, and a value real cannot parse a `code_search` window at `limit: 0`
+    (:func:`rate_limit_window`).
 
     `rate`, `core` under a second name, is served to `2022-11-28` and not to `2026-03-10`, which
     removed it (measured 2026-09-20: the body's keys are `resources`, `rate` under the one and
@@ -2382,7 +2391,7 @@ async def get_rate_limit(request: Request):
     unparseable = key.startswith("unparseable:")
     windows = _rate_limit_windows(request.app)
     resources = {}
-    for resource in _RESOURCE_ORDER[authenticated]:
+    for resource in _RESOURCE_ORDER[authenticated or unparseable]:
         counted, limit = rate_limit_window(resource, authenticated, unparseable)
         resources[resource] = windows.status(key, counted, limit)
     if _version(request) not in _HAS_RATE_ALIAS:
@@ -4251,10 +4260,12 @@ def _issue_number(row) -> int:
 _HAS_SINGULAR_ASSIGNEE = frozenset({"2022-11-28"})  # 2026-03-10: superseded by `assignees`
 _HAS_MERGE_COMMIT_SHA = frozenset({"2022-11-28"})  # 2026-03-10: removed from every pull body
 _HAS_RATE_ALIAS = frozenset({"2022-11-28"})  # 2026-03-10: `rate` removed from `/rate_limit`
-#: authenticated? -> the order `/rate_limit` lists `resources` in: real runs `core`, `search`, …,
-#: `code_search` for a token and `code_search`, `core`, …, `search` for a caller with no
-#: credential, so the two answers differ in order as well as in membership (measured against
-#: api.github.com 2026-09-21).
+#: authenticated or unparseable? -> the order `/rate_limit` lists `resources` in: real runs `core`,
+#: `search`, …, `code_search` for a token and `code_search`, `core`, …, `search` with no
+#: `Authorization`, so the two answers differ in order as well as in membership (measured against
+#: api.github.com 2026-09-21); an `Authorization` real cannot parse gets the token's fifteen in the
+#: token's order (`Basic eDp5`, `Basic Zm9vOmJhcg==`, `Digest x`, `Foo bar`, `nope`,
+#: `Basic<TAB>eDp5` and `Basic<TAB>!!!!`, 2026-10-28).
 _RESOURCE_ORDER = {
     True: ("core", "search", "code_search"),
     False: ("code_search", "core", "search"),
