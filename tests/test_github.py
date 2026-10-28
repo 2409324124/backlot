@@ -6174,6 +6174,22 @@ def test_github_comment_reactions(tmp_path):
 # --- sort, direction and the repository filters ---------------------------------------
 
 
+def _assert_unparseable_refusal(response, anonymous, docs: str) -> None:
+    """``response`` is real's spent-window 403 for an `Authorization` it reads as no credential:
+    the anonymous caller's sentence in ``anonymous``, then the token's, a `status` and ``docs``."""
+    body = response.json()
+    rid = response.headers["x-github-request-id"]
+    stamp = time.strftime("%Y-%m-%d %H:%M:%S", time.gmtime(int(rid.rsplit(":", 1)[1], 16)))
+    assert body == {
+        "message": f"{anonymous.json()['message']} If you reach out to GitHub Support for help, "
+        f"please include the request ID {rid} and timestamp {stamp} UTC. For more on scraping "
+        "GitHub and how it may affect your rights, please review our Terms of Service "
+        "(https://docs.github.com/en/site-policy/github-terms/github-terms-of-service)",
+        "documentation_url": docs,
+        "status": "403",
+    }
+
+
 def _ratelimit(response) -> dict[str, str]:
     """The five `x-ratelimit-*` headers of a response, keyed without the prefix."""
     names = ("limit", "remaining", "used", "reset", "resource")
@@ -6942,7 +6958,8 @@ def test_github_rate_limit_refuses_an_anonymous_caller_too_and_the_switch_turns_
             digest = c.get("/github/user/repos", headers={"Authorization": "Digest x"})
             assert digest.status_code == 401
         tab_spent = c.get("/github/user/repos", headers={"Authorization": "Bearer\tnope"})
-        assert (tab_spent.status_code, tab_spent.json()) == (403, refused.json())
+        assert tab_spent.status_code == 403
+        _assert_unparseable_refusal(tab_spent, refused, gh.TOKEN_RATE_LIMIT_EXCEEDED_DOCS)
         # a `Basic` value of the two counted shapes is counted in that window too, but stays its own
         # 401 once it is spent where a space follows `Basic`, and is the refusal after a tab
         for value in (b"x:" + b"a" * 40, b"x:GHP_" + b"A" * 36):
@@ -6951,7 +6968,8 @@ def test_github_rate_limit_refuses_an_anonymous_caller_too_and_the_switch_turns_
             assert (shaped.status_code, shaped.json()["message"]) == (401, "Bad credentials")
             assert _ratelimit(shaped) == _ratelimit(tab_spent)
             tabbed = c.get("/github/user/repos", headers={"Authorization": "Basic\t" + encoded})
-            assert (tabbed.status_code, tabbed.json()) == (403, refused.json())
+            assert tabbed.status_code == 403
+            _assert_unparseable_refusal(tabbed, refused, gh.TOKEN_RATE_LIMIT_EXCEEDED_DOCS)
 
         # `Bearer nope` is its own 401 on both spent windows, not the refusal
         bad_bearer = c.get("/github/user/repos", headers={"Authorization": "Bearer nope"})
@@ -7155,6 +7173,8 @@ def test_github_a_counted_basic_token_shape_as_a_bearer_has_no_window(gh_client)
         ("GET", "repos/{org}/gateway/branches/main/protection", False, "core", "60", True),
         ("GET", "search/issues?q=x", False, "search", "10", True),
         ("GET", "search/issues?q=x", True, "search", "10", True),
+        ("GET", "search/code?q=x", False, "code_search", "0", False),
+        ("GET", "search/code?q=x", True, "code_search", "0", False),
         ("DELETE", "installation/token", False, "core", "60", False),
     ],
 )
@@ -7178,3 +7198,100 @@ def test_github_a_counted_basic_token_shape_carries_each_rows_window(
         )
     step = int(second.headers["x-ratelimit-used"]) - int(first.headers["x-ratelimit-used"])
     assert step == (1 if counted else 0)
+
+
+#: `Authorization` values real reads as no credential, as `rate_limit_caller` keys them apart
+_UNPARSEABLE = ["Basic eDp5", "Digest x", "Foo bar", "Basic\teDp5"]
+
+
+@pytest.mark.parametrize("value", _UNPARSEABLE)
+def test_github_rate_limit_reports_an_unparseable_callers_code_search_at_zero(gh_client, value):
+    """`GET /rate_limit` reports such a caller's `code_search` as a window of its own at `limit: 0`,
+    a minute long, beside `core` at 60 (see `backlot.routers.github.rate_limit_window`)."""
+    from backlot.routers import github as gh
+
+    c, _ = gh_client
+    r = c.get("/github/rate_limit", headers={"Authorization": value})
+    assert r.status_code == 200
+    resources = r.json()["resources"]
+    code_search = resources["code_search"]
+    assert {k: code_search[k] for k in ("limit", "used", "remaining")} == {
+        "limit": 0,
+        "used": 0,
+        "remaining": 0,
+    }
+    assert code_search["reset"] - time.time() <= gh.SEARCH_RATE_LIMIT_WINDOW
+    assert resources["core"]["limit"] == 60
+
+
+@pytest.mark.parametrize(
+    "value, extra, status, message, five",
+    [
+        ("Basic eDp5", {}, 403, "API rate limit exceeded for testclient.", True),
+        ("Basic Zm9vOmJhcg==", {}, 403, "API rate limit exceeded for testclient.", True),
+        ("Basic eDp5", {"X-GitHub-Api-Version": "1999-01-01"}, 403, "API rate limit", True),
+        ("Basic eDp5", {"X-GitHub-Api-Version": "2022-11-28"}, 403, "API rate limit", True),
+        ("Digest x", {}, 401, "Requires authentication", False),
+        ("Basic\teDp5", {}, 401, "Requires authentication", False),
+    ],
+)
+def test_github_code_search_answers_an_unparseable_caller_from_its_zero_window(
+    gh_client, value, extra, status, message, five
+):
+    """Code search refuses a `Basic` value naming no token with the 403 of its `code_search` window
+    at `limit: 0`, uncounted and with no version echo, where `Digest x` and a tab after `Basic` stay
+    the 401 with none of the five (see `backlot.routers.github.rate_limit_refusal`)."""
+    from backlot.routers import github as gh
+
+    c, _ = gh_client
+    headers = {"Authorization": value, **extra}
+    for params in ({"q": "x"}, {"q": "x"}, {}):
+        r = c.get("/github/search/code", params=params, headers=headers)
+        assert r.status_code == status
+        assert r.json()["message"].startswith(message)
+        assert r.headers.get("x-github-api-version-selected") is None
+        if five:
+            assert _ratelimit(r) == {
+                "limit": "0",
+                "remaining": "0",
+                "used": "0",
+                "reset": _ratelimit(r)["reset"],
+                "resource": "code_search",
+            }
+            assert r.json()["documentation_url"] == gh.BASIC_RATE_LIMIT_EXCEEDED_DOCS
+            assert r.json()["status"] == "403"
+        else:
+            assert not any(n.startswith("x-ratelimit-") for n in r.headers)
+
+
+@pytest.mark.parametrize(
+    "value, docs",
+    [
+        ("Basic eDp5", "BASIC_RATE_LIMIT_EXCEEDED_DOCS"),
+        ("Digest x", "TOKEN_RATE_LIMIT_EXCEEDED_DOCS"),
+        ("Bearer\tnope", "TOKEN_RATE_LIMIT_EXCEEDED_DOCS"),
+        (
+            "Basic\t" + base64.b64encode(b"x:" + b"a" * 40).decode(),
+            "TOKEN_RATE_LIMIT_EXCEEDED_DOCS",
+        ),
+    ],
+)
+@pytest.mark.parametrize("path", ["/github/repos/{org}/gateway", "/github/user/repos"])
+def test_github_an_unparseable_callers_spent_window_403_carries_the_tokens_sentence(
+    tmp_path, monkeypatch, value, docs, path
+):
+    """Once the window such values share is spent, its 403 is the anonymous caller's sentence and
+    then the token's, with a `status` and the `documentation_url` of the value's kind."""
+    from backlot.routers import github as gh
+
+    with corpus_client(tmp_path, []) as (c, _):
+        monkeypatch.setitem(
+            gh.RATE_LIMITS, "core", gh._ResourceLimit(1, 5000, gh.RATE_LIMIT_WINDOW)
+        )
+        assert c.get("/github/user/repos").status_code == 401
+        anonymous = c.get("/github/user/repos")
+        assert anonymous.status_code == 403
+        assert c.get("/github/user/repos", headers={"Authorization": "Foo bar"}).status_code == 401
+        r = c.get(path.format(org="psf"), headers={"Authorization": value})
+        assert r.status_code == 403
+        _assert_unparseable_refusal(r, anonymous, getattr(gh, docs))

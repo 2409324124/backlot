@@ -196,7 +196,10 @@ paragraph above counts in that window get their own 401 once it is spent, as wit
 space follows the scheme (2026-10-26). The refused request is not itself counted, which is why
 `used` holds at `limit` rather than climbing past it. The body differs by caller: two members
 (`message`, `documentation_url`) for a caller with no credential, three (`status` besides) for a
-token, each with its own `documentation_url`. `BACKLOT_GITHUB_ENFORCE_RATE_LIMITS` turns the refusal
+token, each with its own `documentation_url`, and three for an `Authorization` real cannot parse,
+the anonymous sentence followed by the token's. Such a value has a `code_search` window of its own
+at `limit: 0`, so code search answers a `Basic` value naming no token with that 403 at once
+(2026-10-26). `BACKLOT_GITHUB_ENFORCE_RATE_LIMITS` turns the refusal
 off (see [configuration](configuration.md#github)). `GET /rate_limit` reports the same windows, does
 not count, and is never refused — the one route a client reads its way out of a spent window with;
 `/rate_limit/` asked with no `Authorization` header is a plain-text `404 Not Found` that carries
