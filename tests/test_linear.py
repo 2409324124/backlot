@@ -27,6 +27,7 @@ from backlot.graphql.body import node_json
 from tests._helpers import (
     SWEPT_BYTES,
     Chunked,
+    Matching,
     WithTheKey,
     build_corpus,
     client_for,
@@ -742,7 +743,7 @@ def _unknown_id(root: str, id_: str, message: str, presentable: str, row: str):
             "userPresentableMessage": presentable,
         },
     }
-    answer = node_json({"errors": [error], "data": None})
+    answer = node_json({"errors": [error], "data": None}) + b"\n"
     return pytest.param(json.dumps(body).encode(), WithTheKey(answer, 200), id=row)
 
 
@@ -946,7 +947,7 @@ def _apollo(message: bytes) -> bytes:
     JSON-escaped."""
     return (
         b'{"errors":[{"message":"%s","extensions":{"http":{"status":400,"headers":{}},'
-        b'"code":"BAD_REQUEST","type":"graphql error","userError":true}}]}' % message
+        b'"code":"BAD_REQUEST","type":"graphql error","userError":true}}]}\n' % message
     )
 
 
@@ -966,8 +967,8 @@ _BATCHING = _apollo(b"Operation batching disabled.")
 # `extensions.http.status` names, 400 for an error naming neither and 200 for an answer with no
 # `errors` (`_status`), or None where Linear served the query with the key and answered 401 without
 # one, as `backlot.graphql.body` and `backlot.graphql.v8_json` read them. A `WithTheKey` row draws
-# the 401 without the key. Apollo Server's envelopes are api.linear.app's, but for the newline that
-# ends each there.
+# the 401 without the key. Apollo Server's envelopes, each ending in a newline, are
+# api.linear.app's.
 _LINEAR_BODIES = [
     pytest.param(
         b"{",
@@ -1750,28 +1751,28 @@ _LINEAR_BODIES = [
         + b"0" * 64
         + b'"}}}',
         b'{"errors":[{"message":"Internal server error","extensions":{"http":{"status":400,'
-        b'"headers":{}},"code":"INTERNAL_SERVER_ERROR","type":"internal error","userError":false}}]}',
+        b'"headers":{}},"code":"INTERNAL_SERVER_ERROR","type":"internal error","userError":false}}]}\n',
         id="a persisted query's hash that does not match",
     ),
     pytest.param(
         b'{"query":"{ __typename }","extensions":{"persistedQuery":{"version":2,"sha256Hash":"'
         + b"0" * 64
         + b'"}}}',
-        b'{"errors":[{"message":"Internal server error","extensions":{"http":{"status":400,"headers":{}},"code":"INTERNAL_SERVER_ERROR","type":"internal error","userError":false}}]}',
+        b'{"errors":[{"message":"Internal server error","extensions":{"http":{"status":400,"headers":{}},"code":"INTERNAL_SERVER_ERROR","type":"internal error","userError":false}}]}\n',
         id="a persisted query's version 2",
     ),
     pytest.param(
         b'{"extensions":{"persistedQuery":{"version":1,"sha256Hash":"' + b"1" * 64 + b'"}}}',
         b'{"errors":[{"message":"PersistedQueryNotFound","extensions":{"http":{"status":200,'
         b'"headers":{}},"code":"PERSISTED_QUERY_NOT_FOUND","type":"graphql error",'
-        b'"userError":true}}]}',
+        b'"userError":true}}]}\n',
         id="a persisted query's hash alone",
     ),
     pytest.param(
         b'{"query":null}',
         b'{"errors":[{"message":"GraphQL operations must contain a non-empty `query` or a '
         b'`persistedQuery` extension.","extensions":{"http":{"status":400,"headers":{}},'
-        b'"code":"INVALID_INPUT","type":"invalid input","userError":true}}]}',
+        b'"code":"INVALID_INPUT","type":"invalid input","userError":true}}]}\n',
         id="a query of null",
     ),
     pytest.param(
@@ -1780,7 +1781,7 @@ _LINEAR_BODIES = [
         + b'"}}}',
         b'{"errors":[{"message":"Syntax Error: Unexpected <EOF>.","locations":[{"line":1,'
         b'"column":1}],"extensions":{"http":{"status":400,"headers":{}},'
-        b'"code":"GRAPHQL_PARSE_FAILED","type":"graphql error","userError":true}}]}',
+        b'"code":"GRAPHQL_PARSE_FAILED","type":"graphql error","userError":true}}]}\n',
         id="a persisted query's hash matching an empty query",
     ),
     pytest.param(
@@ -1790,21 +1791,21 @@ _LINEAR_BODIES = [
         b'{"query":"{"}',
         b'{"errors":[{"message":"Syntax Error: Expected Name, found <EOF>.","locations":[{"line":1,'
         b'"column":2}],"extensions":{"http":{"status":400,"headers":{}},'
-        b'"code":"GRAPHQL_PARSE_FAILED","type":"graphql error","userError":true}}]}',
+        b'"code":"GRAPHQL_PARSE_FAILED","type":"graphql error","userError":true}}]}\n',
         id="a document that does not parse",
     ),
     pytest.param(
         b'{"query":"{ nosuch }"}',
         b'{"errors":[{"message":"Cannot query field \\"nosuch\\" on type \\"Query\\".",'
         b'"locations":[{"line":1,"column":3}],"extensions":{"http":{"status":400,"headers":{}},'
-        b'"code":"GRAPHQL_VALIDATION_FAILED","type":"graphql error","userError":true}}]}',
+        b'"code":"GRAPHQL_VALIDATION_FAILED","type":"graphql error","userError":true}}]}\n',
         id="a document that does not validate",
     ),
     pytest.param(
         b'{"query":"query A { __typename } query B { __typename }"}',
         b'{"errors":[{"message":"operation does not exist","extensions":{"type":"invalid input",'
         b'"code":"INPUT_ERROR","statusCode":400,"userError":true,"userPresentableMessage":"The '
-        b'operation does not exist on the query.","http":{"status":400}}}]}',
+        b'operation does not exist on the query.","http":{"status":400}}}]}\n',
         id="two operations and no operationName",
     ),
     pytest.param(
@@ -1812,33 +1813,33 @@ _LINEAR_BODIES = [
         WithTheKey(
             b'{"errors":[{"message":"Variable \\"$b\\" of required type \\"Boolean!\\" was not '
             b'provided.","locations":[{"line":1,"column":7}],"extensions":{"code":"BAD_USER_INPUT",'
-            b'"type":"graphql error","userError":true}}]}'
+            b'"type":"graphql error","userError":true}}]}\n'
         ),
         id="a variable not provided",
     ),
     pytest.param(
         b'{"query":"{ __typename }","operationName":"Z"}',
-        b'{"errors":[{"message":"operation does not exist","extensions":{"type":"invalid input","code":"INPUT_ERROR","statusCode":400,"userError":true,"userPresentableMessage":"The operation \'Z\' does not exist on the query.","http":{"status":400}}}]}',
+        b'{"errors":[{"message":"operation does not exist","extensions":{"type":"invalid input","code":"INPUT_ERROR","statusCode":400,"userError":true,"userPresentableMessage":"The operation \'Z\' does not exist on the query.","http":{"status":400}}}]}\n',
         id="an operationName no operation has",
     ),
     pytest.param(
         b'{"query":"query A { __typename }","operationName":""}',
-        b'{"errors":[{"message":"operation does not exist","extensions":{"type":"invalid input","code":"INPUT_ERROR","statusCode":400,"userError":true,"userPresentableMessage":"The operation does not exist on the query.","http":{"status":400}}}]}',
+        b'{"errors":[{"message":"operation does not exist","extensions":{"type":"invalid input","code":"INPUT_ERROR","statusCode":400,"userError":true,"userPresentableMessage":"The operation does not exist on the query.","http":{"status":400}}}]}\n',
         id="an empty operationName",
     ),
     pytest.param(
         b'{"query":{"kind":"Document"}}',
-        b'{"errors":[{"message":"GraphQL queries must be strings. It looks like you\'re sending the internal graphql-js representation of a parsed query in your request instead of a request in the GraphQL query language. You can convert an AST to a string using the `print` function from `graphql`, or use a client like `apollo-client` which converts the internal representation to a string for you.","extensions":{"http":{"status":400,"headers":{}},"code":"BAD_REQUEST","type":"graphql error","userError":true}}]}',
+        b'{"errors":[{"message":"GraphQL queries must be strings. It looks like you\'re sending the internal graphql-js representation of a parsed query in your request instead of a request in the GraphQL query language. You can convert an AST to a string using the `print` function from `graphql`, or use a client like `apollo-client` which converts the internal representation to a string for you.","extensions":{"http":{"status":400,"headers":{}},"code":"BAD_REQUEST","type":"graphql error","userError":true}}]}\n',
         id="a parsed document",
     ),
     pytest.param(
         b'{"query":false}',
-        b'{"errors":[{"message":"GraphQL operations must contain a non-empty `query` or a `persistedQuery` extension.","extensions":{"http":{"status":400,"headers":{}},"code":"INVALID_INPUT","type":"invalid input","userError":true}}]}',
+        b'{"errors":[{"message":"GraphQL operations must contain a non-empty `query` or a `persistedQuery` extension.","extensions":{"http":{"status":400,"headers":{}},"code":"INVALID_INPUT","type":"invalid input","userError":true}}]}\n',
         id="a query of false",
     ),
     pytest.param(
         b'{"query":"{ __typename }","variables":"[1]"}',
-        b'{"errors":[{"message":"`variables` in a POST body must be an object if provided.","extensions":{"http":{"status":400,"headers":{}},"code":"BAD_REQUEST","type":"graphql error","userError":true}}]}',
+        b'{"errors":[{"message":"`variables` in a POST body must be an object if provided.","extensions":{"http":{"status":400,"headers":{}},"code":"BAD_REQUEST","type":"graphql error","userError":true}}]}\n',
         id="variables of '[1]'",
     ),
     pytest.param(
@@ -1854,7 +1855,7 @@ _LINEAR_BODIES = [
     pytest.param(
         b'{"query":"query($b: Boolean!) { __typename @include(if: $b) }","variables":"{\\"b\\":5}"}',
         WithTheKey(
-            b'{"errors":[{"message":"Variable \\"$b\\" got invalid value 5; Boolean cannot represent a non boolean value: 5","locations":[{"line":1,"column":7}],"extensions":{"code":"BAD_USER_INPUT","type":"graphql error","userError":true}}]}'
+            b'{"errors":[{"message":"Variable \\"$b\\" got invalid value 5; Boolean cannot represent a non boolean value: 5","locations":[{"line":1,"column":7}],"extensions":{"code":"BAD_USER_INPUT","type":"graphql error","userError":true}}]}\n'
         ),
         id="variables of a string its operation refuses",
     ),
@@ -1868,7 +1869,7 @@ _LINEAR_BODIES = [
         b'"variables":{"v":[%s]}}' % b",".join([b"true"] * 60),
         WithTheKey(
             b'{"errors":[%s,{"message":"Internal server error","extensions":{"code":'
-            b'"INTERNAL_SERVER_ERROR","type":"internal error","userError":false}}]}'
+            b'"INTERNAL_SERVER_ERROR","type":"internal error","userError":false}}]}\n'
             % b",".join(
                 b'{"message":"Variable \\"$v\\" got invalid value true at \\"v[%d]\\"; ID cannot '
                 b'represent value: true","locations":[{"line":1,"column":7}],"extensions":{"code":'
@@ -1880,18 +1881,18 @@ _LINEAR_BODIES = [
     ),
     pytest.param(
         b'{"query":"mutation { __typename }"}',
-        WithTheKey(b'{"data":{"__typename":"Mutation"}}', 200),
+        WithTheKey(b'{"data":{"__typename":"Mutation"}}\n', 200),
         id="a mutation of __typename",
     ),
     pytest.param(
         b'{"query":"subscription S { __typename }"}',
-        b'{"errors":[{"message":"Subscription \\"S\\" must not select an introspection top level field.","locations":[{"line":1,"column":18}],"extensions":{"http":{"status":400,"headers":{}},"code":"GRAPHQL_VALIDATION_FAILED","type":"graphql error","userError":true}}]}',
+        b'{"errors":[{"message":"Subscription \\"S\\" must not select an introspection top level field.","locations":[{"line":1,"column":18}],"extensions":{"http":{"status":400,"headers":{}},"code":"GRAPHQL_VALIDATION_FAILED","type":"graphql error","userError":true}}]}\n',
         id="a subscription of __typename",
     ),
     pytest.param(
         b'{"query":"query($x: String = \\"a\\") { issue(id: $x) { id } }","variables":{"x":null}}',
         WithTheKey(
-            b'{"errors":[{"message":"Internal server error","path":["issue"],"locations":[{"line":1,"column":37}],"extensions":{"code":"INTERNAL_SERVER_ERROR","type":"internal error","userError":false}}],"data":null}',
+            b'{"errors":[{"message":"Internal server error","path":["issue"],"locations":[{"line":1,"column":37}],"extensions":{"code":"INTERNAL_SERVER_ERROR","type":"internal error","userError":false}}],"data":null}\n',
             200,
         ),
         id="null for a non-null argument",
@@ -1899,7 +1900,7 @@ _LINEAR_BODIES = [
     pytest.param(
         b'{"query":"query($v: Boolean = true) { __typename @include(if: $v) }","variables":{"v":null}}',
         WithTheKey(
-            b'{"errors":[{"message":"Internal server error","locations":[{"line":1,"column":53}],"extensions":{"code":"INTERNAL_SERVER_ERROR","type":"internal error","userError":false}}],"data":null}',
+            b'{"errors":[{"message":"Internal server error","locations":[{"line":1,"column":53}],"extensions":{"code":"INTERNAL_SERVER_ERROR","type":"internal error","userError":false}}],"data":null}\n',
             200,
         ),
         id="null for a directive's argument at the root",
@@ -1907,7 +1908,7 @@ _LINEAR_BODIES = [
     pytest.param(
         b'{"query":"query($x: String = \\"a\\") { team(id: $x) { id } }","variables":{"x":null}}',
         WithTheKey(
-            b'{"errors":[{"message":"Internal server error","path":["team"],"locations":[{"line":1,"column":36}],"extensions":{"code":"INTERNAL_SERVER_ERROR","type":"internal error","userError":false}}],"data":null}',
+            b'{"errors":[{"message":"Internal server error","path":["team"],"locations":[{"line":1,"column":36}],"extensions":{"code":"INTERNAL_SERVER_ERROR","type":"internal error","userError":false}}],"data":null}\n',
             200,
         ),
         id="null for team's non-null id",
@@ -1915,7 +1916,7 @@ _LINEAR_BODIES = [
     pytest.param(
         b'{"query":"query($v: ID = \\"a\\") { issues(filter: {id: {in: [$v]}}) { nodes { id } } }","variables":{"v":null}}',
         WithTheKey(
-            b'{"errors":[{"message":"Internal server error","path":["issues"],"locations":[{"line":1,"column":38}],"extensions":{"code":"INTERNAL_SERVER_ERROR","type":"internal error","userError":false}}],"data":null}',
+            b'{"errors":[{"message":"Internal server error","path":["issues"],"locations":[{"line":1,"column":38}],"extensions":{"code":"INTERNAL_SERVER_ERROR","type":"internal error","userError":false}}],"data":null}\n',
             200,
         ),
         id="null inside a filter's list",
@@ -1923,7 +1924,7 @@ _LINEAR_BODIES = [
     pytest.param(
         b'{"query":"query($v: Boolean = true) { viewer { id @include(if: $v) } }","variables":{"v":null}}',
         WithTheKey(
-            b'{"errors":[{"message":"Internal server error","path":["viewer"],"locations":[{"line":1,"column":54}],"extensions":{"code":"INTERNAL_SERVER_ERROR","type":"internal error","userError":false}}],"data":null}',
+            b'{"errors":[{"message":"Internal server error","path":["viewer"],"locations":[{"line":1,"column":54}],"extensions":{"code":"INTERNAL_SERVER_ERROR","type":"internal error","userError":false}}],"data":null}\n',
             200,
         ),
         id="null for a directive one level down",
@@ -1931,76 +1932,76 @@ _LINEAR_BODIES = [
     pytest.param(
         b'{"query":"query($x: String = \\"a\\") # a\xe2\x80\xa8b\\n{ issue(id: $x) { id } }","variables":{"x":null}}',
         WithTheKey(
-            b'{"errors":[{"message":"Internal server error","path":["issue"],"locations":[{"line":2,"column":13}],"extensions":{"code":"INTERNAL_SERVER_ERROR","type":"internal error","userError":false}}],"data":null}',
+            b'{"errors":[{"message":"Internal server error","path":["issue"],"locations":[{"line":2,"column":13}],"extensions":{"code":"INTERNAL_SERVER_ERROR","type":"internal error","userError":false}}],"data":null}\n',
             200,
         ),
         id="null for a non-null argument after U+2028 in a comment",
     ),
     pytest.param(
         b'{"query":"{ __schema { queryType { name } } }"}',
-        b'{"data":{"__schema":{"queryType":{"name":"Query"}}}}',
+        b'{"data":{"__schema":{"queryType":{"name":"Query"}}}}\n',
         id="introspection",
     ),
     pytest.param(
         b'{"query":"{ __type(name: \\"Query\\") { name } }"}',
-        b'{"data":{"__type":{"name":"Query"}}}',
+        b'{"data":{"__type":{"name":"Query"}}}\n',
         id="__type",
     ),
     pytest.param(
         b'{"query":"{ s: __schema { queryType { name } } }"}',
-        b'{"data":{"s":{"queryType":{"name":"Query"}}}}',
+        b'{"data":{"s":{"queryType":{"name":"Query"}}}}\n',
         id="an alias of __schema",
     ),
     pytest.param(
         b'{"query":"{ __schema { queryType { name } } __type(name: \\"Issue\\") { name } }"}',
-        b'{"data":{"__schema":{"queryType":{"name":"Query"}},"__type":{"name":"Issue"}}}',
+        b'{"data":{"__schema":{"queryType":{"name":"Query"}},"__type":{"name":"Issue"}}}\n',
         id="__schema and __type",
     ),
     pytest.param(
         b'{"query":"{ ...F } fragment F on Query { __schema { queryType { name } } }"}',
-        b'{"data":{"__schema":{"queryType":{"name":"Query"}}}}',
+        b'{"data":{"__schema":{"queryType":{"name":"Query"}}}}\n',
         id="__schema in a fragment",
     ),
     pytest.param(
         b'{"query":"{ ... on Query { __schema { queryType { name } } } }"}',
-        b'{"data":{"__schema":{"queryType":{"name":"Query"}}}}',
+        b'{"data":{"__schema":{"queryType":{"name":"Query"}}}}\n',
         id="__schema in an inline fragment",
     ),
     pytest.param(
         b'{"query":"{ __schema @skip(if: false) { queryType { name } } }"}',
-        b'{"data":{"__schema":{"queryType":{"name":"Query"}}}}',
+        b'{"data":{"__schema":{"queryType":{"name":"Query"}}}}\n',
         id="__schema under @skip(if: false)",
     ),
     pytest.param(
         b'{"query":"query Q { __schema { queryType { name } } }"}',
-        b'{"data":{"__schema":{"queryType":{"name":"Query"}}}}',
+        b'{"data":{"__schema":{"queryType":{"name":"Query"}}}}\n',
         id="a named query of __schema",
     ),
     pytest.param(
         b'{"query":"query A { __schema { queryType { name } } } query B { viewer { id } }","operationName":"A"}',
-        b'{"data":{"__schema":{"queryType":{"name":"Query"}}}}',
+        b'{"data":{"__schema":{"queryType":{"name":"Query"}}}}\n',
         id="the introspection operationName chose",
     ),
     pytest.param(
         b'{"query":"query($b: Boolean!) { __schema @include(if: $b) { queryType { name } } }"}',
-        b'{"errors":[{"message":"Variable \\"$b\\" of required type \\"Boolean!\\" was not provided.","locations":[{"line":1,"column":7}],"extensions":{"code":"BAD_USER_INPUT","type":"graphql error","userError":true}}]}',
+        b'{"errors":[{"message":"Variable \\"$b\\" of required type \\"Boolean!\\" was not provided.","locations":[{"line":1,"column":7}],"extensions":{"code":"BAD_USER_INPUT","type":"graphql error","userError":true}}]}\n',
         id="introspection with a variable not provided",
     ),
     pytest.param(
         b'{"query":"{ __typename __schema { queryType { name } } }"}',
         WithTheKey(
-            b'{"data":{"__typename":"Query","__schema":{"queryType":{"name":"Query"}}}}', 200
+            b'{"data":{"__typename":"Query","__schema":{"queryType":{"name":"Query"}}}}\n', 200
         ),
         id="__typename beside __schema",
     ),
     pytest.param(
         b'{"query":"{ __schema { queryType { name } } viewer @skip(if: true) { id } }"}',
-        WithTheKey(b'{"data":{"__schema":{"queryType":{"name":"Query"}}}}', 200),
+        WithTheKey(b'{"data":{"__schema":{"queryType":{"name":"Query"}}}}\n', 200),
         id="__schema beside a skipped field",
     ),
     pytest.param(
         b'{"query":"{ viewer @skip(if: true) { id } }"}',
-        WithTheKey(b'{"data":{}}', 200),
+        WithTheKey(b'{"data":{}}\n', 200),
         id="a skipped field alone",
     ),
     pytest.param(
@@ -2016,25 +2017,25 @@ _LINEAR_BODIES = [
     pytest.param(
         b'{"query":"{ __schema { queryType { name } } ...F } fragment F on Query { __typename }"}',
         WithTheKey(
-            b'{"data":{"__schema":{"queryType":{"name":"Query"}},"__typename":"Query"}}', 200
+            b'{"data":{"__schema":{"queryType":{"name":"Query"}},"__typename":"Query"}}\n', 200
         ),
         id="__schema and __typename in a fragment",
     ),
     pytest.param(
         b'{"query":"{ ... on Query { __schema { queryType { name } } } ...F } fragment F on Query { __typename }"}',
         WithTheKey(
-            b'{"data":{"__schema":{"queryType":{"name":"Query"}},"__typename":"Query"}}', 200
+            b'{"data":{"__schema":{"queryType":{"name":"Query"}},"__typename":"Query"}}\n', 200
         ),
         id="__typename in a fragment beside an inline __schema",
     ),
     pytest.param(
         b'{"query":"{ ...F }"}',
-        b'{"errors":[{"message":"Unknown fragment \\"F\\".","locations":[{"line":1,"column":6}],"extensions":{"http":{"status":400,"headers":{}},"code":"GRAPHQL_VALIDATION_FAILED","type":"graphql error","userError":true}}]}',
+        b'{"errors":[{"message":"Unknown fragment \\"F\\".","locations":[{"line":1,"column":6}],"extensions":{"http":{"status":400,"headers":{}},"code":"GRAPHQL_VALIDATION_FAILED","type":"graphql error","userError":true}}]}\n',
         id="a fragment not defined",
     ),
     pytest.param(
         b'{"query":"fragment F on Query { ...F } { ...F }"}',
-        b'{"errors":[{"message":"Cannot spread fragment \\"F\\" within itself.","locations":[{"line":1,"column":23}],"extensions":{"http":{"status":400,"headers":{}},"code":"GRAPHQL_VALIDATION_FAILED","type":"graphql error","userError":true}}]}',
+        b'{"errors":[{"message":"Cannot spread fragment \\"F\\" within itself.","locations":[{"line":1,"column":23}],"extensions":{"http":{"status":400,"headers":{}},"code":"GRAPHQL_VALIDATION_FAILED","type":"graphql error","userError":true}}]}\n',
         id="a fragment that spreads itself",
     ),
     *_UNKNOWN_IDS,
@@ -5397,7 +5398,7 @@ _API_KEY_AS_BEARER = (
 _UNAUTHENTICATED = (
     b'{"errors":[{"message":"Authentication required, not authenticated","extensions":{"type":"a'
     b'uthentication error","code":"AUTHENTICATION_ERROR","statusCode":401,"userError":true,"user'
-    b'PresentableMessage":"You need to authenticate to access this operation.","meta":{},"http":{"status":401}}}]}'
+    b'PresentableMessage":"You need to authenticate to access this operation.","meta":{},"http":{"status":401}}}]}\n'
 )
 # `Authorization` values, `{t}` for an API key that resolves, and the status Linear gave each: 200
 # serving the query, 400 being `_API_KEY_AS_BEARER` and 401 `_UNAUTHENTICATED`.
@@ -5939,44 +5940,49 @@ def test_linear_backward_pages_name_the_served_nodes(backward_pages, root):
 
 # --- the load balancer, Express, cors and Apollo Server in front of Linear's GraphQL --------------
 # The request, the credential (`_LINEAR_CREDENTIALS`) and the answer api.linear.app gave it, as
-# `graphql` records the layers it was measured through: its status, its media type and its body but
-# for the newline Apollo Server ends one with, `_TYPENAME_DATA` where it served the query, and none
-# for a `HEAD`.
+# `graphql` records the layers it was measured through: its status, its media type and its body,
+# `_TYPENAME_DATA` where it served the query, and none for a `HEAD`.
 _CSRF = (
     b'{"errors":[{"message":"This operation has been blocked as a potential Cross-Site Request'
     b" Forgery (CSRF). Please either specify a 'content-type' header (with a type that is not one"
     b" of application/x-www-form-urlencoded, multipart/form-data, text/plain) or provide a"
     b" non-empty value for one of the following headers: x-apollo-operation-name,"
     b' apollo-require-preflight\\n","extensions":{"http":{"status":400,"headers":{}},"code":"BAD_R'
-    b'EQUEST","type":"graphql error","userError":true}}]}'
+    b'EQUEST","type":"graphql error","userError":true}}]}\n'
 )
 _ONLY_GET_POST = (
     b'{"errors":[{"message":"Apollo Server supports only GET/POST requests.","extensions":{"http":'
-    b'{"status":405,"headers":{}},"code":"BAD_REQUEST","type":"graphql error","userError":true}}]}'
+    b'{"status":405,"headers":{}},"code":"BAD_REQUEST","type":"graphql error","userError":true}}]}\n'
 )
 _GET_MUTATION = (
     b'{"errors":[{"message":"GET requests only support query operations, not mutation operations"'
     b',"extensions":{"http":{"status":405,"headers":{}},"code":"BAD_REQUEST","type":"graphql erro'
-    b'r","userError":true}}]}'
+    b'r","userError":true}}]}\n'
 )
 _NOT_ACCEPTABLE = (
     b'{"errors":[{"message":"An \'accept\' header was provided for this request which does not'
     b" accept application/json; charset=utf-8 or application/graphql-response+json; charset=utf-8"
     b'","extensions":{"http":{"status":406},"code":"BAD_REQUEST","type":"graphql error","userErr'
-    b'or":true}}]}'
+    b'or":true}}]}\n'
 )
 _NO_QUERY = (
     b'{"errors":[{"message":"GraphQL operations must contain a non-empty `query` or a `persistedQ'
     b'uery` extension.","extensions":{"http":{"status":400,"headers":{}},"code":"INVALID_INPUT","'
-    b'type":"invalid input","userError":true}}]}'
+    b'type":"invalid input","userError":true}}]}\n'
 )
-_TYPENAME_DATA = b'{"data":{"__typename":"Query"}}'
+_TYPENAME_DATA = b'{"data":{"__typename":"Query"}}\n'
 _JSON_UTF8 = "application/json; charset=utf-8"
 _GRAPHQL_RESPONSE = "application/graphql-response+json; charset=utf-8"
 _CLOUDFLARE_PAGE = (
     b"<html>\r\n<head><title>%s</title></head>\r\n<body>\r\n<center><h1>%s</h1></center>\r\n"
     b"<hr><center>cloudflare</center>\r\n</body>\r\n</html>\r\n"
 )
+#: The media type and body of Cloudflare's own answer to each method it answers ahead of Linear.
+_CLOUDFLARE_ANSWER = {
+    "TRACE": ("text/html", _CLOUDFLARE_PAGE % ((b"405 Not Allowed",) * 2)),
+    "CONNECT": ("text/plain; charset=UTF-8", b"error code: 1045\n"),
+    "PURGE": ("text/html; charset=UTF-8", _CLOUDFLARE_PAGE % ((b"400 Bad Request",) * 2)),
+}
 _LINEAR_PREFLIGHT = {
     "access-control-allow-origin": "https://example.com",
     "cache-control": "s-maxage=43200",
@@ -6014,10 +6020,56 @@ def _express_404(method: str, path: str) -> bytes:
 def _search_refusal(message: bytes) -> bytes:
     return (
         b'{"errors":[{"message":"%s","extensions":{"http":{"status":400,"headers":{}},"code":"BAD_REQ'
-        b'UEST","type":"graphql error","userError":true}}]}' % message
+        b'UEST","type":"graphql error","userError":true}}]}\n' % message
     )
 
 
+# The headers an answer carries, as `backlot.routers.linear._express_sent`, `express`,
+# `_preflight` and `RequestBudget` record what api.linear.app sent, None for one it did not send.
+_NO_STORE = "private, no-cache, no-store, must-revalidate"
+_EXPOSED = (
+    "Cache-Control,Content-Language,Content-Length,Content-Type,Expires,Last-Modified,Pragma,"
+    "x-request-id,cf-ray,cf-cache-status,Retry-After"
+)
+_REQUEST_ID = Matching(r"[0-9a-f]{16}-ICN")
+_NOT_COUNTED = {"x-ratelimit-requests-limit": None, "x-ratelimit-requests-remaining": None}
+
+
+def _sent(etag, **more):
+    """What Express's answers carry: ``etag``, the rest of `_express_sent`'s, none of `cors`'s
+    for a request without `Origin`, no `nosniff`, and ``more``, `_` in a name standing for `-`."""
+    return {
+        "cache-control": _NO_STORE,
+        "etag": etag,
+        "vary": "Accept-Encoding",
+        "x-request-id": _REQUEST_ID,
+        "access-control-allow-origin": None,
+        "access-control-expose-headers": None,
+        "x-content-type-options": None,
+    } | {name.replace("_", "-"): value for name, value in more.items()}
+
+
+def _counted(limit):
+    return {
+        "x-ratelimit-requests-limit": str(limit),
+        "x-ratelimit-requests-remaining": Matching(r"[0-9]+"),
+        "x-ratelimit-requests-reset": Matching(r"[0-9]{13}"),
+    }
+
+
+def _cors(origin="https://example.com"):
+    return {
+        "access-control-allow-origin": origin,
+        "access-control-expose-headers": _EXPOSED,
+        "vary": "Origin, Accept-Encoding",
+    }
+
+
+#: Express's 404 page goes with no `Content-Length`, so on the wire in chunks (`_CHUNKED`).
+_NO_LENGTH = {"content-length": None}
+_CHUNKED = _NO_LENGTH | {"transfer-encoding": "chunked"}
+_ETAG_OF_TYPENAME = 'W/"20-/8NdYwgmGsmmlrq5Nh8mH1T+tAs"'
+_ETAG_OF_THE_BEARER_400 = 'W/"f9-BDIWTD84v19kyk2Xj/zxwnhRq74"'
 _LINEAR_HTTP = [
     # Cloudflare, then Linear's load balancer, ahead of everything; then Apollo Server's 405 for
     # each other method.
@@ -6110,9 +6162,13 @@ _LINEAR_HTTP = [
             None,
             b"",
             id=f"preflight, {c}",
-            answered=_LINEAR_PREFLIGHT,
+            answered=_LINEAR_PREFLIGHT | e,
         )
-        for c in ("key", "none", "Bearer key")
+        for c, e in (
+            ("key", {}),
+            ("none", {"x-request-id": _REQUEST_ID, "etag": None, "x-content-type-options": None}),
+            ("Bearer key", {}),
+        )
     ),
     http_row(
         "OPTIONS",
@@ -6246,6 +6302,18 @@ _LINEAR_HTTP = [
     http_row("DELETE", "", (), None, "nope", 400, _JSON_UTF8, _CSRF, id="DELETE, unpreflighted"),
     # A POST's content type: read as JSON, refused as a request a browser sends unpreflighted, or
     # passed with nothing read.
+    http_row(
+        "POST",
+        "",
+        (("Content-Type", "text/plain"),),
+        _TYPENAME,
+        "key",
+        400,
+        _JSON_UTF8,
+        _CSRF,
+        id="'text/plain'",
+        answered=_sent('W/"1e1-Pj6jukFvCDT/ZBGD/LVdheKiTtk"'),
+    ),
     *(
         http_row(
             "POST",
@@ -6259,7 +6327,6 @@ _LINEAR_HTTP = [
             id=f"{t!r}{i}",
         )
         for t, h, s, a, i in (
-            ("text/plain", (), 400, _CSRF, ""),
             ("text/plain", _P, 400, _NO_KEYS, ", preflight"),
             ("TEXT/PLAIN;X=Y", (), 400, _CSRF, ""),
             ("application/x-www-form-urlencoded", (), 400, _CSRF, ""),
@@ -6278,10 +6345,32 @@ _LINEAR_HTTP = [
     ),
     http_row("POST", "", (), _TYPENAME, "key", 400, _JSON_UTF8, _CSRF, id="no type"),
     http_row("POST", "", _P, _TYPENAME, "key", 400, _JSON_UTF8, _NO_KEYS, id="no type, preflight"),
-    http_row("POST", "", _J, b"", "key", 400, _JSON_UTF8, _NO_KEYS, id="JSON, empty"),
+    http_row(
+        "POST",
+        "",
+        _J,
+        b"",
+        "key",
+        400,
+        _JSON_UTF8,
+        _NO_KEYS,
+        id="JSON, empty",
+        answered=_sent('W/"cf-hkw7NmLY8eURf0zpzWMxpTvnOjM"'),
+    ),
     # A GET: its query string, Apollo Server's 405 for one that is not a query, ahead of the
     # credential.
-    http_row("GET", _Q, _P, None, "key", 200, _JSON_UTF8, _TYPENAME_DATA, id="GET"),
+    http_row(
+        "GET",
+        _Q,
+        _P,
+        None,
+        "key",
+        200,
+        _JSON_UTF8,
+        _TYPENAME_DATA,
+        id="GET",
+        answered=_sent(_ETAG_OF_TYPENAME) | _counted(2500),
+    ),
     http_row("GET", _Q, (), None, "key", 400, _JSON_UTF8, _CSRF, id="GET, unpreflighted"),
     http_row("GET", _Q, _J, None, "key", 200, _JSON_UTF8, _TYPENAME_DATA, id="GET, JSON"),
     http_row(
@@ -6393,9 +6482,12 @@ _LINEAR_HTTP = [
             _JSON_UTF8,
             _GET_MUTATION,
             id=f"GET mutation, {c}",
-            answered={"allow": "POST"},
+            answered=e,
         )
-        for c in ("key", "none")
+        for c, e in (
+            ("key", _sent('W/"ce-z0YB89QJgWlJGjEG4cmlKGgjXcg"', allow="POST")),
+            ("none", {"allow": "POST"}),
+        )
     ),
     http_row(
         "GET",
@@ -6419,7 +6511,7 @@ _LINEAR_HTTP = [
         _JSON_UTF8,
         b"",
         id="HEAD",
-        answered={"allow": "GET, POST"},
+        answered=_sent('W/"b9-gq5kxI+usdfwWz5UDzUMGmXMbSE"', allow="GET, POST"),
     ),
     http_row(
         "HEAD",
@@ -6433,10 +6525,21 @@ _LINEAR_HTTP = [
         id="HEAD, text/plain",
     ),
     # `apollo_http.response_type` and its 406, the 401 among the answers it replaces.
+    http_row(
+        "POST",
+        "",
+        (*_J, ("Accept", "text/html")),
+        _TYPENAME,
+        "key",
+        406,
+        _JSON_UTF8,
+        _NOT_ACCEPTABLE,
+        id="Accept 'text/html'",
+        answered=_sent('W/"118-W8enG7eCxHkz3I26tylt6TX1rMM"') | _NOT_COUNTED,
+    ),
     *(
         http_row("POST", "", (*_J, ("Accept", a)), _TYPENAME, "key", s, t, b, id=f"Accept {a!r}")
         for a, s, t, b in (
-            ("text/html", 406, _JSON_UTF8, _NOT_ACCEPTABLE),
             ("application/json;q=0", 406, _JSON_UTF8, _NOT_ACCEPTABLE),
             ("application/json;q", 406, _JSON_UTF8, _NOT_ACCEPTABLE),
             ("application/json; charset=latin1", 406, _JSON_UTF8, _NOT_ACCEPTABLE),
@@ -6545,13 +6648,35 @@ _LINEAR_HTTP = [
         id="GET, Accept text/html then graphql-response",
     ),
     # `cors` lets any other method carrying `Origin` through; an API key under `Bearer` on DELETE.
+    http_row(
+        "POST",
+        "",
+        (*_J, *_ORIGIN),
+        _TYPENAME,
+        "key",
+        200,
+        _JSON_UTF8,
+        _TYPENAME_DATA,
+        id="POST, Origin",
+        answered=_sent(_ETAG_OF_TYPENAME) | _cors(),
+    ),
+    http_row(
+        "PUT",
+        "",
+        (*_J, *_ORIGIN),
+        _TYPENAME,
+        "key",
+        405,
+        _JSON_UTF8,
+        _ONLY_GET_POST,
+        id="PUT, Origin",
+        answered=_sent('W/"b9-gq5kxI+usdfwWz5UDzUMGmXMbSE"', allow="GET, POST") | _cors(),
+    ),
     *(
         http_row(m, t, (*h, *_ORIGIN), b, "key", s, _JSON_UTF8, a, id=f"{m}, Origin")
         for m, t, h, b, s, a in (
-            ("POST", "", _J, _TYPENAME, 200, _TYPENAME_DATA),
             ("GET", _Q, _P, None, 200, _TYPENAME_DATA),
             ("HEAD", _Q, _P, None, 405, b""),
-            ("PUT", "", _J, _TYPENAME, 405, _ONLY_GET_POST),
             ("PATCH", "", _J, _TYPENAME, 405, _ONLY_GET_POST),
             ("DELETE", "", _J, _TYPENAME, 405, _ONLY_GET_POST),
         )
@@ -6601,6 +6726,9 @@ _LINEAR_HTTP = [
             ("A-B, c_d", "A-B,c_d"),
             ("a\t", "a"),
             ("a b", "a b"),
+            ("a\xa0", "a"),
+            ("\xa0a", "a"),
+            ("a\x85", "a\x85"),
         )
     ),
     http_row(
@@ -6724,7 +6852,7 @@ _LINEAR_HTTP = [
         _JSON_UTF8,
         b'{"errors":[{"message":"operation does not exist","extensions":{"type":"invalid input","code":"INPUT_ERROR",'
         b'"statusCode":400,"userError":true,"userPresentableMessage":"The operation does not exist on the query.",'
-        b'"http":{"status":400}}}]}',
+        b'"http":{"status":400}}}]}\n',
         id="GET, variables {}, operationName empty",
     ),
     # A path Express hands Apollo Server (`routes_to_apollo`) once Linear's front has read it
@@ -6776,8 +6904,19 @@ _LINEAR_HTTP = [
             ("/GRAPHQL", _EXPRESS_API_KEY_AS_BEARER),
             ("//graphql", _EXPRESS_API_KEY_AS_BEARER),
             ("/graph%71l", _EXPRESS_API_KEY_AS_BEARER),
-            ("/nosuch", _EXPRESS_API_KEY_AS_BEARER),
         )
+    ),
+    http_row(
+        "POST",
+        "/nosuch",
+        _J,
+        _TYPENAME,
+        "Bearer key",
+        400,
+        _JSON_UTF8,
+        _EXPRESS_API_KEY_AS_BEARER,
+        id="POST /nosuch, Bearer key",
+        answered=_sent(_ETAG_OF_THE_BEARER_400),
     ),
     http_row(
         "GET",
@@ -6789,9 +6928,21 @@ _LINEAR_HTTP = [
         _JSON_UTF8,
         _EXPRESS_API_KEY_AS_BEARER,
         id="GET /, Bearer key",
+        answered=_sent(_ETAG_OF_THE_BEARER_400, x_content_type_options="nosniff"),
     ),
     *(
-        http_row(m, p, h, b, c, 404, _HTML_UTF8, _express_404(m, echo), id=f"{m} {p}, {c}")
+        http_row(
+            m,
+            p,
+            h,
+            b,
+            c,
+            404,
+            _HTML_UTF8,
+            _express_404(m, echo),
+            id=f"{m} {p}, {c}",
+            answered=_NO_LENGTH,
+        )
         for m, p, h, b, c, echo in (
             ("POST", "/graphqlx", _J, _TYPENAME, "key", "/graphqlx"),
             ("POST", "/graphql.json", _J, _TYPENAME, "key", "/graphql.json"),
@@ -6801,7 +6952,6 @@ _LINEAR_HTTP = [
             ("POST", "/GRAPHQL%2F", _J, _TYPENAME, "none", "/GRAPHQL%2F"),
             ("POST", "/graphql%0A", _J, _TYPENAME, "none", "/graphql%0A"),
             ("POST", "/x/graphql", _J, _TYPENAME, "key", "/x/graphql"),
-            ("POST", "/nosuch", _J, _TYPENAME, "key", "/nosuch"),
             ("POST", "/nosuch", _J, b"{", "none", "/nosuch"),
             ("POST", "//nosuch", _J, _TYPENAME, "none", "/nosuch"),
             ("POST", "/nosuch//x", _J, _TYPENAME, "none", "/nosuch/x"),
@@ -6832,7 +6982,33 @@ _LINEAR_HTTP = [
             ("GET", "/index.html", (), None, "none", "/index.html"),
         )
     ),
-    http_row("HEAD", "/nosuch", (), None, "none", 404, _HTML_UTF8, b"", id="HEAD /nosuch"),
+    http_row(
+        "POST",
+        "/nosuch",
+        _J,
+        _TYPENAME,
+        "key",
+        404,
+        _HTML_UTF8,
+        _express_404("POST", "/nosuch"),
+        id="POST /nosuch, key",
+        answered=_sent(
+            None, content_security_policy="default-src 'none'", x_content_type_options="nosniff"
+        )
+        | _NO_LENGTH,
+    ),
+    http_row(
+        "HEAD",
+        "/nosuch",
+        (),
+        None,
+        "none",
+        404,
+        _HTML_UTF8,
+        b"",
+        id="HEAD /nosuch",
+        answered=_NO_LENGTH,
+    ),
     http_row("BIND", "/nosuch", (), None, "key", 501, None, b"", id="BIND /nosuch"),
     http_row(
         "OPTIONS",
@@ -6848,12 +7024,562 @@ _LINEAR_HTTP = [
     ),
     *(
         http_row("GET", p, (), None, c, 200, _HTML_UTF8, _GREETING, id=f"GET {p}, {c}")
-        for p, c in (("/", "none"), ("/" + _Q, "key"), ("//", "none"), ("/?x", "none"))
+        for p, c in (("/" + _Q, "key"), ("//", "none"), ("/?x", "none"))
     ),
-    http_row("HEAD", "/", (), None, "none", 200, _HTML_UTF8, b"", id="HEAD /"),
+    http_row(
+        "GET",
+        "/",
+        (),
+        None,
+        "none",
+        200,
+        _HTML_UTF8,
+        _GREETING,
+        id="GET /, none",
+        answered=_sent('W/"22-p50xJmghTUzB/yxthmCh2AutfIs"', x_content_type_options="nosniff"),
+    ),
+    http_row(
+        "HEAD",
+        "/",
+        (),
+        None,
+        "none",
+        200,
+        _HTML_UTF8,
+        b"",
+        id="HEAD /",
+        answered=_sent(None, x_content_type_options="nosniff"),
+    ),
+    http_row(
+        "OPTIONS",
+        "/",
+        (),
+        None,
+        "none",
+        200,
+        "text/plain",
+        b"GET, HEAD",
+        id="OPTIONS /, none",
+        answered=_sent(
+            None,
+            allow="GET, HEAD",
+            cache_control=f"{_NO_STORE}, s-maxage=43200",
+            cache_tag="preflight",
+            x_content_type_options="nosniff",
+        ),
+    ),
+    http_row(
+        "OPTIONS",
+        "/",
+        (),
+        None,
+        "Bearer key",
+        200,
+        "text/plain",
+        b"GET, HEAD",
+        id="OPTIONS /, Bearer key",
+    ),
+    http_row(
+        "POST",
+        "",
+        _J,
+        _TYPENAME,
+        "key",
+        200,
+        _JSON_UTF8,
+        _TYPENAME_DATA,
+        id="served",
+        answered=_sent(_ETAG_OF_TYPENAME) | _counted(2500),
+    ),
+    # Express's 304 to a GET its `ETag` is fresh to, and its answer where not
+    # (`linear._express_sent`, `linear._fresh`).
     *(
-        http_row("OPTIONS", "/", (), None, c, 200, "text/plain", b"GET, HEAD", id=f"OPTIONS /, {c}")
-        for c in ("none", "Bearer key")
+        http_row(
+            m,
+            _Q if m == "GET" else "",
+            (*_P, *sent) if m == "GET" else (*_J, *sent),
+            None if m == "GET" else _TYPENAME,
+            "key",
+            status,
+            None if status == 304 else _JSON_UTF8,
+            b"" if status == 304 else _TYPENAME_DATA,
+            id=f"{m}, {label}",
+            answered=(
+                _sent(_ETAG_OF_TYPENAME, vary=None, content_type=None)
+                if status == 304
+                else _sent(_ETAG_OF_TYPENAME)
+            )
+            | _counted(2500),
+        )
+        for m, sent, status, label in (
+            ("GET", (("If-None-Match", _ETAG_OF_TYPENAME),), 304, "its ETag"),
+            ("GET", (("If-None-Match", "*"),), 304, "*"),
+            ("GET", (("If-None-Match", '"x", "20-/8NdYwgmGsmmlrq5Nh8mH1T+tAs"'),), 304, "a list"),
+            (
+                "GET",
+                (("If-None-Match", _ETAG_OF_TYPENAME), ("Cache-Control", "no-cache")),
+                200,
+                "its ETag, no-cache",
+            ),
+            ("POST", (("If-None-Match", _ETAG_OF_TYPENAME),), 200, "its ETag"),
+            ("GET", (("If-None-Match", 'W/"20-x"'),), 200, "another ETag"),
+            ("GET", (("If-None-Match", "W/" + _ETAG_OF_TYPENAME),), 304, "its ETag after W/"),
+            ("GET", (("If-None-Match", "W/W/" + _ETAG_OF_TYPENAME),), 200, "its ETag after W/W/"),
+            ("GET", (("If-None-Match", "w/" + _ETAG_OF_TYPENAME[2:]),), 200, "its ETag with w/"),
+            ("GET", (("If-None-Match", '"x",   ' + _ETAG_OF_TYPENAME),), 304, "spaces in a list"),
+            ("GET", (("If-None-Match", '"x",\t' + _ETAG_OF_TYPENAME),), 200, "a tab in a list"),
+            ("GET", (("If-None-Match", '"x",\xa0' + _ETAG_OF_TYPENAME),), 200, "U+00A0 in a list"),
+            ("GET", (("If-None-Match", _ETAG_OF_TYPENAME + '\t, "x"'),), 200, "a tab after it"),
+            ("GET", (("If-None-Match", "*"), ("Cache-Control", "no-cache")), 200, "*, no-cache"),
+            ("GET", (("If-None-Match", "* "),), 304, "* then a space"),
+            ("GET", (("If-None-Match", " \t*"),), 304, "a space and a tab before *"),
+            ("GET", (("If-None-Match", "*\t"),), 304, "* then a tab"),
+            ("GET", (("If-None-Match", "*\x85"),), 200, "* then U+0085"),
+            ("GET", (("If-None-Match", "*\xa0"),), 200, "* then U+00A0"),
+            ("GET", (("If-None-Match", _ETAG_OF_TYPENAME + "\t"),), 304, "its ETag then a tab"),
+            ("GET", (("If-None-Match", _ETAG_OF_TYPENAME + " "),), 304, "its ETag then a space"),
+            (
+                "GET",
+                (("If-None-Match", "*"), ("If-Modified-Since", "Tue, 01 Jan 2019 00:00:00 GMT")),
+                304,
+                "*, If-Modified-Since",
+            ),
+            *(
+                ("GET", (("If-None-Match", "*"), ("If-Modified-Since", since)), 304, f"*, {label}")
+                for since, label in (
+                    ("Tue, 01 Jan 2030 00:00:00 GMT", "a future If-Modified-Since"),
+                    ("", "an empty If-Modified-Since"),
+                    ("   ", "If-Modified-Since of spaces"),
+                    ("\xa0", "If-Modified-Since of U+00A0"),
+                    ("x", "If-Modified-Since of x"),
+                )
+            ),
+            (
+                "GET",
+                (
+                    ("If-None-Match", _ETAG_OF_TYPENAME),
+                    ("If-Modified-Since", "Tue, 01 Jan 2019 00:00:00 GMT"),
+                ),
+                304,
+                "its ETag, If-Modified-Since",
+            ),
+            *(
+                ("GET", (("If-Modified-Since", since),), 200, label)
+                for since, label in (
+                    ("Tue, 01 Jan 2019 00:00:00 GMT", "If-Modified-Since alone"),
+                    ("Tue, 01 Jan 2030 00:00:00 GMT", "a future If-Modified-Since alone"),
+                )
+            ),
+            (
+                "GET",
+                (
+                    ("If-None-Match", "*"),
+                    ("Cache-Control", "max-age=0"),
+                    ("Cache-Control", "no-cache"),
+                ),
+                200,
+                "*, no-cache in a second Cache-Control",
+            ),
+            (
+                "GET",
+                (
+                    ("If-None-Match", "*"),
+                    ("Cache-Control", "no-cache"),
+                    ("Cache-Control", "max-age=0"),
+                ),
+                200,
+                "*, no-cache in the first of two Cache-Control",
+            ),
+            (
+                "GET",
+                (("If-None-Match", _ETAG_OF_TYPENAME), ("Cache-Control", "\x85no-cache")),
+                304,
+                "its ETag, U+0085 before no-cache",
+            ),
+            (
+                "GET",
+                (("If-None-Match", _ETAG_OF_TYPENAME), ("Cache-Control", "\xa0no-cache")),
+                200,
+                "its ETag, U+00A0 before no-cache",
+            ),
+            (
+                "GET",
+                (("If-None-Match", _ETAG_OF_TYPENAME), ("Cache-Control", "no-cache\x85")),
+                304,
+                "its ETag, U+0085 after no-cache",
+            ),
+            (
+                "GET",
+                (("If-None-Match", _ETAG_OF_TYPENAME), ("Cache-Control", "no-cache\xa0")),
+                200,
+                "its ETag, U+00A0 after no-cache",
+            ),
+            (
+                "GET",
+                (("If-None-Match", _ETAG_OF_TYPENAME), ("Cache-Control", "no-cache ,max-age=0")),
+                200,
+                "its ETag, a space between no-cache and a comma",
+            ),
+        )
+    ),
+    http_row(
+        "GET",
+        "?query=mutation%20%7B%20__typename%20%7D",
+        (*_P, ("If-None-Match", "*")),
+        None,
+        "key",
+        405,
+        _JSON_UTF8,
+        _GET_MUTATION,
+        id="GET of a mutation, *",
+        answered=_sent('W/"ce-z0YB89QJgWlJGjEG4cmlKGgjXcg"', allow="POST"),
+    ),
+    http_row(
+        "OPTIONS",
+        "/",
+        (("If-None-Match", "*"),),
+        None,
+        "none",
+        200,
+        "text/plain",
+        b"GET, HEAD",
+        id="OPTIONS /, *",
+        answered=_sent(
+            None,
+            allow="GET, HEAD",
+            cache_control=f"{_NO_STORE}, s-maxage=43200",
+            cache_tag="preflight",
+            x_content_type_options="nosniff",
+        ),
+    ),
+    http_row(
+        "POST",
+        "",
+        _J,
+        b'{"query":"{ __schema { queryType { name } } }"}',
+        "none",
+        200,
+        _JSON_UTF8,
+        b'{"data":{"__schema":{"queryType":{"name":"Query"}}}}\n',
+        id="introspection, no credential",
+        answered=_sent('W/"35-JB5+8RfqjQXUu2SN0MW5BgcE+BU"') | _counted(1200),
+    ),
+    http_row(
+        "POST",
+        "",
+        (*_J, ("Accept", "application/graphql-response+json")),
+        b'{"query":"query($b: Boolean!) { __typename @include(if: $b) }"}',
+        "key",
+        400,
+        _GRAPHQL_RESPONSE,
+        b'{"errors":[{"message":"Variable \\"$b\\" of required type \\"Boolean!\\" was not provided.","locations":[{"line":1,"column":7}],"extensions":{"code":"BAD_USER_INPUT","type":"graphql error","userError":true}}]}\n',
+        id="a variable not provided",
+        answered=_sent('W/"ce-VUG9Oahq4m/rKQGebfuTeJHpOEU"') | _counted(2500),
+    ),
+    http_row(
+        "POST",
+        "",
+        _J,
+        b'{"query":"{ viewer { id } }"}',
+        "none",
+        401,
+        _JSON_UTF8,
+        _UNAUTHENTICATED,
+        id="401",
+        answered=_sent('W/"121-zqm5UPdEe2zPAnGCLuDQqbBUkgc"') | _NOT_COUNTED,
+    ),
+    http_row(
+        "POST",
+        "",
+        _J,
+        b'{"query":"{ nosuch }"}',
+        "key",
+        400,
+        _JSON_UTF8,
+        b'{"errors":[{"message":"Cannot query field \\"nosuch\\" on type \\"Query\\".","locations":[{"line":1,"column":3}],"extensions":{"http":{"status":400,"headers":{}},"code":"GRAPHQL_VALIDATION_FAILED","type":"graphql error","userError":true}}]}\n',
+        id="not valid",
+        answered=_sent('W/"ed-iulnxLcPjpFsZfStGL/BMaMkpH0"') | _NOT_COUNTED,
+    ),
+    http_row(
+        "POST",
+        "",
+        (*_J, ("Accept", "application/graphql-response+json")),
+        b'{"extensions":{"persistedQuery":{"version":1,"sha256Hash":"' + b"1" * 64 + b'"}}}',
+        "key",
+        200,
+        _GRAPHQL_RESPONSE,
+        b'{"errors":[{"message":"PersistedQueryNotFound","extensions":{"http":{"status":200,"headers":{}},"code":"PERSISTED_QUERY_NOT_FOUND","type":"graphql error","userError":true}}]}\n',
+        id="a persisted query's hash alone",
+        answered=_sent(
+            'W/"af-G/6bF//BYk8X0oNXb1A0LRJslBE"', cache_control="private, no-cache, must-revalidate"
+        )
+        | _NOT_COUNTED,
+    ),
+    http_row(
+        "POST",
+        "",
+        _J,
+        b"x",
+        "key",
+        400,
+        _JSON_UTF8,
+        b'{"error":"Unexpected token \'x\', \\"x\\" is not valid JSON","details":{},"code":400}',
+        id="x",
+        answered=_sent('W/"51-Jb7vCM8EoSOeaR6XRpsgTQcPNkI"'),
+    ),
+    http_row(
+        "POST",
+        "",
+        (("Content-Type", "application/json; charset=latin1"),),
+        _TYPENAME,
+        "key",
+        415,
+        _JSON_UTF8,
+        _LATIN1,
+        id="latin1",
+        answered=_sent('W/"42-Tot5z7ploFQn/H0QtssgcnHyvC4"'),
+    ),
+    http_row(
+        "PUT",
+        "",
+        _J,
+        None,
+        "key",
+        405,
+        _JSON_UTF8,
+        _ONLY_GET_POST,
+        id="PUT",
+        answered=_sent('W/"b9-gq5kxI+usdfwWz5UDzUMGmXMbSE"', allow="GET, POST"),
+    ),
+    http_row(
+        "POST",
+        "",
+        _J,
+        _TYPENAME,
+        "Bearer key",
+        400,
+        _JSON_UTF8,
+        _API_KEY_AS_BEARER,
+        id="Bearer at /graphql",
+        answered=_sent(_ETAG_OF_THE_BEARER_400),
+    ),
+    http_row(
+        "GET",
+        "/",
+        (("If-None-Match", 'W/"22-p50xJmghTUzB/yxthmCh2AutfIs"'),),
+        None,
+        "none",
+        304,
+        None,
+        b"",
+        id="greeting, its ETag",
+        answered=_sent(
+            'W/"22-p50xJmghTUzB/yxthmCh2AutfIs"',
+            x_content_type_options="nosniff",
+            vary=None,
+            content_type=None,
+        ),
+    ),
+    *(
+        http_row(
+            "HEAD",
+            "/",
+            (("If-None-Match", sent),),
+            None,
+            "none",
+            304,
+            None,
+            b"",
+            id=f"HEAD /, {label}",
+            answered=_sent(
+                'W/"22-p50xJmghTUzB/yxthmCh2AutfIs"',
+                x_content_type_options="nosniff",
+                vary=None,
+                content_type=None,
+            ),
+        )
+        for sent, label in (('W/"22-p50xJmghTUzB/yxthmCh2AutfIs"', "its ETag"), ("*", "*"))
+    ),
+    http_row(
+        "GET",
+        _Q,
+        (*_P, *_ORIGIN, ("If-None-Match", _ETAG_OF_TYPENAME)),
+        None,
+        "key",
+        304,
+        None,
+        b"",
+        id="GET, its ETag, Origin",
+        answered=_sent(_ETAG_OF_TYPENAME, content_type=None)
+        | _cors()
+        | {"vary": "Origin"}
+        | _counted(2500),
+    ),
+    http_row(
+        "OPTIONS",
+        "/",
+        _PREFLIGHT_ASKED,
+        None,
+        "key",
+        204,
+        None,
+        b"",
+        id="preflight at /",
+        answered={"x-request-id": _REQUEST_ID, "x-content-type-options": "nosniff"},
+    ),
+    *(
+        http_row(
+            "BIND",
+            t,
+            _J,
+            _TYPENAME,
+            "key",
+            501,
+            None,
+            b"",
+            id=f"BIND at {t or '/graphql'}",
+            answered={
+                "x-request-id": None,
+                "cache-control": None,
+                "vary": None,
+                "x-content-type-options": n,
+            },
+        )
+        for t, n in (
+            ("", None),
+            ("/", "nosniff"),
+            ("//", "nosniff"),
+            ("/%2E", "nosniff"),
+            ("/%2F", None),
+        )
+    ),
+    # Cloudflare's answers (`refuse_cloudflares_methods_on_linear_and_fireflies` in `backlot.main`).
+    *(
+        http_row(
+            m,
+            t,
+            (),
+            None,
+            "key",
+            status,
+            *_CLOUDFLARE_ANSWER[m],
+            id=f"{m} {t}",
+            answered={"x-content-type-options": n, "x-request-id": None},
+        )
+        for m, t, status, n in (
+            ("CONNECT", "/", 400, "nosniff"),
+            ("CONNECT", "//", 400, "nosniff"),
+            ("CONNECT", "/%2E", 400, None),
+            ("CONNECT", "/x/%2E%2E", 400, None),
+            ("CONNECT", "/%2E%2E", 400, None),
+            ("CONNECT", "/nosuch", 400, None),
+            ("PURGE", "/", 400, None),
+            ("TRACE", "/", 405, None),
+        )
+    ),
+    # `cors` in front of each: the origin sent, each copy without its spaces and tabs and joined,
+    # and none for an empty one.
+    *(
+        http_row(
+            "POST",
+            "",
+            (*_J, *origin),
+            _TYPENAME,
+            "key",
+            200,
+            _JSON_UTF8,
+            _TYPENAME_DATA,
+            id=f"served, Origin {label}",
+            answered=_sent(_ETAG_OF_TYPENAME)
+            | ({"vary": "Accept-Encoding"} if allowed is None else _cors(allowed)),
+        )
+        for label, origin, allowed in (
+            ("null", (("Origin", "null"),), "null"),
+            ("spaced", (("Origin", " https://example.com "),), "https://example.com"),
+            (
+                "twice",
+                (("Origin", "https://a.example"), ("Origin", "https://b.example")),
+                "https://a.example, https://b.example",
+            ),
+            ("empty", (("Origin", ""),), None),
+            (
+                "empty, then a value",
+                (("Origin", ""), ("Origin", "https://a.example")),
+                "https://a.example",
+            ),
+            (
+                "a value, then empty",
+                (("Origin", "https://a.example"), ("Origin", "")),
+                "https://a.example,",
+            ),
+            ("empty twice", (("Origin", ""), ("Origin", "")), None),
+            ("tabbed", (("Origin", "\thttps://example.com\t"),), "https://example.com"),
+            ("U+00A0 after", (("Origin", "https://example.com\xa0"),), "https://example.com\xa0"),
+        )
+    ),
+    http_row(
+        "POST",
+        "",
+        (*_J, *_ORIGIN),
+        b'{"query":"{ viewer { id } }"}',
+        "none",
+        401,
+        _JSON_UTF8,
+        _UNAUTHENTICATED,
+        id="Origin, 401",
+        answered=_sent('W/"121-zqm5UPdEe2zPAnGCLuDQqbBUkgc"') | _cors(),
+    ),
+    http_row(
+        "POST",
+        "",
+        (*_J, *_ORIGIN),
+        b"x",
+        "key",
+        400,
+        _JSON_UTF8,
+        b'{"error":"Unexpected token \'x\', \\"x\\" is not valid JSON","details":{},"code":400}',
+        id="Origin, x",
+        answered=_sent('W/"51-Jb7vCM8EoSOeaR6XRpsgTQcPNkI"') | _cors(),
+    ),
+    http_row(
+        "POST",
+        "",
+        (*_J, *_ORIGIN),
+        _TYPENAME,
+        "Bearer key",
+        400,
+        _JSON_UTF8,
+        _API_KEY_AS_BEARER,
+        id="Origin, Bearer",
+        answered=_sent(_ETAG_OF_THE_BEARER_400) | _cors("https://linear.app"),
+    ),
+    http_row(
+        "GET",
+        "/",
+        _ORIGIN,
+        None,
+        "none",
+        200,
+        _HTML_UTF8,
+        _GREETING,
+        id="Origin, greeting",
+        answered=_sent('W/"22-p50xJmghTUzB/yxthmCh2AutfIs"', x_content_type_options="nosniff")
+        | _cors(),
+    ),
+    http_row(
+        "POST",
+        "/nosuch",
+        (*_J, *_ORIGIN),
+        _TYPENAME,
+        "key",
+        404,
+        _HTML_UTF8,
+        b'<!DOCTYPE html>\n<html lang="en">\n<head>\n<meta charset="utf-8">\n<title>Error</title>\n</head>\n<body>\n<pre>Cannot POST /nosuch</pre>\n</body>\n</html>\n',
+        id="Origin, 404",
+        answered=_sent(
+            None, content_security_policy="default-src 'none'", x_content_type_options="nosniff"
+        )
+        | _cors(),
     ),
 ]
 _LINEAR_CREDENTIALS = {
@@ -6888,25 +7614,121 @@ def test_linear_answers_each_method_path_type_and_accept_as_linear_does(client, 
     assert answered == expected
 
 
+def _taken(times, host="203.0.113.7", key="lin_api_x"):
+    return [(seconds, host, key) for seconds in times]
+
+
+# The requests taken from `RequestBudget` (the second, the caller's address, its API key, None
+# for none), and the limit and `x-ratelimit-requests-remaining` on the last.
+_REQUEST_BUDGET = [
+    pytest.param(_taken([0.0]), "2500", "2499", id="one"),
+    pytest.param(
+        _taken([i * 13.13 / 29 for i in range(30)]), "2500", "2479", id="thirty over 13 seconds"
+    ),
+    pytest.param(_taken([0.0] * 2505), "2500", "0", id="past the limit"),
+    pytest.param(_taken([0.0] * 2000 + [3600.0]), "2500", "2499", id="an hour on"),
+    pytest.param(_taken([0.0, 1.0]), "2500", "2498", id="0.69 back, rounded down"),
+    pytest.param(_taken([0.0, 0.0], key=None), "1200", "1198", id="no key, one address"),
+    pytest.param(
+        _taken([0.0, 0.0], key=None) + _taken([0.0], "198.51.100.2", None),
+        "1200",
+        "1199",
+        id="no key, another address",
+    ),
+    pytest.param(
+        _taken([0.0] * 1210 + [13.8], key=None), "1200", "3", id="past the limit, 13.8 s on"
+    ),
+]
+
+
+def test_linears_request_budget_keeps_a_bucket_per_caller_refilled_at_its_limit_an_hour():
+    from types import SimpleNamespace
+
+    from backlot.routers.linear import RequestBudget
+
+    answered, expected = {}, {}
+    for row in _REQUEST_BUDGET:
+        taken, limit, remaining = row.values
+        now = [0.0]
+        budget = RequestBudget(clock=lambda: 1_793_022_495.115 + now[0])
+        for now[0], host, key in taken:
+            headers = budget.take(SimpleNamespace(client=SimpleNamespace(host=host)), key)
+        answered[row.id] = (
+            headers["x-ratelimit-requests-limit"],
+            headers["x-ratelimit-requests-remaining"],
+        )
+        expected[row.id] = (limit, remaining)
+    assert answered == expected
+
+
+def test_linears_request_budget_takes_one_for_a_run_and_none_for_a_refusal(client, tokens_yaml):
+    """A document refused as it validates takes nothing from the bucket, and the 1,200 of a caller
+    with no credential is a bucket of its own."""
+    from backlot.routers.linear import RequestBudget
+
+    client.app.state.linear_requests = RequestBudget(clock=lambda: 1_793_022_495.115)
+    key = (("Authorization", tokens_yaml["admin_token"]),)
+    introspection = b'{"query":"{ __schema { queryType { name } } }"}'
+    sent = [
+        (key, _TYPENAME),
+        (key, b'{"query":"{ nosuch }"}'),
+        ((), introspection),
+        (key, b'{"query":"{ nosuch }"}'),
+        (key, _TYPENAME),
+        ((), introspection),
+    ]
+    remaining = []
+    for credential, body in sent:
+        r = sent_as(client, "POST", "/linear/graphql", (*_J, *credential), content=body, bare=True)
+        remaining.append(
+            (
+                r.headers.get("x-ratelimit-requests-limit"),
+                r.headers.get("x-ratelimit-requests-remaining"),
+                r.headers.get("x-ratelimit-requests-reset"),
+            )
+        )
+    reset = "1793026095115"
+    assert remaining == [
+        ("2500", "2499", reset),
+        (None, None, None),
+        ("1200", "1199", reset),
+        (None, None, None),
+        ("2500", "2498", reset),
+        ("1200", "1198", reset),
+    ]
+
+
 # A path httpx would resolve or escape before sending it, written as it is to `backlot serve` with
-# the key and `{ __typename }`, and the status and body api.linear.app answers it with: the
-# endpoint, Express's 404 quoting the path Linear's front reads (`express_path`), its greeting, and
-# Cloudflare's page for a `..` past the root (`request_target.refused_path`).
+# the key and `{ __typename }`, and the status, body and named headers api.linear.app answers it
+# with: the endpoint, with `nosniff` where the load balancer reads the path as `/`
+# (`reads_as_root`), Express's 404 quoting the path Linear's front reads (`express_path`), its
+# greeting, and Cloudflare's page for a `..` past the root (`request_target.refused_path`).
 _LINEAR_SENT_RAW = [
     *(
-        pytest.param("POST", p, 200, _TYPENAME_DATA, id=p)
-        for p in (
-            "/./graphql",
-            "/x/../graphql",
-            "/graphql/.",
-            "/graphql/x/..",
-            "/graphql/x/%2E%2E",
-            "/..\\graphql",
-            "/graphql//..",
+        pytest.param("POST", p, 200, _TYPENAME_DATA, {"x-content-type-options": n}, id=p)
+        for p, n in (
+            ("/./graphql", None),
+            ("/x/../graphql", None),
+            ("/graphql/.", None),
+            ("/graphql/x/..", None),
+            ("/graphql/x/%2E%2E", None),
+            ("/..\\graphql", None),
+            ("/graphql//..", "nosniff"),
+            ("/graphql///..", "nosniff"),
+            ("/graphql/x//../..", "nosniff"),
+            ("/graphql//x/..", None),
         )
     ),
+    pytest.param(
+        "BIND",
+        "/graphql//..",
+        501,
+        b"",
+        {"x-content-type-options": "nosniff"},
+        id="BIND /graphql//..",
+    ),
     *(
-        pytest.param("POST", p, 404, _express_404("POST", echo), id=p)
+        pytest.param("POST", p, 404, _express_404("POST", echo), _CHUNKED, id=p)
         for p, echo in (
             ("/graphql/..", "/"),
             ("/graphql/../x", "/x"),
@@ -6925,9 +7747,9 @@ _LINEAR_SENT_RAW = [
             *((f"/nosucha{char}b", f"/nosucha%{ord(char):02X}b") for char in '"<>`{}'),
         )
     ),
-    *(pytest.param("GET", p, 200, _GREETING, id=f"GET {p}") for p in ("/r/..", "/./", "/%2e")),
+    *(pytest.param("GET", p, 200, _GREETING, {}, id=f"GET {p}") for p in ("/r/..", "/./", "/%2e")),
     *(
-        pytest.param("POST", p, 400, _CLOUDFLARE_PAGE % ((b"400 Bad Request",) * 2), id=p)
+        pytest.param("POST", p, 400, _CLOUDFLARE_PAGE % ((b"400 Bad Request",) * 2), {}, id=p)
         for p in (
             "/../graphql",
             "/./../graphql",
@@ -6940,11 +7762,12 @@ _LINEAR_SENT_RAW = [
 ]
 
 
-@pytest.mark.parametrize("method, path, status, body", _LINEAR_SENT_RAW)
+@pytest.mark.parametrize("method, path, status, body, named", _LINEAR_SENT_RAW)
 def test_linear_answers_a_path_sent_as_written_as_linear_does(
-    live_server, method, path, status, body
+    live_server, method, path, status, body, named
 ):
     base_url, settings = live_server
     sent = _TYPENAME if method == "POST" else b""
     request = raw_request(method, f"/linear{path}", settings.admin_token, body=sent)
-    assert raw_exchange(base_url, request)[::2] == (status, body)
+    answer, headers, content = raw_exchange(base_url, request)
+    assert (answer, content, {name: headers.get(name) for name in named}) == (status, body, named)

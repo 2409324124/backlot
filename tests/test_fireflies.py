@@ -1796,7 +1796,33 @@ def _not_found(method: str, target: str) -> bytes:
 
 
 _FIREFLIES_HTTP = [
-    # Cloudflare, ahead of everything.
+    # Apollo Server's `Cache-Control` on its answer to a persisted query's hash alone.
+    http_row(
+        "POST",
+        "",
+        _J,
+        b'{"extensions":{"persistedQuery":{"version":1,"sha256Hash":"' + b"1" * 64 + b'"}}}',
+        "key",
+        200,
+        _JSON_UTF8,
+        _apollo(b"PersistedQueryNotFound", b"PERSISTED_QUERY_NOT_FOUND", status=200),
+        id="a persisted query's hash alone",
+        answered={"cache-control": "private, no-cache, must-revalidate"},
+    ),
+    # Cloudflare, ahead of everything. Its `CONNECT` at `/` carries no `nosniff`; Linear's carries
+    # one.
+    http_row(
+        "CONNECT",
+        "/",
+        (),
+        None,
+        "key",
+        400,
+        "text/plain; charset=UTF-8",
+        b"error code: 1045\n",
+        id="CONNECT /",
+        answered={"x-content-type-options": None},
+    ),
     http_row(
         "TRACE",
         "",
