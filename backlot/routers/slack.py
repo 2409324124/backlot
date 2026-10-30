@@ -178,7 +178,12 @@ JSON_BODY_METHODS = frozenset(
 # The write surface. Each lists what Backlot actually READS, the way every other `_P_` here does:
 # a param the vendor documents but Backlot ignores stays an acknowledged gap in the fidelity
 # baseline rather than a declaration that promises behaviour it does not have.
-_P_POST_MESSAGE = [qp("channel", required=True), qp("text", required=True), qp("thread_ts")]
+_P_POST_MESSAGE = [
+    qp("channel", required=True),
+    qp("text", required=True),
+    qp("thread_ts"),
+    qp("reply_broadcast", "boolean"),
+]
 # `text` is NOT required here, where `chat.postMessage` requires it (`chat_post_ephemeral`).
 _P_POST_EPHEMERAL = [qp("channel", required=True), qp("user", required=True), qp("text")]
 _P_UPDATE = [qp("channel", required=True), qp("ts", required=True), qp("text", required=True)]
@@ -1559,6 +1564,7 @@ async def conversations_history(request: Request):
                 subscribed=_subscribed(caller, r["author_email"], ru),
             )
         )
+        _with_root(conn, name, ids, caller, r, messages[-1])
     cursor = next_cursor(offset, len(rows), total)
     body = {
         "ok": True,
@@ -1652,6 +1658,8 @@ async def conversations_replies(request: Request):
         )
         for x in rows
     ]
+    for x, m in zip(rows, messages, strict=True):
+        _with_root(conn, name, ids, caller, x, m)
     return {"ok": True, "messages": messages, "has_more": False}
 
 
@@ -2150,7 +2158,7 @@ async def chat_post_message(request: Request):
     `blocks` the message reads back with are composed from its `text` (`synth.slack_blocks`), as
     a corpus message's are, rather than being the ones the caller sent. Arguments the vendor
     documents and Backlot ignores outright: `as_user`, `username`, `icon_emoji`, `icon_url`,
-    `reply_broadcast`, `unfurl_links`, `unfurl_media`, `parse`, `link_names`, `mrkdwn`.
+    `unfurl_links`, `unfurl_media`, `parse`, `link_names`, `mrkdwn`.
     `backlot diff` cannot see them -- it compares query parameters and Slack's spec declares
     these as form fields (see `backlot/fidelity/operations.py`) -- so this list is the record
     until that gap is closed.
@@ -2203,7 +2211,11 @@ async def chat_post_message(request: Request):
             "created_ts": now,
             "thread_ts": thread_ts,
             "thread_seq": thread_seq,
-            "subtype": None,
+            # A reply also sent to the channel. Measured against slack.com on 2026-10-30: it is
+            # listed in `conversations.history` and carries this subtype and a `root`.
+            "subtype": "thread_broadcast"
+            if thread_ts and _flag(request, "reply_broadcast")
+            else None,
         },
     )
     row = store.document_by_key(conn, "slack", (name, ts))
@@ -2211,7 +2223,7 @@ async def chat_post_message(request: Request):
         "ok": True,
         "channel": synth.slack_channel_id(name),
         "ts": ts,
-        "message": _message(row),
+        "message": _with_root(conn, name, ids, caller, row, _message(row)),
     }
 
 
@@ -3005,6 +3017,35 @@ def _member_count(request: Request, conn, name: str) -> int:
     return store.count_slack_channel_members(conn, name)
 
 
+def _flag(request: Request, key: str) -> bool:
+    """A boolean argument: absent, empty, `0` and `false` (any case) are off."""
+    return (_param(request, key) or "").lower() not in ("", "0", "false")
+
+
+def _with_root(conn, name: str, ids, caller: Caller, row, m: dict) -> dict:
+    """Add `root` to a `thread_broadcast` message: its thread's root, as history lists it.
+
+    Measured against slack.com on 2026-10-30: the echo, `conversations.history` and
+    `conversations.replies` all carry it, with the root's `reply_count` and `latest_reply`.
+    """
+    if row["subtype"] != "thread_broadcast":
+        return m
+    root = store.document_by_key(conn, "slack", (name, row["thread_ts"]), ids)
+    if root is None:
+        return m
+    rc = store.slack_reply_count(conn, name, root["ts"], ids)
+    ru = store.slack_reply_authors(conn, name, root["ts"], ids) if rc else []
+    m["root"] = _message(
+        root,
+        reply_count=rc,
+        latest_reply=store.slack_latest_reply_ts(conn, name, root["ts"], ids) if rc else None,
+        reply_users=[_uid(e) for e in ru[:5]],
+        reply_users_count=len(ru),
+        subscribed=_subscribed(caller, root["author_email"], ru),
+    )
+    return m
+
+
 def _subscribed(caller: Caller, root_author: str | None, reply_authors) -> bool:
     """Whether the CALLER follows this thread — Slack subscribes you to one you started or replied
     in. An admin/service token is not a person and follows nothing, the same reasoning that makes
@@ -3047,7 +3088,7 @@ def _message(
         # app is what posted it either way. It is not a subtype that says so: a bot-token post
         # has none. A corpus message stands for one a Slack client posted and carries none.
         m["bot_id"] = BOT_ID
-    if not row["subtype"]:
+    if row["subtype"] in (None, "thread_broadcast"):
         # `client_msg_id` is minted by the CLIENT that posted, and `blocks` is what that client
         # composed, so neither belongs on a message Slack itself generated — measured: a
         # channel_join carries only type/user/text/ts/subtype. `team` is left on both: it is
@@ -3089,6 +3130,11 @@ def _message(
         m["parent_user_id"] = SLACKBOT_ID
         m.pop("team", None)
         m.pop("bot_id", None)
+    broadcast = row["subtype"] == "thread_broadcast"
+    if broadcast:
+        # Measured against slack.com on 2026-10-30: a reply posted with `reply_broadcast` carries
+        # no `team` and no `parent_user_id`, in the echo, in history and in replies.
+        m.pop("team", None)
     if row["thread_ts"]:  # part of a thread
         m["thread_ts"] = row["thread_ts"]
         if row["thread_seq"] == 0 and reply_count > 0:  # thread root
@@ -3109,7 +3155,7 @@ def _message(
                     "is_locked": False,
                 }
             )
-        elif row["thread_seq"] > 0 and parent_user_id:  # a reply
+        elif row["thread_seq"] > 0 and parent_user_id and not broadcast:  # a reply
             m["parent_user_id"] = parent_user_id
     return m
 

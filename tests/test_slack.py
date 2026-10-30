@@ -4741,7 +4741,7 @@ def test_a_root_whose_last_reply_goes_is_a_standalone_message_again(wclient, tok
 #: `backlot mcp --source slack` turns into tool arguments, so an agent can only send what is
 #: here — and a mutation run showed every one of them could be dropped with the suite green.
 _DECLARED = {
-    "chat.postMessage": {"channel", "text", "thread_ts"},
+    "chat.postMessage": {"channel", "text", "thread_ts", "reply_broadcast"},
     "chat.postEphemeral": {"channel", "user", "text"},
     "chat.update": {"channel", "ts", "text"},
     "chat.delete": {"channel", "ts"},
@@ -5894,6 +5894,87 @@ def test_replying_to_a_reply_lands_in_the_same_thread(wclient, tokens, ro_conn):
         "/slack/api/conversations.replies", headers=h, data={"channel": cid, "ts": root_ts}
     ).json()["messages"]
     assert posted["ts"] in [m["ts"] for m in thread]
+
+
+def _broadcast_thread(wclient, h, cid):
+    """A parent, a plain reply, a reply with `reply_broadcast`, then a later top-level post."""
+
+    def post(text, **extra):
+        data = {"channel": cid, "text": text, **extra}
+        return wclient.post("/slack/api/chat.postMessage", headers=h, data=data).json()
+
+    parent = post("bc-parent")["ts"]
+    reply = post("bc-reply", thread_ts=parent)["ts"]
+    echo = post("bc-broadcast", thread_ts=parent, reply_broadcast="true")
+    after = post("bc-after")["ts"]
+    names = {parent: "parent", reply: "reply", echo["ts"]: "broadcast", after: "after"}
+    return parent, echo, names
+
+
+def _history(wclient, h, cid, **extra):
+    data = {"channel": cid, "oldest": extra.pop("oldest"), "inclusive": "true", **extra}
+    return wclient.post("/slack/api/conversations.history", headers=h, data=data).json()
+
+
+# The order is real's: `_with_root` records the measurement.
+@pytest.mark.parametrize(
+    ("limit", "pages"),
+    [
+        (10, [["after", "broadcast", "parent"]]),
+        (1, [["parent"], ["broadcast"], ["after"]]),
+    ],
+)
+def test_a_broadcast_reply_is_listed_in_history(wclient, tokens, limit, pages):
+    h = _uh(tokens, "ava@acme.com")
+    cid = synth.slack_channel_id("incidents")
+    parent, _, names = _broadcast_thread(wclient, h, cid)
+    got, cursor = [], None
+    while True:
+        extra = {"limit": limit, **({"cursor": cursor} if cursor else {})}
+        page = _history(wclient, h, cid, oldest=parent, **extra)
+        got.append([names[m["ts"]] for m in page["messages"]])
+        cursor = page.get("response_metadata", {}).get("next_cursor")
+        if not cursor:
+            break
+    assert got == pages
+
+
+def test_a_broadcast_reply_carries_its_subtype_and_root(wclient, tokens):
+    h = _uh(tokens, "ava@acme.com")
+    cid = synth.slack_channel_id("incidents")
+    parent, echo, names = _broadcast_thread(wclient, h, cid)
+    hist = _history(wclient, h, cid, oldest=parent)["messages"]
+    replies = wclient.post(
+        "/slack/api/conversations.replies", headers=h, data={"channel": cid, "ts": parent}
+    ).json()["messages"]
+    by_name = {
+        "chat.postMessage": echo["message"],
+        "conversations.history": next(m for m in hist if names[m["ts"]] == "broadcast"),
+        "conversations.replies": next(m for m in replies if names[m["ts"]] == "broadcast"),
+    }
+    for method, m in by_name.items():
+        assert m["subtype"] == "thread_broadcast", method
+        assert m["thread_ts"] == parent, method
+        assert "team" not in m and "parent_user_id" not in m, method
+        root = m["root"]
+        assert (root["ts"], root["text"], root["reply_count"]) == (parent, "bc-parent", 2), method
+        assert root["latest_reply"] == echo["ts"], method
+    plain = next(m for m in replies if names[m["ts"]] == "reply")
+    assert "subtype" not in plain and "root" not in plain
+
+
+def test_deleting_a_broadcast_reply_takes_it_out_of_history(wclient, tokens):
+    # Real leaves no placeholder and the root counts one reply fewer (measured with `_with_root`'s).
+    h = _uh(tokens, "ava@acme.com")
+    cid = synth.slack_channel_id("incidents")
+    parent, echo, names = _broadcast_thread(wclient, h, cid)
+    gone = wclient.post(
+        "/slack/api/chat.delete", headers=h, data={"channel": cid, "ts": echo["ts"]}
+    ).json()
+    assert gone["ok"] is True
+    hist = _history(wclient, h, cid, oldest=parent)["messages"]
+    assert [names[m["ts"]] for m in hist] == ["after", "parent"]
+    assert hist[1]["reply_count"] == 1
 
 
 def test_a_thread_ts_naming_nothing_posts_top_level_and_an_unreadable_one_is_refused(
