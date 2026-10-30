@@ -3856,8 +3856,10 @@ def list_slack_top_level(
     newest_first=False,
 ) -> list[sqlite3.Row]:
     """Top-level (thread-root/standalone) messages in a channel, and the replies also sent to it
-    (`thread_broadcast`, which real Slack lists in history), oldest first unless
-    ``newest_first``. ``ts_lo``/``ts_hi`` bound ``created_ts`` for a time-windowed
+    (`thread_broadcast`), each at its own ts, oldest first unless ``newest_first``: measured
+    against slack.com on 2026-10-30, history listed a broadcast between its root and a later
+    post, on `limit=1` pages too, and a deleted one not at all, with no placeholder and its root
+    one reply fewer. ``ts_lo``/``ts_hi`` bound ``created_ts`` for a time-windowed
     conversations.history, so a day window is an indexed range rather than the whole channel
     filtered in Python. Widen the bounds by ±1s — the public ts carries a sub-second fraction — and
     re-check the exact float window in the caller."""

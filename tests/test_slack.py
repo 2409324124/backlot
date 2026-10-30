@@ -5911,12 +5911,12 @@ def _broadcast_thread(wclient, h, cid):
     return parent, echo, names
 
 
-def _history(wclient, h, cid, **extra):
-    data = {"channel": cid, "oldest": extra.pop("oldest"), "inclusive": "true", **extra}
+def _history(wclient, h, cid, oldest, **extra):
+    data = {"channel": cid, "oldest": oldest, "inclusive": "true", **extra}
     return wclient.post("/slack/api/conversations.history", headers=h, data=data).json()
 
 
-# The order is real's: `_with_root` records the measurement.
+# The order is real's (`store.list_slack_top_level`).
 @pytest.mark.parametrize(
     ("limit", "pages"),
     [
@@ -5943,28 +5943,39 @@ def test_a_broadcast_reply_carries_its_subtype_and_root(wclient, tokens):
     h = _uh(tokens, "ava@acme.com")
     cid = synth.slack_channel_id("incidents")
     parent, echo, names = _broadcast_thread(wclient, h, cid)
+
+    def call(method, **data):
+        return wclient.post(f"/slack/api/{method}", headers=h, data=data).json()
+
+    assert call("reactions.add", channel=cid, timestamp=echo["ts"], name="eyes")["ok"] is True
+    edited = call("chat.update", channel=cid, ts=echo["ts"], text="bc-broadcast, edited")
     hist = _history(wclient, h, cid, oldest=parent)["messages"]
-    replies = wclient.post(
-        "/slack/api/conversations.replies", headers=h, data={"channel": cid, "ts": parent}
-    ).json()["messages"]
+    replies = call("conversations.replies", channel=cid, ts=parent)["messages"]
+    listed = call("reactions.list")["items"]
     by_name = {
         "chat.postMessage": echo["message"],
+        "chat.update": edited["message"],
         "conversations.history": next(m for m in hist if names[m["ts"]] == "broadcast"),
         "conversations.replies": next(m for m in replies if names[m["ts"]] == "broadcast"),
+        "reactions.get": call("reactions.get", channel=cid, timestamp=echo["ts"])["message"],
+        "reactions.list": next(i["message"] for i in listed if i["message"]["ts"] == echo["ts"]),
     }
+    ava = synth.slack_user_id("ava@acme.com")
     for method, m in by_name.items():
         assert m["subtype"] == "thread_broadcast", method
         assert m["thread_ts"] == parent, method
-        assert "team" not in m and "parent_user_id" not in m, method
+        assert "blocks" in m, method
+        assert "team" not in m and "parent_user_id" not in m and "edited" not in m, method
         root = m["root"]
         assert (root["ts"], root["text"], root["reply_count"]) == (parent, "bc-parent", 2), method
+        assert (root["reply_users"], root["reply_users_count"]) == ([ava], 1), method
         assert root["latest_reply"] == echo["ts"], method
     plain = next(m for m in replies if names[m["ts"]] == "reply")
     assert "subtype" not in plain and "root" not in plain
 
 
 def test_deleting_a_broadcast_reply_takes_it_out_of_history(wclient, tokens):
-    # Real leaves no placeholder and the root counts one reply fewer (measured with `_with_root`'s).
+    # Real leaves no placeholder and the root counts one reply fewer (`store.list_slack_top_level`).
     h = _uh(tokens, "ava@acme.com")
     cid = synth.slack_channel_id("incidents")
     parent, echo, names = _broadcast_thread(wclient, h, cid)
@@ -5981,17 +5992,30 @@ def test_a_thread_ts_naming_nothing_posts_top_level_and_an_unreadable_one_is_ref
     wclient, tokens
 ):
     # `chat_post_message` records the measurement: a well-formed `thread_ts` that names no message
-    # posts top-level, an empty one does the same, and one real cannot read is refused.
+    # posts top-level, an empty one or `0` does the same, `reply_broadcast` makes each of those a
+    # `thread_broadcast` and a post with no `thread_ts` a plain message, and one real cannot read is
+    # refused.
     h = _uh(tokens, "ava@acme.com")
     cid = synth.slack_channel_id("incidents")
-    for value in ("1700000000.000001", ""):
-        j = wclient.post(
-            "/slack/api/chat.postMessage",
-            headers=h,
-            data={"channel": cid, "text": "orphan", "thread_ts": value},
-        ).json()
-        assert j["ok"] is True, value
-        assert "thread_ts" not in j["message"], value
+    for value in ("1700000000.000001", "", "0"):
+        for extra, subtype in (({}, None), ({"reply_broadcast": "true"}, "thread_broadcast")):
+            j = wclient.post(
+                "/slack/api/chat.postMessage",
+                headers=h,
+                data={"channel": cid, "text": "orphan", "thread_ts": value, **extra},
+            ).json()
+            assert j["ok"] is True, value
+            assert "thread_ts" not in j["message"] and "root" not in j["message"], value
+            assert (j["message"].get("subtype"), "team" in j["message"]) == (
+                subtype,
+                subtype is None,
+            ), value
+    alone = wclient.post(
+        "/slack/api/chat.postMessage",
+        headers=h,
+        data={"channel": cid, "text": "orphan", "reply_broadcast": "true"},
+    ).json()
+    assert "subtype" not in alone["message"]
     # Refused outside the window `_thread_ts_error` records, and the message carries the value
     # as real reads it, in microseconds.
     import time as _time
