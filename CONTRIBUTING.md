@@ -93,8 +93,9 @@ uv pip install --no-deps "llama-index-readers-hubspot<0.6"
 (`.[all]` names the same set for anyone installing Backlot from PyPI rather than a checkout.)
 
 CI runs the suite, ruff, and the Linear example on every push to `main` and every pull request (see
-`.github/workflows/ci.yml`). On a pull request it also runs `scripts/prose_check.py`, whose findings
-show as warnings on the lines they name and do not fail the run. CI's `test` jobs set
+`.github/workflows/ci.yml`), and runs `scripts/linear_sdk_fragments.py` over the `@linear/sdk` that
+example pins. On a pull request it also runs `scripts/prose_check.py`, whose findings show as
+warnings on the lines they name and do not fail the run. CI's `test` jobs set
 `BACKLOT_TEST_REQUIRE_DOCKER=1`, under which the Atlassian MCP test fails where a local run without
 Docker skips it (`_require_linux_docker` in `tests/test_mcp.py`).
 
