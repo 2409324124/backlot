@@ -269,6 +269,11 @@ def test_each_client_rule_names_the_headers_it_was_measured_from():
         ("s3", "implemented", 505, "HttpVersionNotSupported", False, "client"),
         ("gmail", "implemented", 503, "backendError", False, "internal"),
         ("fireflies", "unknown", 500, "INTERNAL_SERVER_ERROR", False, "client"),
+        ("fireflies", "implemented", 200, "too_many_requests", False, "rate_limit"),
+        # A document with a root field Backlot does not serve is put down to that field first.
+        ("fireflies", "missing", 200, "too_many_requests", False, "unsupported"),
+        ("fireflies", "implemented", 200, "object_not_found", True, "client"),
+        ("linear", "implemented", 200, "too_many_requests", False, "client"),
         ("linear", "unknown", 500, "INTERNAL_SERVER_ERROR", False, "internal"),
         ("fireflies", "unknown", 500, "", False, "internal"),
         ("fireflies", "unknown", 500, "auth_failed", False, "auth"),
