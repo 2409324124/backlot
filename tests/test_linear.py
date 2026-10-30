@@ -35,6 +35,8 @@ from tests._helpers import (
     db_count,
     http_row,
     padded_query,
+    raw_exchange,
+    raw_request,
     selected_field_count,
     selected_fields,
     sent_as,
@@ -5992,6 +5994,21 @@ _P = (("apollo-require-preflight", "1"),)
 _ORIGIN = (("Origin", "https://example.com"),)
 _PREFLIGHT_ASKED = (*_ORIGIN, ("Access-Control-Request-Method", "POST"))
 _Q = "?query=%7B%20__typename%20%7D"
+_HTML_UTF8 = "text/html; charset=utf-8"
+_GREETING = b"Hello from the Linear GraphQL API."
+_EXPRESS_API_KEY_AS_BEARER = (
+    b'{"error":"It looks like you\'re trying to use an API key as a Bearer token. Remove the Bearer'
+    b' prefix from the Authorization header.","details":{},"extensions":{"type":"invalid input","co'
+    b'de":"INPUT_ERROR","statusCode":400,"userError":true},"code":400}'
+)
+
+
+def _express_404(method: str, path: str) -> bytes:
+    return (
+        b'<!DOCTYPE html>\n<html lang="en">\n<head>\n<meta charset="utf-8">\n<title>Error</title>'
+        b"\n</head>\n<body>\n<pre>Cannot %s %s</pre>\n</body>\n</html>\n"
+        % (method.encode(), path.encode())
+    )
 
 
 def _search_refusal(message: bytes) -> bytes:
@@ -6710,6 +6727,134 @@ _LINEAR_HTTP = [
         b'"http":{"status":400}}}]}',
         id="GET, variables {}, operationName empty",
     ),
+    # A path Express hands Apollo Server (`routes_to_apollo`) once Linear's front has read it
+    # (`express_path`), and Express's own answers at any other (`express`), behind the load
+    # balancer, `cors` and `_api_key_as_bearer`, whose envelope the path as sent picks.
+    *(
+        http_row("POST", p, _J, _TYPENAME, "key", 200, _JSON_UTF8, _TYPENAME_DATA, id=f"POST {p}")
+        for p in (
+            "/GRAPHQL",
+            "/GraphQL",
+            "/GRAPHQL/",
+            "/graphql/",
+            "//graphql",
+            "/graphql//",
+            "/graphql/x",
+            "/graph%71l",
+        )
+    ),
+    http_row(
+        "POST",
+        "/%67RAPHQL",
+        _J,
+        _TYPENAME,
+        "none",
+        401,
+        _JSON_UTF8,
+        _UNAUTHENTICATED,
+        id="POST /%67RAPHQL, no credential",
+    ),
+    *(
+        http_row(
+            "POST", p, _J, _TYPENAME, "none", 401, _JSON_UTF8, _UNAUTHENTICATED, id=f"POST {p}"
+        )
+        for p in ("/graphql\\x", "/Graphql/X/Y")
+    ),
+    http_row(
+        "GET", "/GRAPHQL" + _Q, _P, None, "key", 200, _JSON_UTF8, _TYPENAME_DATA, id="GET /GRAPHQL"
+    ),
+    http_row(
+        "PUT", "/GRAPHQL", _J, _TYPENAME, "key", 405, _JSON_UTF8, _ONLY_GET_POST, id="PUT /GRAPHQL"
+    ),
+    *(
+        http_row(
+            "POST", p, _J, _TYPENAME, "Bearer key", 400, _JSON_UTF8, a, id=f"POST {p}, Bearer key"
+        )
+        for p, a in (
+            ("/graphqlx", _API_KEY_AS_BEARER),
+            ("/graphql%2F", _API_KEY_AS_BEARER),
+            ("/GRAPHQL", _EXPRESS_API_KEY_AS_BEARER),
+            ("//graphql", _EXPRESS_API_KEY_AS_BEARER),
+            ("/graph%71l", _EXPRESS_API_KEY_AS_BEARER),
+            ("/nosuch", _EXPRESS_API_KEY_AS_BEARER),
+        )
+    ),
+    http_row(
+        "GET",
+        "/",
+        (),
+        None,
+        "Bearer key",
+        400,
+        _JSON_UTF8,
+        _EXPRESS_API_KEY_AS_BEARER,
+        id="GET /, Bearer key",
+    ),
+    *(
+        http_row(m, p, h, b, c, 404, _HTML_UTF8, _express_404(m, echo), id=f"{m} {p}, {c}")
+        for m, p, h, b, c, echo in (
+            ("POST", "/graphqlx", _J, _TYPENAME, "key", "/graphqlx"),
+            ("POST", "/graphql.json", _J, _TYPENAME, "key", "/graphql.json"),
+            ("POST", "/graphql;x", _J, _TYPENAME, "key", "/graphql;x"),
+            ("POST", "/graphql%2F", _J, _TYPENAME, "key", "/graphql%2F"),
+            ("POST", "/graphql%20", _J, _TYPENAME, "key", "/graphql%20"),
+            ("POST", "/GRAPHQL%2F", _J, _TYPENAME, "none", "/GRAPHQL%2F"),
+            ("POST", "/graphql%0A", _J, _TYPENAME, "none", "/graphql%0A"),
+            ("POST", "/x/graphql", _J, _TYPENAME, "key", "/x/graphql"),
+            ("POST", "/nosuch", _J, _TYPENAME, "key", "/nosuch"),
+            ("POST", "/nosuch", _J, b"{", "none", "/nosuch"),
+            ("POST", "//nosuch", _J, _TYPENAME, "none", "/nosuch"),
+            ("POST", "/nosuch//x", _J, _TYPENAME, "none", "/nosuch/x"),
+            ("POST", "/%6Eosuch", _J, _TYPENAME, "none", "/nosuch"),
+            ("POST", "/a%41b", _J, _TYPENAME, "none", "/aAb"),
+            ("POST", "/a%7eb", _J, _TYPENAME, "none", "/a~b"),
+            ("POST", "/a%2fb", _J, _TYPENAME, "none", "/a%2fb"),
+            ("POST", "/a%3cb", _J, _TYPENAME, "none", "/a%3cb"),
+            ("POST", "/a%0Ab", _J, _TYPENAME, "none", "/a%0Ab"),
+            ("POST", "/a\\b", _J, _TYPENAME, "none", "/a/b"),
+            ("POST", "/a%3Cb%3E", _J, _TYPENAME, "key", "/a%3Cb%3E"),
+            ("POST", "/%C3%A9", _J, _TYPENAME, "key", "/%C3%A9"),
+            ("POST", "/nosucha|b", _J, b"{}", "none", "/nosucha%7Cb"),
+            ("POST", "/nosucha^b", _J, b"{}", "none", "/nosucha%5Eb"),
+            ("POST", "/nosucha'b", _J, b"{}", "none", "/nosucha&#39;b"),
+            ("POST", "/nosucha&b", _J, b"{}", "none", "/nosucha&amp;b"),
+            ("POST", "/nosucha[b", _J, b"{}", "none", "/nosucha[b"),
+            ("GET", "/nosuch", (("Accept", "application/json"),), None, "none", "/nosuch"),
+            ("PUT", "/nosuch", _J, _TYPENAME, "key", "/nosuch"),
+            ("PROPFIND", "/nosuch", (), None, "key", "/nosuch"),
+            ("OPTIONS", "/nosuch", (), None, "Bearer key", "/nosuch"),
+            ("POST", "/", _J, _TYPENAME, "key", "/"),
+            ("PUT", "/", _J, _TYPENAME, "key", "/"),
+            ("PATCH", "/", _J, _TYPENAME, "none", "/"),
+            ("DELETE", "/", (), None, "none", "/"),
+            ("PROPFIND", "/", (), None, "none", "/"),
+            ("GET", "/%2F", (), None, "none", "/%2F"),
+            ("GET", "/index.html", (), None, "none", "/index.html"),
+        )
+    ),
+    http_row("HEAD", "/nosuch", (), None, "none", 404, _HTML_UTF8, b"", id="HEAD /nosuch"),
+    http_row("BIND", "/nosuch", (), None, "key", 501, None, b"", id="BIND /nosuch"),
+    http_row(
+        "OPTIONS",
+        "/nosuch",
+        _PREFLIGHT_ASKED,
+        None,
+        "key",
+        204,
+        None,
+        b"",
+        id="preflight at /nosuch",
+        answered=_LINEAR_PREFLIGHT,
+    ),
+    *(
+        http_row("GET", p, (), None, c, 200, _HTML_UTF8, _GREETING, id=f"GET {p}, {c}")
+        for p, c in (("/", "none"), ("/" + _Q, "key"), ("//", "none"), ("/?x", "none"))
+    ),
+    http_row("HEAD", "/", (), None, "none", 200, _HTML_UTF8, b"", id="HEAD /"),
+    *(
+        http_row("OPTIONS", "/", (), None, c, 200, "text/plain", b"GET, HEAD", id=f"OPTIONS /, {c}")
+        for c in ("none", "Bearer key")
+    ),
 ]
 _LINEAR_CREDENTIALS = {
     "none": None,
@@ -6720,7 +6865,7 @@ _LINEAR_CREDENTIALS = {
 }
 
 
-def test_linear_answers_each_method_type_and_accept_as_linear_does(client, tokens_yaml):
+def test_linear_answers_each_method_path_type_and_accept_as_linear_does(client, tokens_yaml):
     """Each row of `_LINEAR_HTTP` is answered as api.linear.app answered it."""
     answered, expected = {}, {}
     for row in _LINEAR_HTTP:
@@ -6730,7 +6875,8 @@ def test_linear_answers_each_method_type_and_accept_as_linear_does(client, token
             value = _LINEAR_CREDENTIALS[credential].format(t=tokens_yaml["admin_token"])
             sent += [("Authorization", value)] * (2 if credential == "twice" else 1)
         content = body.chunks() if isinstance(body, Chunked) else body
-        r = sent_as(client, method, f"/linear/graphql{target}", sent, content=content, bare=True)
+        path = target if target.startswith("/") else f"/graphql{target}"
+        r = sent_as(client, method, f"/linear{path}", sent, content=content, bare=True)
         answered[row.id] = (
             r.status_code,
             r.headers.get("content-type"),
@@ -6740,3 +6886,65 @@ def test_linear_answers_each_method_type_and_accept_as_linear_does(client, token
         expected[row.id] = (status, media_type, answer, named)
     assert len(expected) == len(_LINEAR_HTTP)
     assert answered == expected
+
+
+# A path httpx would resolve or escape before sending it, written as it is to `backlot serve` with
+# the key and `{ __typename }`, and the status and body api.linear.app answers it with: the
+# endpoint, Express's 404 quoting the path Linear's front reads (`express_path`), its greeting, and
+# Cloudflare's page for a `..` past the root (`request_target.refused_path`).
+_LINEAR_SENT_RAW = [
+    *(
+        pytest.param("POST", p, 200, _TYPENAME_DATA, id=p)
+        for p in (
+            "/./graphql",
+            "/x/../graphql",
+            "/graphql/.",
+            "/graphql/x/..",
+            "/graphql/x/%2E%2E",
+            "/..\\graphql",
+            "/graphql//..",
+        )
+    ),
+    *(
+        pytest.param("POST", p, 404, _express_404("POST", echo), id=p)
+        for p, echo in (
+            ("/graphql/..", "/"),
+            ("/graphql/../x", "/x"),
+            ("/graphql/%2e%2E/x", "/x"),
+            ("/graphql/x/../..", "/"),
+            ("/..", "/"),
+            ("/./..", "/"),
+            ("/x/..", "/"),
+            ("/./nosuch", "/nosuch"),
+            ("/x//../graphql", "/x/graphql"),
+            ("/x/.//graphql", "/x/graphql"),
+            ("/r/./b", "/r/b"),
+            ("/r/b/.", "/r/b/"),
+            ("/r/b/%2e%2e", "/r/"),
+            ("/x/..%2F..", "/x/..%2F.."),
+            *((f"/nosucha{char}b", f"/nosucha%{ord(char):02X}b") for char in '"<>`{}'),
+        )
+    ),
+    *(pytest.param("GET", p, 200, _GREETING, id=f"GET {p}") for p in ("/r/..", "/./", "/%2e")),
+    *(
+        pytest.param("POST", p, 400, _CLOUDFLARE_PAGE % ((b"400 Bad Request",) * 2), id=p)
+        for p in (
+            "/../graphql",
+            "/./../graphql",
+            "/x/../../",
+            "//../graphql",
+            "/../.",
+            "/graphql/../../x",
+        )
+    ),
+]
+
+
+@pytest.mark.parametrize("method, path, status, body", _LINEAR_SENT_RAW)
+def test_linear_answers_a_path_sent_as_written_as_linear_does(
+    live_server, method, path, status, body
+):
+    base_url, settings = live_server
+    sent = _TYPENAME if method == "POST" else b""
+    request = raw_request(method, f"/linear{path}", settings.admin_token, body=sent)
+    assert raw_exchange(base_url, request)[::2] == (status, body)

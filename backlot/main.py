@@ -20,7 +20,7 @@ import yaml
 from fastapi import FastAPI, HTTPException, Request, Response
 from fastapi.encoders import jsonable_encoder
 from fastapi.exceptions import RequestValidationError
-from fastapi.responses import JSONResponse, PlainTextResponse
+from fastapi.responses import JSONResponse, PlainTextResponse, StreamingResponse
 from starlette.datastructures import URL, Headers
 from starlette.exceptions import HTTPException as StarletteHTTPException
 from starlette.middleware.base import BaseHTTPMiddleware, DispatchFunction
@@ -43,6 +43,7 @@ from backlot.routers import (
     notion,
     oauth,
     s3,
+    sent_path,
     slack,
 )
 from backlot.telemetry import naming, recorder
@@ -847,6 +848,31 @@ async def serve_a_slashed_hubspot_path_as_the_path_without_it(request: Request, 
     return await call_next(request)
 
 
+_GRAPHQL_ENDPOINTS = ("/linear/graphql", "/fireflies/graphql")
+
+
+def _off_a_graphql_endpoint(scope: Scope) -> bool:
+    path = scope["path"]
+    return path.startswith(("/linear/", "/fireflies/")) and path not in _GRAPHQL_ENDPOINTS
+
+
+@_middleware(_off_a_graphql_endpoint)
+async def route_a_linear_or_fireflies_path_as_its_front_does(request: Request, call_next):
+    """Route a `/linear` or `/fireflies` path but the endpoint's own to the route that answers it as
+    the vendor's front does: a `/linear` path Express hands Apollo Server
+    (``linear.routes_to_apollo``) to ``linear.graphql``, and any other to the vendor's root route
+    (``linear.express``, ``fireflies.unrouted``), each of which reads the path as sent off the raw
+    path, which is left alone. Starlette's own routing is not asked: its pattern for the endpoint
+    takes a path with a newline after it (`/graphql%0A`), and its `path` convertor none with a
+    newline inside it, where each vendor's front reads both as another path."""
+    vendor = request.scope["path"].split("/")[1]
+    served = vendor == "linear" and linear.routes_to_apollo(
+        linear.express_path(sent_path(request.scope))
+    )
+    request.scope["path"] = f"/{vendor}/graphql" if served else f"/{vendor}/"
+    return await call_next(request)
+
+
 def _google_route_match(scope: Scope) -> Match:
     """How the best Google route matches this scope: in full, by its path alone (``PARTIAL``, the
     router's 405), or not at all. Asked of ``backlot.routers.google.router``, which holds the Google
@@ -1318,6 +1344,16 @@ async def warn_slack_post_charset(request: Request, call_next):
     )
 
 
+#: The headers Cloudflare puts beside the `Content-Type` of its answers to a `CONNECT`, a `PURGE`
+#: and a cut escape in front of Linear and Fireflies.
+_CLOUDFLARE_PRIVATE = {
+    "cache-control": "private, max-age=0, no-store, no-cache, must-revalidate, "
+    "post-check=0, pre-check=0",
+    "expires": "Thu, 01 Jan 1970 00:00:01 GMT",
+    "referrer-policy": "same-origin",
+    "x-frame-options": "SAMEORIGIN",
+}
+
 #: Cloudflare's answer to each method it refuses in front of Linear and Fireflies, as
 #: api.linear.app and api.fireflies.ai answered each on `/graphql`, `/graphql/`, `/nosuch` and `/`
 #: on 2026-10-25 (UTC): a page with CRLF line ends, or a line of text, and the headers it puts on
@@ -1334,28 +1370,42 @@ _CLOUDFLARE_METHOD = {
     "CONNECT": (
         400,
         b"error code: 1045\n",
-        {
-            "content-type": "text/plain; charset=UTF-8",
-            "cache-control": "private, max-age=0, no-store, no-cache, must-revalidate, "
-            "post-check=0, pre-check=0",
-            "expires": "Thu, 01 Jan 1970 00:00:01 GMT",
-            "referrer-policy": "same-origin",
-            "x-frame-options": "SAMEORIGIN",
-        },
+        {"content-type": "text/plain; charset=UTF-8", **_CLOUDFLARE_PRIVATE},
     ),
     "PURGE": (
         400,
         request_target.CLOUDFLARE_PAGE,
-        {
-            "content-type": "text/html; charset=UTF-8",
-            "x-frame-options": "SAMEORIGIN",
-            "cache-control": "private, max-age=0, no-store, no-cache, must-revalidate, "
-            "post-check=0, pre-check=0",
-            "expires": "Thu, 01 Jan 1970 00:00:01 GMT",
-            "referrer-policy": "same-origin",
-        },
+        {"content-type": "text/html; charset=UTF-8", **_CLOUDFLARE_PRIVATE},
     ),
 }
+
+
+def _sent(scope: Scope) -> tuple[bytes, bytes | None]:
+    """The vendor's path as sent and the query string, ``None`` where it is empty: the scope does
+    not keep a `?` with nothing after it."""
+    return sent_path(scope).encode("latin-1"), scope["query_string"] or None
+
+
+@_middleware(
+    lambda scope: (
+        _at_or_under(_url_path(scope), ("/linear", "/fireflies"))
+        and request_target.cut_escape(*_sent(scope))
+    )
+)
+async def refuse_a_cut_escape_on_linear_and_fireflies(request: Request, call_next):
+    """Answer a `/linear` or `/fireflies` request whose path the end cuts short in a `%`
+    (``request_target.cut_escape``) with Cloudflare's 400, ahead of the route and the credential
+    and behind :func:`refuse_cloudflares_methods_on_linear_and_fireflies`. api.linear.app and
+    api.fireflies.ai answered so `/a%2`, `/a%`, `/a%0`, `/a%F`, `/%`, `/nosucha%b`, `/a%2b%2`,
+    `/graphql%2` and `/graphql/%2` by `POST`, and `/a%2` by `GET`, `HEAD`, `OPTIONS` and `DELETE`,
+    on 2026-10-29 (UTC), and answered a second request on the connection after it. `TRACE`,
+    `CONNECT` and `PURGE` at `/a%2` drew their own answer, and so did `Authorization` or
+    `If-None-Match` sent twice. Linear's answer came in chunks and Fireflies' with a length."""
+    page = request_target.CLOUDFLARE_PAGE
+    headers = {"content-type": "text/html; charset=UTF-8", **_CLOUDFLARE_PRIVATE}
+    if _url_path(request.scope).startswith("/linear"):
+        return StreamingResponse(iter([page]), status_code=400, headers=headers)
+    return Response(page, status_code=400, headers=headers)
 
 
 @_middleware(
@@ -1427,6 +1477,29 @@ async def refuse_a_repeated_header_on_notion_linear_fireflies_and_hubspot(
     on `POST /nosuch` and `POST /`. Both closed the connection after it (`GET /graphql`,
     2026-10-23). Which headers, on all four vendors, is
     :func:`backlot.auth.repeated_cloudflare_refused_header`'s."""
+    return Response(
+        request_target.CLOUDFLARE_PAGE,
+        status_code=400,
+        headers={"Content-Type": "text/html", "Connection": "close"},
+    )
+
+
+@_middleware(
+    lambda scope: (
+        _at_or_under(_url_path(scope), ("/linear", "/fireflies"))
+        and request_target.refused_path(*_sent(scope))
+    )
+)
+async def refuse_a_path_cloudflare_refuses_on_linear_and_fireflies(request: Request, call_next):
+    """Answer a `/linear` or `/fireflies` request whose path Cloudflare refuses
+    (``request_target.refused_path``) with :data:`backlot.request_target.CLOUDFLARE_PAGE`'s 400,
+    ahead of :func:`refuse_cloudflares_methods_on_linear_and_fireflies`. api.linear.app and
+    api.fireflies.ai answered so `/a%zz` and `/a%00b` by each method of :data:`_CLOUDFLARE_METHOD`,
+    and `/graphql%zz` by `POST`, on 2026-10-25 (UTC), and `/../graphql` by `POST`, `GET` and each
+    method of :data:`_CLOUDFLARE_METHOD`, and `/a%2?x=1`, `/a%2/` and `/a%z` by `POST`, on
+    2026-10-29, and passed `?a=%zz`, `?a=%`, `?a=%2` and `?a=%00` after `/graphql` on to the
+    vendor. Both closed the connection after the 400 (`POST /graphql%zz`, `POST /a%00b`,
+    2026-10-26; `POST /../graphql`, `POST /a%2/`, 2026-10-29)."""
     return Response(
         request_target.CLOUDFLARE_PAGE,
         status_code=400,

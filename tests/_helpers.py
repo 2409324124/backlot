@@ -17,8 +17,10 @@ import importlib
 import json
 import os
 import re
+import socket
 import sys
 import threading
+import urllib.parse
 from pathlib import Path
 
 import pytest
@@ -319,6 +321,60 @@ class WithTheKey(bytes):
         return self
 
 
+def read_answer(reader) -> tuple[int, dict[str, str], bytes] | None:
+    """One answer off ``reader``, by its `Content-Length` or its chunks, or ``None`` where the
+    connection closed ahead of it."""
+    if not (status_line := reader.readline()):
+        return None
+    headers = {}
+    while (line := reader.readline()) not in (b"\r\n", b""):
+        name, _, value = line.decode("latin-1").partition(":")
+        headers[name.strip().lower()] = value.strip()
+    if headers.get("transfer-encoding") == "chunked":
+        body = b""
+        while size := int(reader.readline().split(b";")[0], 16):
+            body += reader.read(size)
+            reader.readline()
+        reader.readline()
+    else:
+        body = reader.read(int(headers.get("content-length", 0)))
+    return int(status_line.split()[1]), headers, body
+
+
+def raw_request(
+    method: str | bytes,
+    target: str | bytes,
+    authorization: str | bytes | None = None,
+    *,
+    times: int = 1,
+    headers: bytes = b"",
+    body: bytes | None = None,
+) -> bytes:
+    """An HTTP/1.1 request for :func:`raw_exchange`: ``target`` as written, `Host: x`, the
+    `Authorization` value ``times`` times, ``headers`` (whole lines), and with a ``body`` its
+    `Content-Type: application/json` and `Content-Length` ahead of it. A `str` is sent as its
+    latin-1 bytes."""
+    method, target, authorization = (
+        v.encode("latin-1") if isinstance(v, str) else v for v in (method, target, authorization)
+    )
+    request = b"%s %s HTTP/1.1\r\nHost: x\r\n" % (method, target)
+    if authorization is not None:
+        request += b"Authorization: %s\r\n" % authorization * times
+    request += headers
+    if body is not None:
+        request += b"Content-Type: application/json\r\nContent-Length: %d\r\n" % len(body)
+    return request + b"\r\n" + (body or b"")
+
+
+def raw_exchange(base_url: str, request: bytes) -> tuple[int, dict[str, str], bytes]:
+    """``request`` written as it is to the server at ``base_url``, and its answer: for a target a
+    client library would resolve, escape or refuse before sending it."""
+    url = urllib.parse.urlsplit(base_url)
+    with socket.create_connection((url.hostname, url.port), timeout=10) as c:
+        c.sendall(request)
+        return read_answer(c.makefile("rb"))
+
+
 def sent_as(client, method: str, path: str, headers, content=None, bare: bool = False):
     """``method`` on ``path`` with each header's latin-1 bytes as sent, ``headers`` a mapping or a
     sequence of pairs, which can name a header twice. The TestClient re-encodes a header's bytes
@@ -355,7 +411,8 @@ class Chunked(bytes):
 
 def http_row(method, target, sent, body, credential, status, media_type, answer, id, answered=None):
     """A row of an HTTP layer's table: the request, the credential, and the answer, ``answered``
-    naming headers on it."""
+    naming headers on it. ``target`` is a path after the vendor's prefix where it starts with a
+    slash, and what follows the endpoint's path where it does not."""
     return pytest.param(
         method, target, sent, body, credential, status, media_type, answer, answered or {}, id=id
     )
